@@ -203,14 +203,28 @@ class EPMoE(torch.nn.Module):
         self.grouped_gemm_runner = None
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        """
+        Forward pass of the EPMoE layer.
+        
+        Args:
+            hidden_states: Input tensor of shape [batch_size, hidden_size]
+            router_logits: Router logits tensor of shape [batch_size, num_experts]
+            
+        Returns:
+            output: Output tensor of shape [batch_size, hidden_size]
+        """
         assert self.quant_method is not None
+        # logger.info(f"EPMoE forward: hidden_states shape={hidden_states.shape}, dtype={hidden_states.dtype}")
+        # logger.info(f"EPMoE forward: router_logits shape={router_logits.shape}, dtype={router_logits.dtype}")
 
         if self.grouped_gemm_runner is None:
             self.grouped_gemm_runner = GroupedGemmRunner(
                 hidden_states.device,
                 use_flashinfer=False,  # TODO: use flashinfer
             )
+            #logger.info(f"Initialized GroupedGemmRunner on device {hidden_states.device}")
 
+        # Select experts based on router logits
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -222,11 +236,15 @@ class EPMoE(torch.nn.Module):
             correction_bias=self.correction_bias,
             custom_routing_function=self.custom_routing_function,
         )
+        #logger.info(f"Selected experts: topk_weights shape={topk_weights.shape}, topk_ids shape={topk_ids.shape}")
 
+        # Preprocess for expert parallel execution
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
+        #logger.info(f"Preprocessed: reorder_topk_ids shape={reorder_topk_ids.shape}, src2dst shape={src2dst.shape}, seg_indptr shape={seg_indptr.shape}")
 
+        # Allocate input tensor for gate and up projections
         gateup_input = torch.empty(
             (int(hidden_states.shape[0] * self.top_k), hidden_states.shape[1]),
             device=hidden_states.device,
@@ -236,6 +254,9 @@ class EPMoE(torch.nn.Module):
                 else hidden_states.dtype
             ),
         )
+        #logger.info(f"Allocated gateup_input: shape={gateup_input.shape}, dtype={gateup_input.dtype}")
+        
+        # Calculate input scale for dynamic quantization if needed
         if self.activation_scheme == "dynamic" and not self.use_block_quant:
             max_value = (
                 torch.max(hidden_states)
@@ -243,8 +264,9 @@ class EPMoE(torch.nn.Module):
                 .to(torch.float32)
             )
             self.w13_input_scale = max_value / torch.finfo(self.fp8_dtype).max
+            #logger.info(f"Calculated dynamic input scale: shape={self.w13_input_scale.shape}, dtype={self.w13_input_scale.dtype}")
 
-        # PreReorder
+        # Pre-reorder input for expert parallel execution
         pre_reorder_triton_kernel[(hidden_states.shape[0],)](
             hidden_states,
             gateup_input,
@@ -257,7 +279,9 @@ class EPMoE(torch.nn.Module):
             hidden_states.shape[1],
             BLOCK_SIZE=512,
         )
+        #logger.info(f"Pre-reordered input for expert parallel execution")
 
+        # Prepare indices for current rank
         seg_indptr_cur_rank = seg_indptr[self.start_expert_id : self.end_expert_id + 2]
         weight_indices_cur_rank = torch.arange(
             0,
@@ -265,13 +289,18 @@ class EPMoE(torch.nn.Module):
             device=hidden_states.device,
             dtype=torch.int64,
         )
-        # GroupGemm-0
+        #logger.info(f"Prepared indices: seg_indptr_cur_rank shape={seg_indptr_cur_rank.shape}, weight_indices_cur_rank shape={weight_indices_cur_rank.shape}")
+        
+        # Allocate output tensor for gate and up projections
         gateup_output = torch.empty(
             gateup_input.shape[0],
             self.w13_weight.shape[1],
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
+        #logger.info(f"Allocated gateup_output: shape={gateup_output.shape}, dtype={gateup_output.dtype}")
+        
+        # First grouped GEMM: gate and up projections
         gateup_output = self.grouped_gemm_runner(
             a=gateup_input,
             b=self.w13_weight,
@@ -289,8 +318,9 @@ class EPMoE(torch.nn.Module):
             ),
             block_shape=self.block_shape,
         )
+        #logger.info(f"Completed first grouped GEMM: gateup_output shape={gateup_output.shape}, dtype={gateup_output.dtype}")
 
-        # Act
+        # Allocate input tensor for down projection
         down_input = torch.empty(
             gateup_output.shape[0],
             gateup_output.shape[1] // 2,
@@ -301,13 +331,18 @@ class EPMoE(torch.nn.Module):
                 else hidden_states.dtype
             ),
         )
+        #logger.info(f"Allocated down_input: shape={down_input.shape}, dtype={down_input.dtype}")
+        
+        # Initialize input scale for down projection if needed
         if self.w2_input_scale is None and not self.use_block_quant:
             self.w2_input_scale = torch.ones(
                 self.num_experts_per_partition,
                 dtype=torch.float32,
                 device=hidden_states.device,
             )
+            #logger.info(f"Initialized w2_input_scale: shape={self.w2_input_scale.shape}, dtype={self.w2_input_scale.dtype}")
 
+        # Apply activation function (SiLU or GELU) and multiply with up projection output
         if self.activation == "silu":
             silu_and_mul_triton_kernel[(gateup_output.shape[0],)](
                 gateup_output,
@@ -319,6 +354,7 @@ class EPMoE(torch.nn.Module):
                 self.end_expert_id,
                 BLOCK_SIZE=512,
             )
+            #logger.info(f"Applied SiLU activation and multiplication")
         elif self.activation == "gelu":
             gelu_and_mul_triton_kernel[(gateup_output.shape[0],)](
                 gateup_output,
@@ -330,16 +366,20 @@ class EPMoE(torch.nn.Module):
                 self.end_expert_id,
                 BLOCK_SIZE=512,
             )
+            #logger.info(f"Applied GELU activation and multiplication")
         else:
             raise ValueError(f"Unsupported activation: {self.activation=}")
 
-        # GroupGemm-1
+        # Allocate output tensor for down projection
         down_output = torch.empty(
             down_input.shape[0],
             self.w2_weight.shape[1],
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
+        #logger.info(f"Allocated down_output: shape={down_output.shape}, dtype={down_output.dtype}")
+        
+        # Second grouped GEMM: down projection
         down_output = self.grouped_gemm_runner(
             a=down_input,
             b=self.w2_weight,
@@ -357,9 +397,13 @@ class EPMoE(torch.nn.Module):
             ),
             block_shape=self.block_shape,
         )
+        #logger.info(f"Completed second grouped GEMM: down_output shape={down_output.shape}, dtype={down_output.dtype}")
 
-        # PostReorder
+        # Allocate output tensor
         output = torch.empty_like(hidden_states)
+        #logger.info(f"Allocated output: shape={output.shape}, dtype={output.dtype}")
+        
+        # Post-reorder output
         post_reorder_triton_kernel[(hidden_states.size(0),)](
             down_output,
             output,
@@ -372,6 +416,8 @@ class EPMoE(torch.nn.Module):
             hidden_states.size(1),
             BLOCK_SIZE=512,
         )
+        #logger.info(f"Post-reordered output: shape={output.shape}, dtype={output.dtype}")
+        
         return output
 
     @classmethod

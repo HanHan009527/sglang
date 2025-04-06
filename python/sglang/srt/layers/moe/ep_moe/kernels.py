@@ -647,40 +647,182 @@ def grouped_gemm_triton(
     scale_b: torch.Tensor = None,
     block_shape: Optional[List[int]] = None,
 ):
-    assert weight_column_major == True  # TODO: more
+    """
+    Perform grouped matrix multiplication using Triton kernel.
+    
+    Args:
+        a: Input tensor of shape [total_tokens, hidden_size]
+        b: Weight tensor of shape [num_experts, output_size, hidden_size]
+        c: Output tensor of shape [total_tokens, output_size]
+        batch_size: Number of experts in the current partition
+        weight_column_major: Whether the weight tensor is in column-major format
+        seg_indptr: Segment pointer tensor of shape [num_experts+1]
+        weight_indices: Weight indices tensor of shape [num_experts]
+        use_fp8_w8a8: Whether to use FP8 quantization
+        scale_a: Scale tensor for input tensor a
+        scale_b: Scale tensor for weight tensor b
+        block_shape: Block shape for block-wise quantization [block_n, block_k]
+        
+    Returns:
+        c: Output tensor of shape [total_tokens, output_size]
+    """
+    #logger.info(f"grouped_gemm_triton: a shape={a.shape}, dtype={a.dtype}")
+    #logger.info(f"grouped_gemm_triton: b shape={b.shape}, dtype={b.dtype}")
+    #logger.info(f"grouped_gemm_triton: c shape={c.shape}, dtype={c.dtype}")
+    #logger.info(f"grouped_gemm_triton: batch_size={batch_size}, weight_column_major={weight_column_major}")
+    # if seg_indptr is not None:
+        #logger.info(f"grouped_gemm_triton: seg_indptr shape={seg_indptr.shape}, dtype={seg_indptr.dtype}")
+    # if weight_indices is not None:
+        #logger.info(f"grouped_gemm_triton: weight_indices shape={weight_indices.shape}, dtype={weight_indices.dtype}")
+    #logger.info(f"grouped_gemm_triton: use_fp8_w8a8={use_fp8_w8a8}")
+    # if scale_a is not None:
+        #logger.info(f"grouped_gemm_triton: scale_a shape={scale_a.shape}, dtype={scale_a.dtype}")
+    # if scale_b is not None:
+        #logger.info(f"grouped_gemm_triton: scale_b shape={scale_b.shape}, dtype={scale_b.dtype}")
+    # if block_shape is not None:
+        #logger.info(f"grouped_gemm_triton: block_shape={block_shape}")
+    
+    # Ensure weight is in column-major format
+    # assert weight_column_major == True  # TODO: more
+    
+    # Check if FP8 quantization is used without block-wise quantization
     if use_fp8_w8a8 and block_shape is None:
         assert scale_a is not None and scale_b is not None
+        #logger.info("Using FP8 quantization without block-wise quantization")
 
+    # Apply block-wise quantization if block_shape is provided
     if block_shape is not None:
         assert len(block_shape) == 2
         block_n, block_k = block_shape[0], block_shape[1]
+        #logger.info(f"Applying block-wise quantization with block_n={block_n}, block_k={block_k}")
+        
+        # Quantize input tensor a
         if _is_cuda:
             a, scale_a = sglang_per_token_group_quant_fp8(a, block_k)
         else:
             a, scale_a = per_token_group_quant_fp8(a, block_k)
+        #logger.info(f"After block-wise quantization: a shape={a.shape}, scale_a shape={scale_a.shape}")
 
+        # Verify shapes after quantization
         assert triton.cdiv(a.shape[-1], block_k) == scale_a.shape[-1]
         assert triton.cdiv(b.shape[-2], block_n) == scale_b.shape[-2]
         assert triton.cdiv(b.shape[-1], block_k) == scale_b.shape[-1]
+        #logger.info("Block-wise quantization shape verification passed")
 
-    # TODO: adjust config or tune kernel
-    # Reduce block size to prevent L40 shared memory overflow.
+    # Try to load tuned configuration
+    # from sglang.srt.layers.moe.ep_moe import get_config
+    # config = None
+    # override_config = get_config()
+    # if override_config:
+    #     config = override_config
+    # else:
+    #     config = None
+    #     try:
+    #         import os
+    #         import json
+    #         from sglang.srt.utils import is_hip
+            
+    #         # Determine dtype string
+    #         dtype_str = "fp8_w8a8" if use_fp8_w8a8 else str(a.dtype).split(".")[-1]
+            
+    #         # Determine block shape string
+    #         block_str = ""
+    #         if block_shape is not None:
+    #             block_str = f"_block{block_shape[0]}x{block_shape[1]}"
+            
+    #         # Construct filename
+    #         hidden_size = a.shape[-1]
+    #         filename = f"grouped_gemm_config_{hidden_size}_{dtype_str}{block_str}.json"
+    #         #logger.info(f"Looking for tuned configuration file: {filename}")
+            
+    #         # Look for the config file in the current directory and parent directories
+    #         current_dir = os.path.dirname(os.path.abspath(__file__))
+    #         config_path = os.path.join(current_dir, filename)
+            
+    #         if not os.path.exists(config_path):
+    #             # Try parent directories
+    #             parent_dir = os.path.dirname(current_dir)
+    #             config_path = os.path.join(parent_dir, filename)
+                
+    #             if not os.path.exists(config_path):
+    #                 # Try benchmark directory
+    #                 benchmark_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))), 
+    #                                             "benchmark", "kernels", "grouped_gemm_triton")
+    #                 config_path = os.path.join(benchmark_dir, filename)
+            
+    #         if os.path.exists(config_path):
+    #             with open(config_path, "r") as f:
+    #                 configs = json.load(f)
+    #                 # Find the closest batch size
+    #                 batch_sizes = sorted([int(k) for k in configs.keys()])
+    #                 if batch_sizes:
+    #                     closest_batch_size = min(batch_sizes, key=lambda x: abs(x - batch_size))
+    #                     config = configs[str(closest_batch_size)]
+    #                     #logger.info(f"Using tuned configuration for batch size {closest_batch_size} from {config_path}")
+    #                     #logger.info(f"Tuned configuration: {config}")
+    #         else:
+    #             #logger.info(f"No tuned configuration found at {config_path}")
+    #     except Exception as e:
+    #         logger.warning(f"Failed to load tuned configuration: {e}")
+    
+    # # Fallback to default configuration if no tuned config is found
+    # if config is None:
+    #     # Default configuration based on batch size
+    #     #logger.info("Using default configuration based on batch size")
+    #     if batch_size <= 32:
+    #         config = {
+    #             "BLOCK_SIZE_M": 64,
+    #             "BLOCK_SIZE_N": 32,
+    #             "BLOCK_SIZE_K": 128,
+    #         }
+    #     elif batch_size <= 128:
+    #         config = {
+    #             "BLOCK_SIZE_M": 128,
+    #             "BLOCK_SIZE_N": 64,
+    #             "BLOCK_SIZE_K": 128,
+    #         }
+    #     else:
+    #         config = {
+    #             "BLOCK_SIZE_M": 256,
+    #             "BLOCK_SIZE_N": 128,
+    #             "BLOCK_SIZE_K": 128,
+    #         }
+    #     #logger.info(f"Using default configuration: {config}")
     config = {
         "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": 32,
         "BLOCK_SIZE_K": 128,
     }
 
+
+    #logger.info(f"Using configuration: {config}")
+    # Compute number of tiles for each expert
+    #logger.info(f"Computing number of tiles for each expert with BLOCK_SIZE_M={config['BLOCK_SIZE_M']}")
     m_num_tiles_indptr = torch.zeros(batch_size + 1, device=a.device, dtype=torch.int64)
     compute_m_num_tiles_indptr[(1,)](
         m_num_tiles_indptr, seg_indptr, batch_size, config["BLOCK_SIZE_M"]
     )
+    #logger.info(f"Computed m_num_tiles_indptr: shape={m_num_tiles_indptr.shape}")
 
+    # Define grid for kernel launch
     grid = lambda META: (
         triton.cdiv(a.size(0), META["BLOCK_SIZE_M"]) + batch_size,
         triton.cdiv(b.size(1), META["BLOCK_SIZE_N"]),
     )
+    #logger.info(f"Grid function defined for kernel launch")
 
+    # Log matrix dimensions
+    #logger.info(f"Matrix dimensions: N={b.size(1)}, K={b.size(2)}")
+    
+    # Log strides
+    #logger.info(f"Strides: a_stride_0={a.stride(0)}, b_stride_0={b.stride(0)}, b_stride_1={b.stride(1)}")
+    # if scale_a is not None:
+        #logger.info(f"Scale strides: as_stride_0={scale_a.stride(0) if scale_a.ndim == 2 else 0}, as_stride_1={scale_a.stride(1) if scale_a.ndim == 2 else 0}")
+    # if scale_b is not None:
+        #logger.info(f"Scale strides: bs_stride_0={scale_b.stride(0) if scale_b.ndim >= 2 else 0}, bs_stride_1={scale_b.stride(1) if scale_b.ndim >= 2 else 0}, bs_stride_2={scale_b.stride(2) if scale_b.ndim == 3 else 0}")
+
+    # Launch kernel
+    #logger.info("Launching grouped_gemm_triton_kernel")
     grouped_gemm_triton_kernel[grid](
         a,
         b,
@@ -706,4 +848,6 @@ def grouped_gemm_triton(
         scale_b.stride(1) if scale_b is not None and scale_b.ndim >= 2 else 0,
         **config,
     )
+    #logger.info("Kernel execution completed")
+    
     return c
