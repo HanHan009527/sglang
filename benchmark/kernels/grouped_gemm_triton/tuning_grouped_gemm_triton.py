@@ -58,7 +58,8 @@ class BenchmarkConfig(TypedDict):
     BLOCK_SIZE_K: int
 
 # Define a set of TOKENS_PER_EXPERT values to tune for
-TOKENS_PER_EXPERT_VALUES = [1, 2, 4, 7, 8, 16, 32, 64 ,128 ,160, 256]
+# TOKENS_PER_EXPERT_VALUES = [1, 2, 4, 7, 8, 16, 32, 64 ,128 ,160, 256]
+TOKENS_PER_EXPERT_VALUES = [ 160]
 
 # ===== Configuration Utilities =====
 
@@ -198,23 +199,29 @@ def prepare_tensors(
         ),
         requires_grad=False,
     )
-    
+    logger.info(f"Created w13_weight tensor a with shape {w13_weight.shape} and dtype {w13_weight.dtype}")
+
     gateup_output = torch.empty(
         gateup_input.shape[0],
         w13_weight.shape[1],
         device="cuda",
         dtype=dtype,
     )
-    
+    logger.info(f"Created gateup_output tensor a with shape {gateup_output.shape} and dtype {gateup_output.dtype}")
+
     # 创建分段指针张量，形状为[batch_size+1]
     tokens_per_expert_segment = total_tokens // num_experts_per_partition
     seg_indptr = torch.zeros(num_experts_per_partition + 1, dtype=torch.int64, device="cuda")
     for i in range(1, num_experts_per_partition + 1):
         seg_indptr[i] = i * tokens_per_expert_segment
     
+    logger.info(f"Created seg_indptr tensor a with shape {seg_indptr.shape} and dtype {seg_indptr.dtype}")
+
+
     # 创建权重索引张量，形状为[batch_size]
     weight_indices = torch.zeros(num_experts_per_partition, dtype=torch.int64, device="cuda")
-    
+    logger.info(f"Created weight_indices tensor a with shape {weight_indices.shape} and dtype {weight_indices.dtype}")
+
     # 创建缩放张量（如果需要）
     scale_a = None
     scale_b = None
@@ -236,7 +243,95 @@ def prepare_tensors(
         scale_a = None
         scale_b = torch.ones(num_experts_per_partition, n_tiles, k_tiles, dtype=torch.float32, device="cuda")
     
+    logger.info(f"Created scale_b tensor a with shape {scale_b.shape} and dtype {scale_b.dtype}")
+
+
     return gateup_input, w13_weight, gateup_output, seg_indptr, weight_indices, scale_a, scale_b
+
+
+def prepare_tensors_down(
+    total_tokens: int,
+    hidden_size: int,
+    num_experts_per_partition: int,
+    intermediate_size: int,
+    dtype: torch.dtype,
+    use_fp8_w8a8: bool,
+    block_shape: Optional[List[int]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Prepare tensors for benchmarking."""
+    # 确定数据类型，与实际代码保持一致
+    if use_fp8_w8a8 and block_shape is None:
+        # 如果使用FP8量化且不是块量化，使用fp8_dtype
+        fp8_dtype = torch.float8_e4m3fn
+        a_dtype = fp8_dtype
+    else:
+        # 否则使用指定的dtype
+        a_dtype = dtype
+    
+    # 创建输入张量a，形状为[total_tokens, hidden_size]
+    gateup_input = torch.rand((total_tokens, intermediate_size), device="cuda", dtype=a_dtype)
+    logger.info(f"Created input tensor a with shape {gateup_input.shape} and dtype {gateup_input.dtype}")
+    
+    # 创建权重张量b，形状为[num_experts_per_partition, 2 * intermediate_size, hidden_size]
+    w13_weight = torch.nn.Parameter(
+        torch.empty(
+            num_experts_per_partition,
+            hidden_size,
+            intermediate_size,
+            dtype=torch.float8_e4m3fn,
+            device="cuda",
+        ),
+        requires_grad=False,
+    )
+    logger.info(f"Created w13_weight tensor a with shape {w13_weight.shape} and dtype {w13_weight.dtype}")
+
+    gateup_output = torch.empty(
+        gateup_input.shape[0],
+        w13_weight.shape[1],
+        device="cuda",
+        dtype=dtype,
+    )
+    logger.info(f"Created gateup_output tensor a with shape {gateup_output.shape} and dtype {gateup_output.dtype}")
+
+    # 创建分段指针张量，形状为[batch_size+1]
+    tokens_per_expert_segment = total_tokens // num_experts_per_partition
+    seg_indptr = torch.zeros(num_experts_per_partition + 1, dtype=torch.int64, device="cuda")
+    for i in range(1, num_experts_per_partition + 1):
+        seg_indptr[i] = i * tokens_per_expert_segment
+    
+    logger.info(f"Created seg_indptr tensor a with shape {seg_indptr.shape} and dtype {seg_indptr.dtype}")
+
+
+    # 创建权重索引张量，形状为[batch_size]
+    weight_indices = torch.zeros(num_experts_per_partition, dtype=torch.int64, device="cuda")
+    logger.info(f"Created weight_indices tensor a with shape {weight_indices.shape} and dtype {weight_indices.dtype}")
+
+    # 创建缩放张量（如果需要）
+    scale_a = None
+    scale_b = None
+    
+    if use_fp8_w8a8 and block_shape is None:
+        # 如果使用FP8量化且不是块量化，创建缩放张量
+        # scale_a 模拟 w13_input_scale，基于输入的最大值计算
+        max_value = torch.max(gateup_input).repeat(num_experts_per_partition).to(torch.float32)
+        scale_a = max_value / torch.finfo(torch.float8_e4m3fn).max
+        
+        # scale_b 模拟 w13_weight_scale，每个专家一个缩放因子
+        scale_b = torch.ones(num_experts_per_partition, dtype=torch.float32, device="cuda")
+    elif block_shape is not None:
+        # 如果使用块量化，创建块缩放张量
+        block_n, block_k = block_shape[0], block_shape[1]
+        n_tiles = (2 * intermediate_size + block_n - 1) // block_n
+        k_tiles = (hidden_size + block_k - 1) // block_k
+        # scale_a = torch.ones(num_experts_per_partition, dtype=torch.float32, device="cuda")
+        scale_a = None
+        scale_b = torch.ones(num_experts_per_partition, n_tiles, k_tiles, dtype=torch.float32, device="cuda")
+    
+    logger.info(f"Created scale_b tensor a with shape {scale_b.shape} and dtype {scale_b.dtype}")
+
+
+    return gateup_input, w13_weight, gateup_output, seg_indptr, weight_indices, scale_a, scale_b
+
 
 
 def benchmark_config(
@@ -268,7 +363,7 @@ def benchmark_config(
     intermediate_size = getattr(model_config, "moe_intermediate_size", hidden_size // 2)
     
     # 准备张量
-    gateup_input, w13_weight, gateup_output, seg_indptr, weight_indices, scale_a, scale_b = prepare_tensors(
+    gateup_input, w13_weight, gateup_output, seg_indptr, weight_indices, scale_a, scale_b = prepare_tensors_down(
         total_tokens=total_tokens,
         hidden_size=hidden_size,
         num_experts_per_partition=num_experts_per_partition,
@@ -556,7 +651,7 @@ def main():
     best_configs = {}
     
     # Initialize Ray once for all tuning
-    ray.init( num_gpus=torch.cuda.device_count())
+    ray.init(local_mode=True, num_gpus=torch.cuda.device_count())
     num_gpus = int(ray.available_resources()["GPU"])
     logger.info(f"Using {num_gpus} GPUs for distributed tuning")
     

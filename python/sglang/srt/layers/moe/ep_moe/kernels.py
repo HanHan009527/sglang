@@ -788,11 +788,39 @@ def grouped_gemm_triton(
     #             "BLOCK_SIZE_K": 128,
     #         }
     #     #logger.info(f"Using default configuration: {config}")
-    config = {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 32,
-        "BLOCK_SIZE_K": 128,
-    }
+    a0, a1 = a.shape[0], a.shape[1]
+    if a1 == 7168:
+        if a0 <= 8:
+            config = {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64,
+            }
+        elif a0 <= 1024:
+            config = {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 256,
+            }
+        elif a0 <= 128:
+            config = {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 256,
+            }
+        else:
+            config = {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+            }
+    else:
+        config = {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 128,
+        }
+  
 
 
     #logger.info(f"Using configuration: {config}")
