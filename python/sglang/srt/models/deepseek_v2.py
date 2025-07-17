@@ -1243,6 +1243,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         Returns:
             torch.Tensor: 注意力计算的输出。
         """
+        # kernel
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
@@ -1288,6 +1289,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 positions, hidden_states, forward_batch, zero_allocator
             )
         elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
+            # kernel deep_gemm::fp8_gemm_kernel
             inner_state = self.forward_normal_chunked_kv_prepare(
                 positions, hidden_states, forward_batch, zero_allocator
             )
@@ -2142,7 +2144,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        return hidden_states, residual
+        return hidden_states, residualss
 
     def op_comm_prepare_attn(
         self,

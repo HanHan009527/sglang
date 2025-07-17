@@ -416,11 +416,37 @@ class ModelConfigForExpertLocation:
 def compute_initial_expert_location_metadata(
     server_args: ServerArgs, model_config: ModelConfig
 ) -> ExpertLocationMetadata:
+    """
+    根据服务配置计算并初始化专家位置元数据。
+
+    这个函数作为 `ExpertLocationMetadata` 的工厂函数，根据 `server_args.init_expert_location`
+    字段指定的策略来创建元数据。它支持多种初始化方法：
+
+    1.  **"trivial"**: 创建一个简单的、一一对应的专家映射。适用于每个逻辑专家都直接映射到
+        一个物理专家的场景。
+    2.  **基于映射文件/字符串**: 从一个文件（.pt 或 .json）或 JSON 字符串中加载预定义的
+        `physical_to_logical_map`。这允许用户提供一个精确的物理专家到逻辑专家的映射关系。
+    3.  **基于 EPLB (Expert Placement via Load Balancing)**: 从一个包含 `logical_count`
+        的文件/字符串中初始化。这通常用于需要根据专家使用频率或负载来动态分配专家的场景。
+
+    Args:
+        server_args (ServerArgs): 包含服务启动参数的对象，特别是 `init_expert_location`
+                                  字段，它决定了初始化的方式。
+        model_config (ModelConfig): 包含模型配置信息的对象，如层数、专家数等。
+
+    Returns:
+        ExpertLocationMetadata: 初始化完成的专家位置元数据对象。
+
+    Raises:
+        NotImplementedError: 如果 `init_expert_location` 指定的格式未知或不受支持。
+    """
     data = server_args.init_expert_location
     if data == "trivial":
+        # 使用简单的一一对应映射进行初始化
         return ExpertLocationMetadata.init_trivial(server_args, model_config)
 
-    # TODO unify with the utils function
+    # 从文件或 JSON 字符串加载专家位置数据
+    # TODO: 与工具函数统一加载逻辑
     if data.endswith(".pt"):
         data_dict = torch.load(data, weights_only=True)
     elif data.endswith(".json"):
@@ -429,20 +455,23 @@ def compute_initial_expert_location_metadata(
         data_dict = json.loads(data)
 
     if "physical_to_logical_map" in data_dict:
+        # 根据预定义的物理到逻辑映射进行初始化
         logger.info(
-            "init_expert_location from init_by_mapping using ServerArgs.init_expert_location"
+            "使用 ServerArgs.init_expert_location 从映射初始化专家位置"
         )
         return ExpertLocationMetadata.init_by_mapping(
             server_args, model_config, **data_dict
         )
     elif "logical_count" in data_dict:
+        # 根据 EPLB 的逻辑计数进行初始化
         logger.info(
-            "init_expert_location from init_by_eplb using ServerArgs.init_expert_location"
+            "使用 ServerArgs.init_expert_location 从 EPLB 初始化专家位置"
         )
         return ExpertLocationMetadata.init_by_eplb(
             server_args, model_config, logical_count=data_dict["logical_count"]
         )
     else:
+        # 如果格式未知，则抛出错误
         raise NotImplementedError(
-            f"Unknown init_expert_location format ({list(data_dict.keys())=})"
+            f"未知的 init_expert_location 格式 ({list(data_dict.keys())=})"
         )
