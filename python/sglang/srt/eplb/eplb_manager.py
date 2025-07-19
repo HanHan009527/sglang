@@ -65,7 +65,7 @@ class EPLBManager:
             self._server_args, self._model_runner.model_config, logical_count
         )
         logger.info(
-            f"[EPLBManager] expert_location_metadata: {expert_location_metadata.metadata_dict}"
+            f"[EPLBManager] expert_location_metadata: {expert_location_metadata}"
         )
 
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
