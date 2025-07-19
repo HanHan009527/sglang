@@ -2700,7 +2700,20 @@ class DeepseekV2ForCausalLM(nn.Module):
                     )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
+        """
+        从检查点（checkpoint）加载模型权重。
 
+        这个函数负责将预训练的权重张量加载到当前的模型实例中。它处理了多种复杂情况，
+        包括权重的分片（sharding）、参数的堆叠或融合、MoE（Mixture-of-Experts）中专家的权重加载，
+        以及一种特殊的 "nextn" 预测层。
+
+        Args:
+            weights (Iterable[Tuple[str, torch.Tensor]]):
+                一个可迭代对象，每个元素是一个元组，包含权重名称（字符串）和对应的权重张量。
+            is_nextn (bool, optional):
+                一个布尔标志。如果为 True，则只加载用于 "next token prediction" 的特殊层的权重。
+                默认为 False，表示进行标准的权重加载。
+        """
         if is_nextn:
             if hasattr(self.config, "num_nextn_predict_layers"):
                 num_nextn_layers = self.config.num_nextn_predict_layers
@@ -2714,34 +2727,40 @@ class DeepseekV2ForCausalLM(nn.Module):
             else:
                 raise ValueError("num_nextn_predict_layers is not in the config")
 
+        # stacked_params_mapping 定义了如何将检查点中的多个权重合并（堆叠）成模型中的单个参数。
+        # 例如，将 "gate_proj" 和 "up_proj" 权重堆叠成一个 "gate_up_proj" 参数。
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+
+        # expert_params_mapping 定义了 MoE 专家权重的映射关系。
+        # 它会根据 MoE 的实现类动态生成映射，包括常规权重和量化所需的缩放因子。
         expert_params_mapping = get_moe_impl_class().make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts + self.num_fused_shared_experts,
         )
+        # 如果使用了 w4afp8 量化，则额外添加专家输入缩放因子的映射。
         if self.quant_config and self.quant_config.get_name() == "w4afp8":
             expert_params_mapping += (
                 get_moe_impl_class().make_expert_input_scale_params_mapping(
                     num_experts=self.config.n_routed_experts
                 )
             )
-
         # Fuse q_a_proj and kv_a_proj_with_mqa along output dimension when q_lora_rank is not None
+        # fuse_qkv_a_proj 标志位，用于判断是否需要融合 LoRA 相关的 QKV 投影权重。
         fuse_qkv_a_proj = hasattr(self.config, "q_lora_rank") and (
             self.config.q_lora_rank is not None
         )
         cached_a_proj = {} if fuse_qkv_a_proj else None
 
         if is_nextn:
+            # "nextn" 层的权重名称前缀和特殊权重名称列表。
             nextn_layer_prefix = f"model.layers.{nextn_layer_id}"
             nextn_spec_weight_names = [
                 "shared_head.norm",
@@ -2750,15 +2769,19 @@ class DeepseekV2ForCausalLM(nn.Module):
                 "hnorm",
             ]
 
+        # 如果启用了共享专家融合，打印日志信息。
         if self.num_fused_shared_experts > 0:
             assert self.num_fused_shared_experts == 1
             log_info_on_rank0(logger, "Shared experts fusion optimization enabled.")
 
+        # 使用线程池来并行化权重的加载过程，以提高效率。
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
             params_dict = dict(self.named_parameters())
             weight_names = []
             for name, loaded_weight in weights:
+                # 如果启用了共享专家融合，将 "mlp.shared_experts" 重命名为 "mlp.experts.{expert_id}"
+                # 这是实现融合的关键步骤，使其在加载时看起来像一个普通的路由专家。
                 if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
                     name = name.replace(
                         "mlp.shared_experts",
@@ -2768,6 +2791,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 weight_names.append(name)
 
                 if not is_nextn:
+                    # 标准加载模式：跳过所有属于 "nextn" 层的权重。
                     if hasattr(self.config, "num_nextn_predict_layers"):
                         num_nextn_layers = self.config.num_nextn_predict_layers
                         if num_nextn_layers > 0 and name.startswith("model.layers"):
@@ -2778,40 +2802,48 @@ class DeepseekV2ForCausalLM(nn.Module):
                             ):
                                 continue
                 else:
+                    # "nextn" 加载模式：只处理 "nextn" 层的权重。
                     if not name.startswith(nextn_layer_prefix):
                         continue
 
-                    # Use shared head and embed weights from target model
+                    # 从目标模型复用 shared_head 和 embed_tokens 权重，因此在此处跳过。
                     if "shared_head.head" in name or "embed_tokens" in name:
                         continue
 
                     is_decoder = True
-                    # For nextn specific weights
+                    # 对 "nextn" 特有的权重进行名称重映射。
                     for weight_name in nextn_spec_weight_names:
                         if weight_name in name:
                             name = name.replace(nextn_layer_prefix, "model")
                             is_decoder = False
                             break
-                    # For decoder layer weights
+                    # 对 "nextn" 层中的解码器层权重进行名称重映射。
                     if is_decoder:
                         name = name.replace(nextn_layer_prefix, "model.decoder")
 
+                # rotary_emb.inv_freq 通常是动态计算的，不需要从检查点加载。
                 if "rotary_emb.inv_freq" in name:
                     continue
+                # 1. 尝试匹配并处理堆叠参数
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     # Skip non-stacked layers and experts (experts handled below).
+                    # 跳过非堆叠层和专家（专家在下面单独处理）。
                     if weight_name not in name:
                         continue
-                    # We have mlp.experts[0].gate_proj in the checkpoint.
+                                # We have mlp.experts[0].gate_proj in the checkpoint.
                     # Since we handle the experts below in expert_params_mapping,
                     # we need to skip here BEFORE we update the name, otherwise
                     # name will be updated to mlp.experts[0].gate_up_proj, which
                     # will then be updated below in expert_params_mapping
                     # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+
+                    # MoE专家的权重（例如 mlp.experts[0].gate_proj）在下面由 expert_params_mapping 处理，
+                    # 这里必须跳过，否则名称会被错误地替换（例如，变成 mlp.experts[0].gate_up_proj），
+                    # 导致后续专家映射逻辑出错。
                     if ("mlp.experts." in name) and name not in params_dict:
                         continue
                     name = name.replace(weight_name, param_name)
-                    # Skip loading extra bias for GPTQ models.
+                    # 跳过 GPTQ 等量化模型中多余的、不存在于模型参数字典中的 bias。
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     param = params_dict[name]
@@ -2821,6 +2853,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     )
                     break
                 else:
+                    # 2. 尝试匹配并处理 MoE 专家参数
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in name:
@@ -2840,7 +2873,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                         )
                         break
                     else:
-                        # Skip loading extra bias for GPTQ models.
+                        # 3. 处理其他所有参数（包括 LoRA 融合和普通参数）
                         if name.endswith(".bias") and name not in params_dict:
                             continue
                         if fuse_qkv_a_proj and (
@@ -2858,7 +2891,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                                 else name.replace("q_a_proj", "kv_a_proj_with_mqa")
                             )
 
-                            # When both q_a_proj and kv_a_proj_with_mqa has been cached, load the fused weight to parameter
+                                                       # When both q_a_proj and kv_a_proj_with_mqa has been cached, load the fused weight to parameter
+                            # 当 q_a_proj 和 kv_a_proj_with_mqa 都被缓存后，执行融合并加载。
                             if (
                                 q_a_proj_name in cached_a_proj
                                 and kv_a_proj_name in cached_a_proj

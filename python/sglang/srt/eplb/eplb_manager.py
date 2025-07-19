@@ -64,6 +64,9 @@ class EPLBManager:
         expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
             self._server_args, self._model_runner.model_config, logical_count
         )
+        logger.info(
+            f"[EPLBManager] expert_location_metadata: {expert_location_metadata.metadata_dict}"
+        )
 
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
         for chunk_index, update_layer_ids in enumerate(update_layer_ids_chunks):
