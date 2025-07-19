@@ -2144,7 +2144,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, residual, forward_batch
             )
 
-        return hidden_states, residualss
+        return hidden_states, residual
 
     def op_comm_prepare_attn(
         self,
