@@ -72,10 +72,6 @@ class EPLBManager:
 
         # Export the object to disk, with one file per GPU (rank)
         try:
-            import os
-            import json
-            import torch.distributed
-
             output_dir = "/tmp/expert_location_metadata"
             os.makedirs(output_dir, exist_ok=True)
 
