@@ -1,12 +1,12 @@
-import argparse
+import sys
 import os
-from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args import prepare_server_args
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.eplb.expert_location import ExpertLocationMetadata
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-def worker(rank, world_size, args):
+def worker(rank, world_size, server_args):
     """The worker function for each process."""
     # Set environment variables for distributed training
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -15,11 +15,10 @@ def worker(rank, world_size, args):
     # Initialize the process group
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
-    server_args = ServerArgs.from_cli_args(args)
     model_config = ModelConfig.from_server_args(server_args)
 
     expert_location = ExpertLocationMetadata.init_trivial(server_args, model_config)
-    
+
     print(f"--- Rank {rank} Result ---")
     print(expert_location)
     print("-" * 20)
@@ -28,16 +27,11 @@ def worker(rank, world_size, args):
     dist.destroy_process_group()
 
 def main():
-    parser = argparse.ArgumentParser()
-    ServerArgs.add_cli_args(parser)
-    args = parser.parse_args()
-
-    # When using expert parallelism for MoE, ep_size is derived from tp_size.
-    world_size = args.tp_size
-    args.ep_size = world_size
+    server_args = prepare_server_args(sys.argv[1:])
+    world_size = server_args.ep_size
 
     mp.spawn(worker,
-             args=(world_size, args),
+             args=(world_size, server_args),
              nprocs=world_size,
              join=True)
 
