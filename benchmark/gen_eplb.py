@@ -33,11 +33,8 @@ def main():
     args = parser.parse_args()
 
     # When using expert parallelism for MoE, ep_size is derived from tp_size.
-    if args.enable_ep_moe:
-        world_size = args.tp_size
-        args.ep_size = world_size
-    else:
-        world_size = args.ep_size
+    world_size = args.tp_size
+    args.ep_size = world_size
 
     mp.spawn(worker,
              args=(world_size, args),
