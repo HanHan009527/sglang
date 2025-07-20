@@ -32,14 +32,12 @@ def main():
     ServerArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    # Determine the world size for multiprocessing.
-    # Use ep_size if provided, otherwise fall back to tp_size,
-    # as they are often the same for MoE models.
-    if hasattr(args, "ep_size") and args.ep_size is not None:
-        world_size = args.ep_size
-    else:
+    # When using expert parallelism for MoE, ep_size is derived from tp_size.
+    if args.enable_ep_moe:
         world_size = args.tp_size
         args.ep_size = world_size
+    else:
+        world_size = args.ep_size
 
     mp.spawn(worker,
              args=(world_size, args),
