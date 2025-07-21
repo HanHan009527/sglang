@@ -73,6 +73,20 @@ class TestDeepseekV3(CustomTestCase):
                 self.assertGreater(speed, 75)
 
 
+class TestDeepseekV3Small(TestDeepseekV3):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = "chwan/DeepSeek-V3-5layer"
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        other_args = ["--trust-remote-code", "--tp", "8", "--enable-deepep-moe", "--deepep-mode", "low_latency"]
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=other_args,
+        )
+
+
 class TestDeepseekV3MTP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
