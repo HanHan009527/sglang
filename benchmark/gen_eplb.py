@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 from sglang.srt.server_args import prepare_server_args
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.eplb.expert_location import ExpertLocationMetadata
@@ -22,6 +23,31 @@ def worker(rank, world_size, server_args):
     print(f"--- Rank {rank} Result ---")
     print(expert_location)
     print("-" * 20)
+
+    # Export the object to disk
+    output_dir = "/tmp/expert_location_metadata"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"expert_metadata_rank_{rank}.json")
+    data_to_save = {
+        "physical_to_logical_map": expert_location.physical_to_logical_map.cpu()
+        .numpy()
+        .tolist(),
+        "logical_to_all_physical_map": expert_location.logical_to_all_physical_map.cpu()
+        .numpy()
+        .tolist(),
+        "logical_to_all_physical_map_num_valid": expert_location.logical_to_all_physical_map_num_valid.cpu()
+        .numpy()
+        .tolist(),
+    }
+    if expert_location.logical_to_rank_dispatch_physical_map is not None:
+        data_to_save[
+            "logical_to_rank_dispatch_physical_map"
+        ] = expert_location.logical_to_rank_dispatch_physical_map.cpu().numpy().tolist()
+
+    with open(file_path, "w") as f:
+        json.dump(data_to_save, f, indent=4)
+    
+    print(f"Saved expert location metadata for rank {rank} to {file_path}")
 
     # Clean up the process group
     dist.destroy_process_group()
