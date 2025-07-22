@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, List
 
 import torch
 import torch.distributed
-import torch
 
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ExpertLocationMetadata
@@ -68,7 +67,9 @@ class EPLBManager:
         expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
             self._server_args, self._model_runner.model_config, logical_count
         )
-        logger.info(f"[EPLBManager] New expert_location_metadata: {expert_location_metadata}")
+        logger.info(
+            f"[EPLBManager] New expert_location_metadata: {expert_location_metadata}"
+        )
 
         # Export the object to disk, with one file per GPU (rank)
         try:
@@ -93,9 +94,11 @@ class EPLBManager:
                 expert_location_metadata.logical_to_rank_dispatch_physical_map
                 is not None
             ):
-                data_to_save[
-                    "logical_to_rank_dispatch_physical_map"
-                ] = expert_location_metadata.logical_to_rank_dispatch_physical_map.cpu().numpy().tolist()
+                data_to_save["logical_to_rank_dispatch_physical_map"] = (
+                    expert_location_metadata.logical_to_rank_dispatch_physical_map.cpu()
+                    .numpy()
+                    .tolist()
+                )
 
             with open(file_path, "w") as f:
                 json.dump(data_to_save, f, indent=4)
@@ -104,9 +107,13 @@ class EPLBManager:
                 f"[EPLBManager] Saved expert location metadata for rank {rank} to {file_path}"
             )
         except ImportError as e:
-            logger.warning(f"[EPLBManager] Could not save expert metadata, import error: {e}")
+            logger.warning(
+                f"[EPLBManager] Could not save expert metadata, import error: {e}"
+            )
         except Exception as e:
-            logger.error(f"[EPLBManager] Error saving expert metadata: {e}", exc_info=True)
+            logger.error(
+                f"[EPLBManager] Error saving expert metadata: {e}", exc_info=True
+            )
 
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
         for chunk_index, update_layer_ids in enumerate(update_layer_ids_chunks):

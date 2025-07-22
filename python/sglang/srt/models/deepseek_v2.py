@@ -215,10 +215,7 @@ class DeepseekV2MLP(nn.Module):
             tp_size=tp_size,
         )
         if hidden_act != "silu":
-            raise ValueError(
-                f"不支持的激活函数: {hidden_act}. "
-                "目前仅支持 silu。"
-            )
+            raise ValueError(f"不支持的激活函数: {hidden_act}. " "目前仅支持 silu。")
         self.act_fn = SiluAndMul()
 
     def forward(self, x, forward_batch=None, can_fuse_mlp_allreduce=False):
@@ -337,8 +334,7 @@ class DeepseekV2MoE(nn.Module):
 
         if config.hidden_act != "silu":
             raise ValueError(
-                f"不支持的激活函数: {config.hidden_act}. "
-                "目前仅支持 silu。"
+                f"不支持的激活函数: {config.hidden_act}. " "目前仅支持 silu。"
             )
 
         # 初始化门控机制
@@ -1140,6 +1136,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         Returns:
             AttnForwardMethod: 要使用的注意力前向传播方法。
         """
+
         def _dispatch_mla_subtype():
             if _is_hip:
                 if (
@@ -1277,9 +1274,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mha.kv_b_proj = self.kv_b_proj
 
         if hidden_states.shape[0] == 0:
-            assert (
-                not self.o_proj.reduce_results
-            ), "短路 allreduce 会导致挂起"
+            assert not self.o_proj.reduce_results, "短路 allreduce 会导致挂起"
             return hidden_states, None, forward_batch, None
 
         attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
@@ -1981,7 +1976,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.speculative_algorithm = global_server_args_dict["speculative_algorithm"]
         self.layer_id = layer_id
         self.is_nextn = is_nextn
-        
+
         # 初始化自注意力模块
         self.self_attn = DeepseekV2AttentionMLA(
             config=config,
@@ -2230,6 +2225,7 @@ class DeepseekV2Model(nn.Module):
         quant_config (Optional[QuantizationConfig]): 量化配置。
         prefix (str): 模型参数的前缀。
     """
+
     fall_back_to_pt_during_load = False
 
     def __init__(
@@ -2288,7 +2284,7 @@ class DeepseekV2Model(nn.Module):
         # 获取总层数和设备信息
         total_num_layers = len(self.layers)
         device = input_embeds.device if input_embeds is not None else input_ids.device
-        
+
         # 初始化一个 BumpAllocator 用于零内存分配
         zero_allocator = BumpAllocator(
             buffer_size=total_num_layers * 2 * (2 if forward_batch.can_run_tbo else 1),
@@ -2313,7 +2309,7 @@ class DeepseekV2Model(nn.Module):
             if forward_batch.can_run_tbo
             else total_num_layers
         )
-        
+
         # 依次通过普通解码器层
         for i in range(normal_num_layers):
             with get_global_expert_distribution_recorder().with_current_layer(i):
@@ -2830,7 +2826,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     # 跳过非堆叠层和专家（专家在下面单独处理）。
                     if weight_name not in name:
                         continue
-                                # We have mlp.experts[0].gate_proj in the checkpoint.
+                        # We have mlp.experts[0].gate_proj in the checkpoint.
                     # Since we handle the experts below in expert_params_mapping,
                     # we need to skip here BEFORE we update the name, otherwise
                     # name will be updated to mlp.experts[0].gate_up_proj, which
@@ -2891,7 +2887,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                                 else name.replace("q_a_proj", "kv_a_proj_with_mqa")
                             )
 
-                                                       # When both q_a_proj and kv_a_proj_with_mqa has been cached, load the fused weight to parameter
+                            # When both q_a_proj and kv_a_proj_with_mqa has been cached, load the fused weight to parameter
                             # 当 q_a_proj 和 kv_a_proj_with_mqa 都被缓存后，执行融合并加载。
                             if (
                                 q_a_proj_name in cached_a_proj

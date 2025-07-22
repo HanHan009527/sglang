@@ -38,7 +38,7 @@ class ExpertLocationUpdater:
     负责在分布式环境中根据负载均衡策略，物理上迁移专家模型权重。
 
     在混合专家（MoE）模型的动态负载均衡中，当负载均衡器（如 `ExpertDistributionManager`）
-    计算出一个更优的专家布局（即 `ExpertLocationMetadata`）后，`ExpertLocationUpdater` 
+    计算出一个更优的专家布局（即 `ExpertLocationMetadata`）后，`ExpertLocationUpdater`
     就负责执行这个布局。它通过在不同的计算设备（GPU）之间移动实际的专家权重张量，
     来完成物理上的重新部署。
 
@@ -52,7 +52,7 @@ class ExpertLocationUpdater:
     2.  **计算迁移计划**: 通过比较旧的专家位置和新的专家位置，该更新器确定哪些专家权重需要
         从哪个源GPU移动到哪个目标GPU。
 
-    3.  **执行权重迁移**: 
+    3.  **执行权重迁移**:
         -   核心迁移逻辑在 `_update_expert_weights_raw` 和 `update_expert_weights_single_layer` 中实现。
         -   它使用 `torch.distributed` 的点对点（P2P）通信操作（如 `isend` 和 `irecv`）来高效地在
             GPU之间传输张量数据。
@@ -67,6 +67,7 @@ class ExpertLocationUpdater:
         (`get_global_expert_location_metadata()`)，使其反映出新的专家布局。
         这样，后续的模型前向传播就会将计算任务路由到专家的新位置。
     """
+
     def __init__(self):
         self._first_execution = True
 

@@ -1,13 +1,19 @@
-import sys
-import os
 import json
+import os
+import sys
 from dataclasses import dataclass
+
 import torch
-from sglang.srt.server_args import prepare_server_args
-from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.eplb.expert_location import ExpertLocationMetadata, ModelConfigForExpertLocation
 import torch.distributed as dist
 import torch.multiprocessing as mp
+
+from sglang.srt.configs.model_config import ModelConfig
+from sglang.srt.eplb.expert_location import (
+    ExpertLocationMetadata,
+    ModelConfigForExpertLocation,
+)
+from sglang.srt.server_args import prepare_server_args
+
 
 def save_expert_location(expert_location, rank, output_dir):
     """Saves the expert location metadata to a JSON file."""
@@ -25,9 +31,7 @@ def save_expert_location(expert_location, rank, output_dir):
         .tolist(),
     }
     if expert_location.logical_to_rank_dispatch_physical_map is not None:
-        data_to_save[
-            "logical_to_rank_dispatch_physical_map"
-        ] = (
+        data_to_save["logical_to_rank_dispatch_physical_map"] = (
             expert_location.logical_to_rank_dispatch_physical_map.cpu().numpy().tolist()
         )
 
@@ -65,8 +69,9 @@ def worker(rank, world_size, server_args, fault_tolerant):
         num_layers = model_config_for_expert_location.num_layers
         num_logical_experts = model_config_for_expert_location.num_logical_experts
 
-
-        model_config_for_expert_location = ModelConfigForExpertLocation.from_model_config(model_config)
+        model_config_for_expert_location = (
+            ModelConfigForExpertLocation.from_model_config(model_config)
+        )
         num_logical_experts = model_config_for_expert_location.num_logical_experts
         # Assuming all layers have experts for distribution purposes.
         # The mapping will be the same for all layers with MoE.
@@ -97,7 +102,9 @@ def worker(rank, world_size, server_args, fault_tolerant):
 
         # Create global maps (same for all ranks)
         logical_to_all_physical_map = torch.full(
-            (num_layers_with_experts, num_logical_experts, max_replicas), -1, dtype=torch.int32
+            (num_layers_with_experts, num_logical_experts, max_replicas),
+            -1,
+            dtype=torch.int32,
         )
         logical_to_all_physical_map_num_valid = torch.zeros(
             (num_layers_with_experts, num_logical_experts), dtype=torch.int32
@@ -116,7 +123,9 @@ def worker(rank, world_size, server_args, fault_tolerant):
 
             if rank1 != rank2:
                 # Get global physical index for replica on rank2
-                phys_slot_idx_on_rank2 = physical_slots_on_ranks[rank2].index(logical_idx)
+                phys_slot_idx_on_rank2 = physical_slots_on_ranks[rank2].index(
+                    logical_idx
+                )
                 global_phys_idx2 = rank_offsets[rank2] + phys_slot_idx_on_rank2
                 logical_to_all_physical_map[:, logical_idx, 1] = global_phys_idx2
                 logical_to_all_physical_map_num_valid[:, logical_idx] = 2
@@ -169,7 +178,12 @@ def main():
     server_args = prepare_server_args(sys.argv[1:])
     world_size = server_args.ep_size
 
-    mp.spawn(worker, args=(world_size, server_args, fault_tolerant), nprocs=world_size, join=True)
+    mp.spawn(
+        worker,
+        args=(world_size, server_args, fault_tolerant),
+        nprocs=world_size,
+        join=True,
+    )
 
 
 if __name__ == "__main__":
