@@ -78,7 +78,14 @@ class TestDeepseekV3Small(TestDeepseekV3):
     def setUpClass(cls):
         cls.model = "chwan/DeepSeek-V3-5layer"
         cls.base_url = DEFAULT_URL_FOR_TEST
-        other_args = ["--trust-remote-code", "--tp", "8", "--enable-deepep-moe", "--deepep-mode", "low_latency"]
+        other_args = [
+            "--trust-remote-code",
+            "--tp", "8",
+            "--enable-deepep-moe",
+            "--deepep-mode", "low_latency",
+            "--max-prefill-tokens", "128",
+            "--mem-fraction-static", "0.5",
+        ]
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
