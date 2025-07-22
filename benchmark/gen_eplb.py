@@ -59,6 +59,13 @@ def worker(rank, world_size, server_args, fault_tolerant):
             logical_to_rank_dispatch_physical_map: torch.Tensor
             num_physical_experts: int
 
+        common = ExpertLocationMetadata._init_common(server_args, model_config)
+        num_physical_experts = common["num_physical_experts"]
+        model_config_for_expert_location = common["model_config_for_expert_location"]
+        num_layers = model_config_for_expert_location.num_layers
+        num_logical_experts = model_config_for_expert_location.num_logical_experts
+
+
         model_config_for_expert_location = ModelConfigForExpertLocation.from_model_config(model_config)
         num_logical_experts = model_config_for_expert_location.num_logical_experts
         # Assuming all layers have experts for distribution purposes.

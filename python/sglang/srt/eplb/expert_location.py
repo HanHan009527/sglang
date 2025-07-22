@@ -207,15 +207,23 @@ class ExpertLocationMetadata:
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
             logical_to_all_physical_map=logical_to_all_physical_map_padded,
             logical_to_all_physical_map_num_valid=logical_to_all_physical_map_num_valid,
-            logical_to_rank_dispatch_physical_map=(
-                compute_logical_to_rank_dispatch_physical_map(
+            logical_to_rank_dispatch_physical_map=compute_logical_to_rank_dispatch_physical_map(
+                logical_to_all_physical_map=logical_to_all_physical_map,
+                num_gpus=ep_size,
+                num_physical_experts=num_physical_experts,
+                # TODO improve when we have real EP rank
+                ep_rank=torch.distributed.get_rank() % ep_size,
+            )
+            if server_args.ep_dispatch_algorithm == "static"
+            else (
+                compute_logical_to_rank_dispatch_physical_map_remote_first(
                     logical_to_all_physical_map=logical_to_all_physical_map,
                     num_gpus=ep_size,
                     num_physical_experts=num_physical_experts,
                     # TODO improve when we have real EP rank
                     ep_rank=torch.distributed.get_rank() % ep_size,
                 )
-                if server_args.ep_dispatch_algorithm == "static"
+                if server_args.ep_dispatch_algorithm == "static_remote_first"
                 else None
             ),
         )
@@ -313,6 +321,93 @@ def _pad_nested_array(arr, pad_value):
     ]
     return padded
 
+def compute_logical_to_rank_dispatch_physical_map_remote_first(
+    logical_to_all_physical_map: torch.Tensor,
+    num_gpus: int,
+    num_physical_experts: int,
+    ep_rank: int,
+    seed: int = 42,
+):
+    """Computes a static dispatch map from logical to physical experts, prioritizing remote experts.
+
+    This function creates a dispatch map where each (GPU, logical expert) pair is assigned a
+    specific physical expert. The key difference from the default implementation is its preference
+    for assigning tasks to experts on different GPUs (remote experts) to potentially improve
+    workload distribution across the system, falling back to local experts only when no remote
+    options are available.
+
+    1.  **Remote-First Assignment**: For each GPU, it identifies all available physical experts
+        located on other GPUs. If such experts exist, it selects one with the lowest current
+        load to handle the request.
+    2.  **Load Balancing**: It maintains a load counter for each physical expert to ensure that
+        requests are distributed as evenly as possible among the available candidates.
+    3.  **Local Fallback**: If a logical expert has no physical replicas on other GPUs, the
+        algorithm will assign a local expert (from the same GPU) instead.
+    4.  **Deterministic Tie-Breaking**: The process is made deterministic by using a fixed seed.
+        When multiple experts have the same load, shuffling the candidates before selection
+        ensures fair tie-breaking.
+
+    Args:
+        logical_to_all_physical_map (torch.Tensor): A 3D tensor mapping each logical expert
+            to its physical replicas. Shape: `(num_layers, num_logical_experts, num_replicas)`.
+        num_gpus (int): The total number of GPUs in the expert parallel group.
+        num_physical_experts (int): The total number of physical experts.
+        ep_rank (int): The rank of the current process within the expert parallel group.
+        seed (int): A seed for the random number generator to ensure deterministic behavior.
+
+    Returns:
+        torch.Tensor: A 2D tensor for the current `ep_rank` that maps each logical expert
+                      to a physical expert. Shape: `(num_layers, num_logical_experts)`.
+    """
+    r = random.Random(seed)
+
+    num_local_physical_experts = num_physical_experts // num_gpus
+    num_layers, num_logical_experts, _ = logical_to_all_physical_map.shape
+    dtype = logical_to_all_physical_map.dtype
+
+    logical_to_rank_dispatch_physical_map = torch.full(
+        size=(num_gpus, num_layers, num_logical_experts),
+        fill_value=-1,
+        dtype=dtype,
+    )
+
+    for layer_id in range(num_layers):
+        for logical_expert_id in range(num_logical_experts):
+            candidate_physical_expert_ids = _logical_to_all_physical_raw(
+                logical_to_all_physical_map, layer_id, logical_expert_id
+            )
+            output_partial = logical_to_rank_dispatch_physical_map[
+                :, layer_id, logical_expert_id
+            ]
+
+            load = {p_id: 0 for p_id in candidate_physical_expert_ids}
+
+            for gpu_id in range(num_gpus):
+                remote_experts = [
+                    p_id
+                    for p_id in candidate_physical_expert_ids
+                    if _compute_gpu_id_of_physical_expert(
+                        p_id, num_local_physical_experts
+                    )
+                    != gpu_id
+                ]
+
+                if remote_experts:
+                    experts_to_choose_from = remote_experts
+                else:
+                    experts_to_choose_from = candidate_physical_expert_ids
+
+                r.shuffle(experts_to_choose_from)
+
+                chosen_expert = min(experts_to_choose_from, key=lambda p_id: load[p_id])
+
+                output_partial[gpu_id] = chosen_expert
+                load[chosen_expert] += 1
+
+    assert torch.all(logical_to_rank_dispatch_physical_map != -1)
+
+    device = logical_to_all_physical_map.device
+    return logical_to_rank_dispatch_physical_map[ep_rank, :, :].to(device)
 
 # TODO optimize performance (rewrite and/or run in separate process with overlap)
 def compute_logical_to_rank_dispatch_physical_map(
