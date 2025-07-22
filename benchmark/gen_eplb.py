@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from sglang.srt.server_args import prepare_server_args
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.eplb.expert_location import ExpertLocationMetadata
+from sglang.srt.eplb.expert_location import ExpertLocationMetadata, ModelConfigForExpertLocation
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -59,10 +59,11 @@ def worker(rank, world_size, server_args, fault_tolerant):
             logical_to_rank_dispatch_physical_map: torch.Tensor
             num_physical_experts: int
 
-        num_logical_experts = model_config.num_experts
+        model_config_for_expert_location = ModelConfigForExpertLocation.from_model_config(model_config)
+        num_logical_experts = model_config_for_expert_location.num_logical_experts
         # Assuming all layers have experts for distribution purposes.
         # The mapping will be the same for all layers with MoE.
-        num_layers_with_experts = model_config.num_hidden_layers
+        num_layers_with_experts = model_config_for_expert_location.num_layers
         ep_size = world_size
 
         # Create a deterministic mapping of logical experts to ranks.
