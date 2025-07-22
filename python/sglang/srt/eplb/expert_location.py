@@ -203,14 +203,8 @@ class ExpertLocationMetadata:
             logical_to_all_physical_map != -1, dim=-1
         )
 
-        if server_args.ep_dispatch_algorithm == "static_avoid_rank":
-            avoid_rank_str = os.environ.get("SGLANG_EP_AVOID_RANK")
-            assert (
-                avoid_rank_str is not None
-            ), "SGLANG_EP_AVOID_RANK must be set when using static_avoid_rank"
-            avoid_rank = int(avoid_rank_str)
-        else:
-            avoid_rank = -1
+        avoid_rank_str = os.environ.get("SGLANG_EP_AVOID_RANK")
+        avoid_rank = int(avoid_rank_str) if avoid_rank_str else -1
 
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
