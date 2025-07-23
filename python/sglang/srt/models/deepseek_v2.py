@@ -670,6 +670,7 @@ class DeepseekV2MoE(nn.Module):
                     layer_id=self.layer_id,
                 ),
             )
+            
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -779,6 +780,7 @@ class DeepseekV2MoE(nn.Module):
                         layer_id=self.layer_id,
                     ),
                 )
+                logging.info(f"topk_idx_local: {state.topk_idx_local}")
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
