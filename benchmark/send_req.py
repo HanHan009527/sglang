@@ -1,105 +1,145 @@
-import requests
+import argparse
 import json
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
-# 配置参数
-URL = "http://127.0.0.1:30300/v1/chat/completions"
+import requests
+from tqdm import tqdm
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+
 HEADERS = {"Content-Type": "application/json"}
-PAYLOAD = {
-    "model": "DeepSeek-R1",
-    "messages": [{"role": "user", "content": "你好"}]
-}
-CONCURRENCY = 5     # 并发数
-TOTAL_REQUESTS = 20 # 总请求数
-OUTPUT_FILE = f"request_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
-def send_request(request_id):
+def send_request(request_id: int, url: str, payload: dict) -> dict:
     """发送单个请求并返回详细结果"""
     start_time = time.time()
-    
     try:
-        # 发送请求
         response = requests.post(
-            URL,
+            url,
             headers=HEADERS,
-            json=PAYLOAD,
-            timeout=30  # 设置超时时间，避免长时间等待
+            json=payload,
+            timeout=60,  # 增加超时时间
         )
-        
-        # 确保正确处理编码
-        response.encoding = response.apparent_encoding
-        
-        # 构建结果对象
+        response.raise_for_status()  # 如果状态码不是 2xx，则引发 HTTPError
+
+        response_time = time.time() - start_time
         result = {
             "request_id": request_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": time.time(),
             "status_code": response.status_code,
-            "response_time": time.time() - start_time,
-            "success": response.status_code == 200,
-            "headers": dict(response.headers),
-            "body": response.text,  # 完整响应内容
-            "error": None
+            "response_time": response_time,
+            "success": True,
+            "body": response.json(),
+            "error": None,
         }
-        
-    except Exception as e:
-        # 异常处理
+        logging.info(f"Request #{request_id} succeeded in {response_time:.2f}s")
+
+    except requests.exceptions.RequestException as e:
+        response_time = time.time() - start_time
+        logging.error(f"Request #{request_id} failed after {response_time:.2f}s: {e}")
         result = {
             "request_id": request_id,
-            "timestamp": datetime.now().isoformat(),
-            "status_code": None,
-            "response_time": time.time() - start_time,
+            "timestamp": time.time(),
+            "status_code": e.response.status_code if e.response else None,
+            "response_time": response_time,
             "success": False,
-            "headers": {},
-            "body": "",
-            "error": str(e)
+            "body": None,
+            "error": str(e),
         }
-    
+
     return result
 
-def run_concurrent_test():
+def main(args):
     """执行并发测试并输出结果"""
-    print(f"开始并发测试: {URL}")
-    print(f"配置: 并发数={CONCURRENCY}, 总请求数={TOTAL_REQUESTS}")
-    
+    logging.info(f"开始并发测试: {args.url}")
+    logging.info(f"配置: 并发数={args.concurrency}, 总请求数={args.total_requests}")
+
     start_time = time.time()
-    
+
+    # 加载请求体
+    try:
+        with open(args.payload_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logging.error(f"无法加载请求体文件: {e}")
+        return
+
     # 使用线程池执行并发请求
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
-        results = list(executor.map(send_request, range(1, TOTAL_REQUESTS + 1)))
-    
+    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        futures = [
+            executor.submit(send_request, i, args.url, payload)
+            for i in range(1, args.total_requests + 1)
+        ]
+        results = [future.result() for future in tqdm(futures, total=args.total_requests)]
+
     total_time = time.time() - start_time
-    
+
     # 统计结果
     success_count = sum(1 for r in results if r["success"])
-    failed_count = TOTAL_REQUESTS - success_count
-    avg_time = sum(r["response_time"] for r in results) / TOTAL_REQUESTS
-    max_time = max(r["response_time"] for r in results)
-    min_time = min(r["response_time"] for r in results)
-    
+    failed_count = args.total_requests - success_count
+    response_times = [r["response_time"] for r in results if r["success"]]
+    avg_time = sum(response_times) / success_count if success_count > 0 else 0
+    max_time = max(response_times) if response_times else 0
+    min_time = min(response_times) if response_times else 0
+
     # 输出统计摘要
-    print("\n=== 测试结果摘要 ===")
-    print(f"总耗时: {total_time:.2f}秒")
-    print(f"请求总数: {TOTAL_REQUESTS}")
-    print(f"成功请求: {success_count}")
-    print(f"失败请求: {failed_count}")
-    print(f"平均响应时间: {avg_time:.2f}秒")
-    print(f"最大响应时间: {max_time:.2f}秒")
-    print(f"最小响应时间: {min_time:.2f}秒")
-    
+    summary = {
+        "total_time_s": round(total_time, 2),
+        "total_requests": args.total_requests,
+        "success_requests": success_count,
+        "failed_requests": failed_count,
+        "avg_response_time_s": round(avg_time, 2),
+        "max_response_time_s": round(max_time, 2),
+        "min_response_time_s": round(min_time, 2),
+    }
+    logging.info(f"测试完成: {json.dumps(summary, indent=2)}")
+
     # 保存详细结果到JSON文件
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    
-    print(f"\n详细结果已保存到: {OUTPUT_FILE}")
-    
+    if args.output_file:
+        with open(args.output_file, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        logging.info(f"详细结果已保存到: {args.output_file}")
+
     # 输出失败请求详情
     if failed_count > 0:
-        print("\n=== 失败请求详情 ===")
+        logging.warning("检测到失败的请求:")
         for r in results:
             if not r["success"]:
-                print(f"请求 #{r['request_id']}: {r['error'] or f'状态码 {r['status_code']}'}")
+                logging.warning(f"  - 请求 #{r['request_id']}: {r['error']}")
 
 if __name__ == "__main__":
-    run_concurrent_test()
+    parser = argparse.ArgumentParser(description="并发请求测试工具")
+    parser.add_argument(
+        "-u",
+        "--url",
+        type=str,
+        default="http://127.0.0.1:30300/v1/chat/completions",
+        help="目标 URL",
+    )
+    parser.add_argument(
+        "-c", "--concurrency", type=int, default=10, help="并发数"
+    )
+    parser.add_argument(
+        "-n", "--total-requests", type=int, default=100, help="总请求数"
+    )
+    parser.add_argument(
+        "-p",
+        "--payload-file",
+        type=str,
+        required=True,
+        help="包含请求体的 JSON 文件",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-file",
+        type=str,
+        default=f"request_results_{time.strftime('%Y%m%d_%H%M%S')}.json",
+        help="保存详细结果的 JSON 文件",
+    )
+    args = parser.parse_args()
+    main(args)
