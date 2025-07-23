@@ -30,6 +30,7 @@ class ExpertLocationDispatchInfo:
     partial_logical_to_all_physical_map: torch.Tensor
     # (num_logical_experts,)
     partial_logical_to_all_physical_map_num_valid: torch.Tensor
+    partial_physical_to_logical_map: torch.Tensor
     num_physical_experts: int
 
     @classmethod
@@ -54,6 +55,9 @@ class ExpertLocationDispatchInfo:
                 layer_id, :
             ],
             partial_logical_to_all_physical_map_num_valid=expert_location_metadata.logical_to_all_physical_map_num_valid[
+                layer_id, :
+            ],
+            partial_physical_to_logical_map=expert_location_metadata.physical_to_logical_map[
                 layer_id, :
             ],
             num_physical_experts=expert_location_metadata.num_physical_experts,
@@ -98,10 +102,7 @@ def _topk_ids_logical_to_physical_dynamic(
     device = topk_ids.device
     topk_ids = topk_ids.flatten()
 
-    chosen_dispatch_index = (
-        torch.randint(0, 65536, topk_ids.shape, dtype=torch.int32, device=device)
-        % info.partial_logical_to_all_physical_map_num_valid[topk_ids]
-    )
+    chosen_dispatch_index = info.partial_logical_to_all_physical_map_num_valid[topk_ids] - 1
     topk_ids = info.partial_logical_to_all_physical_map[topk_ids, chosen_dispatch_index]
 
     topk_ids = topk_ids.view(topk_ids_original_shape)

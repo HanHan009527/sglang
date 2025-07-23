@@ -654,68 +654,92 @@ class DeepseekV2MoE(nn.Module):
         """
         forward_mode = forward_batch.forward_mode
         shared_output = None
-        if is_non_idle_and_non_empty(forward_mode, hidden_states):
-            # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states)
-            shared_output = self._forward_shared_experts(hidden_states)
-            topk_weights, topk_idx = select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=self.top_k,
-                use_grouped_topk=True,
-                renormalize=self.renormalize,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                correction_bias=self.correction_bias,
-                routed_scaling_factor=self.routed_scaling_factor,
-                num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
-                    layer_id=self.layer_id,
-                ),
-            )
-        else:
-            topk_idx = torch.full(
-                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
-            )
-            topk_weights = torch.empty(
-                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
-            )
-        if self.ep_size > 1:
-            # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
-            (
-                hidden_states,
-                topk_idx,
-                topk_weights,
-                reorder_topk_ids,
-                num_recv_tokens_per_expert,
-                seg_indptr,
-                masked_m,
-                expected_m,
-            ) = self.deepep_dispatcher.dispatch(
-                hidden_states=hidden_states,
-                topk_idx=topk_idx,
-                topk_weights=topk_weights,
-                forward_batch=forward_batch,
-            )
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            reorder_topk_ids=reorder_topk_ids,
-            seg_indptr=seg_indptr,
-            masked_m=masked_m,
-            expected_m=expected_m,
-            num_recv_tokens_per_expert=num_recv_tokens_per_expert,
-            forward_batch=forward_batch,
+
+        max_attempts = 2 if self.ep_size > 1 else 1
+        expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
+            layer_id=self.layer_id,
         )
-        if self.ep_size > 1:
-            final_hidden_states, gathered_experts = self.deepep_dispatcher.combine(
-                hidden_states=final_hidden_states,
+        num_logical_experts = expert_location_dispatch_info.partial_logical_to_all_physical_map.shape[0]
+        finished_logical_experts = torch.zeros(
+            (num_logical_experts,), dtype=torch.int32, device=hidden_states.device
+        )
+        final_hidden_states = None
+        for i in range(max_attempts):
+            if is_non_idle_and_non_empty(forward_mode, hidden_states):
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
+                shared_output = self._forward_shared_experts(hidden_states)
+                topk_weights, topk_idx = select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    top_k=self.top_k,
+                    use_grouped_topk=True,
+                    renormalize=self.renormalize,
+                    topk_group=self.topk_group,
+                    num_expert_group=self.num_expert_group,
+                    num_fused_shared_experts=self.num_fused_shared_experts,
+                    correction_bias=self.correction_bias,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    num_token_non_padded=forward_batch.num_token_non_padded,
+                    expert_location_dispatch_info=expert_location_dispatch_info,
+                )
+            else:
+                topk_idx = torch.full(
+                    (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+                )
+                topk_weights = torch.empty(
+                    (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+                )
+            if self.ep_size > 1:
+                # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
+                (
+                    hidden_states,
+                    topk_idx,
+                    topk_weights,
+                    reorder_topk_ids,
+                    num_recv_tokens_per_expert,
+                    seg_indptr,
+                    masked_m,
+                    expected_m,
+                ) = self.deepep_dispatcher.dispatch(
+                    hidden_states=hidden_states,
+                    topk_idx=topk_idx,
+                    topk_weights=topk_weights,
+                    forward_batch=forward_batch,
+                )
+            hidden_states = self.experts(
+                hidden_states=hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
+                reorder_topk_ids=reorder_topk_ids,
+                seg_indptr=seg_indptr,
+                masked_m=masked_m,
+                expected_m=expected_m,
+                num_recv_tokens_per_expert=num_recv_tokens_per_expert,
                 forward_batch=forward_batch,
             )
+            if self.ep_size > 1:
+                hidden_states, gathered_physical_experts = self.deepep_dispatcher.combine(
+                    hidden_states=hidden_states,
+                    topk_idx=topk_idx,
+                    topk_weights=topk_weights,
+                    forward_batch=forward_batch,
+                )
+                gathered_logical_experts = expert_location_dispatch_info.partial_physical_to_logical_map[
+                    gathered_physical_experts
+                ]
+                finished_logical_experts += gathered_logical_experts
+            if final_hidden_states is None:
+                final_hidden_states = hidden_states
+            else:
+                final_hidden_states += hidden_states
+            if finished_logical_experts.all():
+                break
+            else:
+                # TODO: avoid hardcoding the mapping
+                expert_location_dispatch_info.partial_logical_to_all_physical_map_num_valid[
+                    (finished_logical_experts == 0).nonzero(as_tuple=True)
+                ] = 1
 
         if shared_output is not None:
             x = shared_output
