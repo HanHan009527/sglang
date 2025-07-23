@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -67,17 +68,14 @@ class EPLBManager:
         expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
             self._server_args, self._model_runner.model_config, logical_count
         )
-        logger.info(
-            f"[EPLBManager] New expert_location_metadata: {expert_location_metadata}"
-        )
-
         # Export the object to disk, with one file per GPU (rank)
         try:
             output_dir = "/tmp/expert_location_metadata"
             os.makedirs(output_dir, exist_ok=True)
 
             rank = torch.distributed.get_rank()
-            file_path = os.path.join(output_dir, f"expert_metadata_rank_{rank}.json")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = os.path.join(output_dir, f"expert_metadata_rank_{rank}_{timestamp}.json")
 
             data_to_save = {
                 "physical_to_logical_map": expert_location_metadata.physical_to_logical_map.cpu()
