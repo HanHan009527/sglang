@@ -165,6 +165,11 @@ class AttnForwardMethod(IntEnum):
 
 
 class DeepseekV2MLP(nn.Module):
+    """
+    DeepseekV2MLP 实现了一个标准的多层感知器（MLP），其中包含一个门控线性单元（GLU）。
+    它由两个线性投影（gate_up_proj 和 down_proj）和一个 SiLU 激活函数组成。
+    """
+
     def __init__(
         self,
         hidden_size: int,
@@ -176,9 +181,23 @@ class DeepseekV2MLP(nn.Module):
         tp_rank: Optional[int] = None,
         tp_size: Optional[int] = None,
     ) -> None:
+        """
+        初始化 DeepseekV2MLP 模块。
+
+        Args:
+            hidden_size (int): 隐藏层大小。
+            intermediate_size (int): 中间层大小。
+            hidden_act (str): 激活函数类型（目前仅支持 "silu"）。
+            quant_config (Optional[QuantizationConfig], optional): 量化配置。默认为 None。
+            reduce_results (bool, optional): 是否在 down_proj 中减少结果。默认为 True。
+            prefix (str, optional): 模块名称的前缀。默认为 ""。
+            tp_rank (Optional[int], optional): 张量并行等级。默认为 None。
+            tp_size (Optional[int], optional): 张量并行大小。默认为 None。
+        """
         super().__init__()
         self.tp_size = tp_size
 
+        # 融合的门控和上行投影
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -188,6 +207,7 @@ class DeepseekV2MLP(nn.Module):
             tp_rank=tp_rank,
             tp_size=tp_size,
         )
+        # 下行投影
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -200,12 +220,23 @@ class DeepseekV2MLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. "
-                "Only silu is supported for now."
+                f"不支持的激活函数: {hidden_act}. "
+                "目前仅支持 silu。"
             )
         self.act_fn = SiluAndMul()
 
     def forward(self, x, forward_batch=None, can_fuse_mlp_allreduce=False):
+        """
+        MLP 的前向传播。
+
+        Args:
+            x (torch.Tensor): 输入张量。
+            forward_batch (optional): 前向传播的批次信息。默认为 None。
+            can_fuse_mlp_allreduce (bool, optional): 是否可以融合 MLP allreduce。默认为 False。
+
+        Returns:
+            torch.Tensor: MLP 的输出张量。
+        """
         if (self.tp_size == 1) and x.shape[0] == 0:
             return x
 
@@ -263,6 +294,11 @@ class MoEGate(nn.Module):
 
 
 class DeepseekV2MoE(nn.Module):
+    """
+    DeepseekV2MoE 实现了一个混合专家（Mixture-of-Experts）模块。
+    它包含一个门控机制（gate）、一组路由专家（experts）和一组可选的共享专家（shared_experts）。
+    该模块根据门控的输出将输入路由到不同的专家，并结合共享专家的输出。
+    """
 
     def __init__(
         self,
@@ -273,6 +309,17 @@ class DeepseekV2MoE(nn.Module):
         alt_stream: Optional[torch.cuda.Stream] = None,
         is_nextn: bool = False,
     ):
+        """
+        初始化 DeepseekV2MoE 模块。
+
+        Args:
+            config (PretrainedConfig): 模型配置。
+            layer_id (int): 当前层的 ID。
+            quant_config (Optional[QuantizationConfig], optional): 量化配置。默认为 None。
+            prefix (str, optional): 模块名称的前缀。默认为 ""。
+            alt_stream (Optional[torch.cuda.Stream], optional): 用于双流优化的备用 CUDA 流。默认为 None。
+            is_nextn (bool, optional): 是否为 next-N 模式。默认为 False。
+        """
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -288,16 +335,16 @@ class DeepseekV2MoE(nn.Module):
 
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.n_routed_experts}."
+                f"张量并行大小 {self.tp_size} 大于专家数量 {config.n_routed_experts}。"
             )
 
         if config.hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only silu is supported for now."
+                f"不支持的激活函数: {config.hidden_act}. "
+                "目前仅支持 silu。"
             )
 
+        # 初始化门控机制
         self.gate = MoEGate(
             config=config, prefix=add_prefix("gate", prefix), is_nextn=is_nextn
         )
@@ -312,7 +359,6 @@ class DeepseekV2MoE(nn.Module):
             correction_bias=self.gate.e_score_correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-
         self.experts = get_moe_impl_class()(
             num_experts=config.n_routed_experts
             + self.num_fused_shared_experts
@@ -329,7 +375,7 @@ class DeepseekV2MoE(nn.Module):
                 if global_server_args_dict["enable_deepep_moe"]
                 else {}
             ),
-            # Additional args for FusedMoE
+            # FusedMoE 的额外参数
             **(
                 dict(
                     enable_flashinfer_moe=True,
@@ -343,9 +389,10 @@ class DeepseekV2MoE(nn.Module):
         self.shared_experts_is_int8 = False
         self.shared_experts_is_fp8 = False
         self.shared_experts_weight_block_size = None
+        # 如果存在共享专家且未使用融合优化，则初始化共享专家
         if config.n_shared_experts is not None and self.num_fused_shared_experts == 0:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            # disable tp for shared experts when enable deepep moe
+            # 如果启用了 deepep moe，则禁用共享专家的张量并行
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -385,8 +432,9 @@ class DeepseekV2MoE(nn.Module):
 
         self.top_k = config.num_experts_per_tok
 
+        # 如果启用了 DeepEP MoE，则进行相关初始化
         if global_server_args_dict["enable_deepep_moe"]:
-            # TODO: we will support tp < ep in the future
+            # TODO: 未来将支持 tp < ep
             self.ep_size = get_tensor_model_parallel_world_size()
             self.num_experts = (
                 config.n_routed_experts
@@ -417,6 +465,12 @@ class DeepseekV2MoE(nn.Module):
         self._enable_deepep_moe = global_server_args_dict["enable_deepep_moe"]
 
     def get_moe_weights(self):
+        """
+        获取 MoE 专家的权重。
+
+        Returns:
+            list: 专家权重的列表。
+        """
         return [
             x.data
             for name, x in self.experts.named_parameters()
@@ -429,8 +483,22 @@ class DeepseekV2MoE(nn.Module):
         forward_batch: Optional[ForwardBatch] = None,
         can_fuse_mlp_allreduce: bool = False,
     ) -> torch.Tensor:
+        """
+        MoE 模块的前向传播。
+
+        根据是否启用 DeepEP MoE，选择不同的前向传播路径。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+            forward_batch (Optional[ForwardBatch], optional): 前向传播的批次信息。默认为 None。
+            can_fuse_mlp_allreduce (bool, optional): 是否可以融合 MLP allreduce。默认为 False。
+
+        Returns:
+            torch.Tensor: MoE 模块的输出张量。
+        """
         if not self._enable_deepep_moe:
             DUAL_STREAM_TOKEN_THRESHOLD = 1024
+            # 如果满足双流优化的条件，则使用双流前向传播
             if (
                 self.alt_stream is not None
                 and self.num_fused_shared_experts == 0
@@ -447,12 +515,26 @@ class DeepseekV2MoE(nn.Module):
     def forward_normal_dual_stream(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False
     ) -> torch.Tensor:
+        """
+        使用双 CUDA 流进行优化的常规前向传播。
+
+        在一个流上计算共享专家，在另一个流上计算路由专家，以实现并行化。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+            can_fuse_mlp_allreduce (bool, optional): 是否可以融合 MLP allreduce。默认为 False。
+
+        Returns:
+            torch.Tensor: MoE 模块的输出张量。
+        """
 
         current_stream = torch.cuda.current_stream()
         self.alt_stream.wait_stream(current_stream)
+        # 在主流上计算共享专家
         shared_output = self._forward_shared_experts(hidden_states)
 
         with torch.cuda.stream(self.alt_stream):
+            # 在备用流上计算路由专家
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
             topk_output = self.topk(hidden_states, router_logits)
@@ -470,6 +552,16 @@ class DeepseekV2MoE(nn.Module):
     def forward_normal(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False
     ) -> torch.Tensor:
+        """
+        常规前向传播，不使用双流优化。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+            can_fuse_mlp_allreduce (bool, optional): 是否可以融合 MLP allreduce。默认为 False。
+
+        Returns:
+            torch.Tensor: MoE 模块的输出张量。
+        """
         if hasattr(self, "shared_experts") and use_intel_amx_backend(
             self.shared_experts.gate_up_proj
         ):
@@ -483,7 +575,7 @@ class DeepseekV2MoE(nn.Module):
             hidden_states=hidden_states, topk_output=topk_output
         )
         if not _is_cuda and not _use_aiter:
-            # fused in biased_grouped_topk so we can skip here
+            # 在 biased_grouped_topk 中已融合，因此此处可以跳过
             final_hidden_states *= self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -494,6 +586,16 @@ class DeepseekV2MoE(nn.Module):
     def forward_cpu(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False
     ) -> torch.Tensor:
+        """
+        针对 CPU 的前向传播，使用 Intel AMX 后端进行优化。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+            can_fuse_mlp_allreduce (bool, optional): 是否可以融合 MLP allreduce。默认为 False。
+
+        Returns:
+            torch.Tensor: MoE 模块的输出张量。
+        """
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
@@ -504,9 +606,9 @@ class DeepseekV2MoE(nn.Module):
         assert use_intel_amx_backend(
             self.shared_experts.gate_up_proj
         ) == use_intel_amx_backend(self.shared_experts.down_proj)
-        # [Note] inplace should be False in fused_experts.
-        # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
-        # While hidden_states is still needed in shared_expert.
+        # [注意] fused_experts 中的 inplace 应为 False。
+        # 如果 fused_experts (self.experts) 中的 inplace 为 True，则 hidden_states 在 fused_experts 之后会被改变，
+        # 而 hidden_states 在 shared_expert 中仍然需要使用。
         final_hidden_states = torch.ops.sgl_kernel.shared_expert_cpu(
             hidden_states,
             self.shared_experts.gate_up_proj.weight,
@@ -550,6 +652,16 @@ class DeepseekV2MoE(nn.Module):
     def forward_deepep(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
+        """
+        使用 DeepEP（Deep Expert Parallelism）进行优化的前向传播。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+
+        Returns:
+            torch.Tensor: MoE 模块的输出张量。
+        """
         forward_mode = forward_batch.forward_mode
         shared_output = None
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
@@ -572,7 +684,7 @@ class DeepseekV2MoE(nn.Module):
                 (0, self.top_k), dtype=torch.float32, device=hidden_states.device
             )
         if self.ep_size > 1:
-            # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
+            # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
             (
                 hidden_states,
                 topk_idx,
@@ -600,7 +712,7 @@ class DeepseekV2MoE(nn.Module):
             forward_batch=forward_batch,
         )
         if self.ep_size > 1:
-            final_hidden_states = self.deepep_dispatcher.combine(
+            final_hidden_states, gathered_experts = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
@@ -617,6 +729,15 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def _forward_shared_experts(self, hidden_states):
+        """
+        计算共享专家的前向传播。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量。
+
+        Returns:
+            torch.Tensor or None: 共享专家的输出，如果没有共享专家则返回 None。
+        """
         if self.num_fused_shared_experts == 0:
             return self.shared_experts(hidden_states)
         else:
@@ -744,6 +865,16 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 
 
 class DeepseekV2AttentionMLA(nn.Module):
+    """
+    DeepseekV2AttentionMLA 实现了一个多头注意力机制，该机制具有
+    用于处理查询（Q）、键（K）和值（V）投影的低秩适应（LoRA）选项。
+    它支持多种注意力计算方法，包括：
+    - 多头注意力（MHA）：标准的注意力机制。
+    - 多级注意力（MLA）：一种更高效的注意力变体。
+    - 分块 KV 缓存：一种用于处理长序列的优化。
+
+    该类会根据操作模式（例如，预填充、解码）和硬件功能动态选择最合适的注意力前向传播方法。
+    """
 
     def __init__(
         self,
@@ -764,6 +895,27 @@ class DeepseekV2AttentionMLA(nn.Module):
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
+        """
+        初始化 DeepseekV2AttentionMLA 模块。
+
+        Args:
+            config (PretrainedConfig): 模型配置。
+            hidden_size (int): 隐藏层大小。
+            num_heads (int): 注意力头的数量。
+            qk_nope_head_dim (int): QK 头中不应用旋转位置编码（RoPE）的维度。
+            qk_rope_head_dim (int): QK 头中应用 RoPE 的维度。
+            v_head_dim (int): V 头的维度。
+            q_lora_rank (int): Q 投影的 LoRA 秩。
+            kv_lora_rank (int): KV 投影的 LoRA 秩。
+            rope_theta (float, optional): RoPE 的基础 theta 值。默认为 10000。
+            rope_scaling (Optional[Dict[str, Any]], optional): RoPE 的缩放配置。默认为 None。
+            max_position_embeddings (int, optional): 最大位置嵌入。默认为 8192。
+            quant_config (Optional[QuantizationConfig], optional): 量化配置。默认为 None。
+            reduce_results (bool, optional): 是否在 o_proj 中减少结果。默认为 True。
+            layer_id (int, optional): 层 ID。默认为 None。
+            prefix (str, optional): 模块名称的前缀。默认为 ""。
+            alt_stream (Optional[torch.cuda.Stream], optional): 备用 CUDA 流。默认为 None。
+        """
         super().__init__()
         self.layer_id = layer_id
         self.hidden_size = hidden_size
@@ -783,8 +935,9 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # For tensor parallel attention
+        # 用于张量并行注意力
         if self.q_lora_rank is not None:
+            # 如果使用 Q LoRA，则为 Q 和 KV 创建融合的投影层
             self.fused_qkv_a_proj_with_mqa = ReplicatedLinear(
                 self.hidden_size,
                 self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim,
@@ -803,6 +956,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 tp_size=attn_tp_size,
             )
         else:
+            # 否则，为 Q 和 KV 创建单独的投影层
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.qk_head_dim,
@@ -829,7 +983,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
         )
-        # O projection.
+        # O 投影
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
@@ -845,6 +999,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         if rope_scaling:
             rope_scaling["rope_type"] = "deepseek_yarn"
 
+        # 初始化旋转位置编码
         self.rotary_emb = get_rope_wrapper(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
@@ -863,6 +1018,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         else:
             self.rotary_emb.forward = self.rotary_emb.forward_native
 
+        # 初始化 MQA 和 MHA 的 RadixAttention
         self.attn_mqa = RadixAttention(
             self.num_local_heads,
             self.kv_lora_rank + self.qk_rope_head_dim,
@@ -907,14 +1063,14 @@ class DeepseekV2AttentionMLA(nn.Module):
             "SGLANG_ROCM_FUSED_DECODE_MLA", "false"
         )
 
-        # TODO: Design a finer way to determine the threshold
+        # TODO: 设计一种更精细的方法来确定阈值
         self.chunked_prefix_cache_threshold = get_int_env_var(
             "SGL_CHUNKED_PREFIX_CACHE_THRESHOLD", 8192
         )
 
-        # If we have self.fused_qkv_a_proj_with_mqa and we're running on CPU, we will choose the torch.ops.sgl_kernel.qkv_proj_with_rope_fused_weight kernel
-        # which requires self.w_kc and self.w_vc to be packed.
-        # If not, we will use torch.bmm and weight shouldn't be packed in this case
+        # 如果我们有 self.fused_qkv_a_proj_with_mqa 并且在 CPU 上运行，我们将选择 torch.ops.sgl_kernel.qkv_proj_with_rope_fused_weight 内核
+        # 这要求 self.w_kc 和 self.w_vc 被打包。
+        # 如果不是，我们将使用 torch.bmm，此时权重不应被打包
         has_fused_proj = hasattr(self, "fused_qkv_a_proj_with_mqa")
         if has_fused_proj and _is_cpu and _is_cpu_amx_available:
             self.quant_method = PackWeightMethod(
@@ -969,6 +1125,15 @@ class DeepseekV2AttentionMLA(nn.Module):
     def dispatch_attn_forward_method(
         self, forward_batch: ForwardBatch
     ) -> AttnForwardMethod:
+        """
+        根据前向传播批次信息动态选择注意力计算方法。
+
+        Args:
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+
+        Returns:
+            AttnForwardMethod: 要使用的注意力前向传播方法。
+        """
         def _dispatch_mla_subtype():
             if _is_hip:
                 if (
@@ -989,7 +1154,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         if self.attention_backend == "ascend":
             return AttnForwardMethod.MLA
         elif self.attention_backend == "flashinfer":
-            # Flashinfer MLA: Do not absorb when enabling ragged prefill
+            # Flashinfer MLA：启用不规则预填充时不吸收
             if (
                 not self.flashinfer_mla_disable_ragged
                 and forward_batch.forward_mode.is_extend()
@@ -1001,7 +1166,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 return _dispatch_mla_subtype()
         elif self.attention_backend == "fa3":
-            # Flash Attention: Use MHA with chunked KV cache when prefilling on long sequences.
+            # Flash Attention：在长序列上预填充时使用带分块 KV 缓存的 MHA
             if forward_batch.extend_prefix_lens_cpu is not None:
                 sum_extend_prefix_lens = sum(forward_batch.extend_prefix_lens_cpu)
             if (
@@ -1027,7 +1192,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 return AttnForwardMethod.MLA
         else:
-            # Triton: Use normal computation for prefill and use weight absorption for extend/decode
+            # Triton：预填充使用正常计算，扩展/解码使用权重吸收
             if (
                 forward_batch.forward_mode.is_extend()
                 and not forward_batch.forward_mode.is_target_verify()
@@ -1039,6 +1204,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 return _dispatch_mla_subtype()
 
     def op_prepare(self, state):
+        """操作：准备注意力计算。"""
         state.attn_intermediate_state = self.forward_prepare(
             positions=state.positions,
             hidden_states=state.pop("hidden_states_after_comm_pre_attn"),
@@ -1047,6 +1213,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
 
     def op_core(self, state):
+        """操作：执行核心注意力计算。"""
         state.hidden_states_after_attn = self.forward_core(
             state.pop("attn_intermediate_state")
         )
@@ -1058,6 +1225,18 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
     ):
+        """
+        注意力模块的前向传播。
+
+        Args:
+            positions (torch.Tensor): 输入 token 的位置。
+            hidden_states (torch.Tensor): 输入的隐藏状态。
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+            zero_allocator (BumpAllocator): 用于零内存分配的分配器。
+
+        Returns:
+            torch.Tensor: 注意力计算的输出。
+        """
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
@@ -1073,13 +1252,27 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
     ):
+        """
+        为注意力计算准备中间状态。
+
+        此方法根据所选的注意力前向传播方法（MHA、MLA 等）准备 Q、K、V 和其他状态。
+
+        Args:
+            positions (torch.Tensor): 输入 token 的位置。
+            hidden_states (torch.Tensor): 输入的隐藏状态。
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+            zero_allocator (BumpAllocator): 用于零内存分配的分配器。
+
+        Returns:
+            Tuple: 包含注意力计算所需状态的元组。
+        """
         if self.attn_mha.kv_b_proj is None:
             self.attn_mha.kv_b_proj = self.kv_b_proj
 
         if hidden_states.shape[0] == 0:
             assert (
                 not self.o_proj.reduce_results
-            ), "short-circuiting allreduce will lead to hangs"
+            ), "短路 allreduce 会导致挂起"
             return hidden_states, None, forward_batch, None
 
         attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
@@ -1109,6 +1302,17 @@ class DeepseekV2AttentionMLA(nn.Module):
         return None, attn_forward_method, forward_batch, inner_state
 
     def forward_core(self, intermediate_state):
+        """
+        执行核心注意力计算。
+
+        此方法接收来自 `forward_prepare` 的中间状态，并根据所选的注意力方法执行实际的注意力计算。
+
+        Args:
+            intermediate_state (Tuple): 包含注意力计算所需状态的元组。
+
+        Returns:
+            torch.Tensor: 注意力计算的输出。
+        """
         hidden_states, attn_forward_method, forward_batch, inner_state = (
             intermediate_state
         )
@@ -1738,6 +1942,17 @@ class DeepseekV2AttentionMLA(nn.Module):
 
 
 class DeepseekV2DecoderLayer(nn.Module):
+    """
+    DeepseekV2 模型的解码器层。
+
+    Args:
+        config (PretrainedConfig): 模型的配置。
+        layer_id (int): 当前层的 ID。
+        quant_config (Optional[QuantizationConfig]): 量化配置。
+        is_nextn (bool): 是否为 next-n 模型。
+        prefix (str): 模型参数的前缀。
+        alt_stream (Optional[torch.cuda.Stream]): 用于计算的备用 CUDA 流。
+    """
 
     def __init__(
         self,
@@ -1758,6 +1973,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.speculative_algorithm = global_server_args_dict["speculative_algorithm"]
         self.layer_id = layer_id
         self.is_nextn = is_nextn
+        
+        # 初始化自注意力模块
         self.self_attn = DeepseekV2AttentionMLA(
             config=config,
             hidden_size=self.hidden_size,
@@ -1779,9 +1996,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             alt_stream=alt_stream,
         )
 
+        # 判断当前层是否为稀疏层
         self.is_layer_sparse = self._is_layer_sparse(layer_id, is_nextn=is_nextn)
         is_previous_layer_sparse = self._is_layer_sparse(layer_id - 1, is_nextn=False)
 
+        # 初始化层间数据分发模式
         self.layer_scatter_modes = LayerScatterModes.init_new(
             layer_id=layer_id,
             num_layers=1 if is_nextn else config.num_hidden_layers,
@@ -1789,6 +2008,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             is_previous_layer_sparse=is_previous_layer_sparse,
         )
 
+        # 根据是否为稀疏层，初始化 MLP 或 MoE
         if self.is_layer_sparse:
             self.mlp = DeepseekV2MoE(
                 config=config,
@@ -1813,11 +2033,13 @@ class DeepseekV2DecoderLayer(nn.Module):
                 tp_size=mlp_tp_size,
             )
 
+        # 初始化层归一化
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        # 初始化层间通信器
         self.layer_communicator = LayerCommunicator(
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
@@ -1825,6 +2047,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
+        """判断一个层是否为稀疏层。"""
         return is_nextn or (
             self.config.n_routed_experts is not None
             and layer_id >= self.config.first_k_dense_replace
@@ -1832,7 +2055,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
     def _should_fuse_mlp_allreduce_with_next_layer(self, forward_batch) -> bool:
-        """Check if MLP allreduce can be fused with next layer's add_rmsnorm"""
+        """检查 MLP allreduce 是否可以与下一层的 add_rmsnorm 融合。"""
 
         if (
             self.layer_id == self.config.num_hidden_layers - 1
@@ -1862,11 +2085,26 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         zero_allocator: BumpAllocator,
     ) -> torch.Tensor:
+        """
+        解码器层的前向传播。
 
+        Args:
+            positions (torch.Tensor): 输入 token 的位置。
+            hidden_states (torch.Tensor): 输入的隐藏状态。
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+            residual (Optional[torch.Tensor]): 残差连接。
+            zero_allocator (BumpAllocator): 用于零内存分配的分配器。
+
+        Returns:
+            torch.Tensor: 输出的隐藏状态和残差。
+        """
+
+        # 准备注意力计算
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
 
+        # 自注意力计算
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -1874,21 +2112,25 @@ class DeepseekV2DecoderLayer(nn.Module):
             zero_allocator=zero_allocator,
         )
 
+        # 准备 MLP 计算
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
 
+        # 判断是否可以融合 MLP allreduce
         can_fuse_mlp_allreduce = (
             self._should_fuse_mlp_allreduce_with_next_layer(forward_batch)
             and not (self.enable_dp_attention and self.speculative_algorithm.is_eagle())
             and not self.is_nextn
         )
 
+        # MLP 计算
         hidden_states = self.mlp(hidden_states, forward_batch, can_fuse_mlp_allreduce)
 
         if can_fuse_mlp_allreduce:
             hidden_states._sglang_needs_allreduce_fusion = True
 
+        # 如果不融合，则进行后处理
         if not can_fuse_mlp_allreduce:
             hidden_states, residual = self.layer_communicator.postprocess_layer(
                 hidden_states, residual, forward_batch
@@ -1906,6 +2148,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         zero_allocator: BumpAllocator,
         tbo_subbatch_index: Optional[int] = None,
     ):
+        """操作：为注意力计算准备通信。"""
         state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
             self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
         )
@@ -1919,6 +2162,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
     def op_comm_prepare_mlp(self, state):
+        """操作：为 MLP 计算准备通信。"""
         state.hidden_states_mlp_input, state.residual_after_comm_pre_mlp = (
             self.layer_communicator.prepare_mlp(
                 state.pop("hidden_states_after_attn"),
@@ -1928,6 +2172,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
     def op_mlp(self, state):
+        """操作：执行 MLP 计算。"""
         hidden_states = state.pop("hidden_states_mlp_input")
         if not (
             enable_moe_dense_fully_dp()
@@ -1941,6 +2186,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             state.hidden_states_mlp_output = hidden_states
 
     def op_comm_postprocess_layer(self, state):
+        """操作：对层进行通信后处理。"""
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             state.pop("hidden_states_mlp_output"),
             state.pop("residual_after_comm_pre_mlp"),
@@ -1968,6 +2214,14 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 class DeepseekV2Model(nn.Module):
+    """
+    DeepseekV2 模型。
+
+    Args:
+        config (PretrainedConfig): 模型的配置。
+        quant_config (Optional[QuantizationConfig]): 量化配置。
+        prefix (str): 模型参数的前缀。
+    """
     fall_back_to_pt_during_load = False
 
     def __init__(
@@ -2011,8 +2265,23 @@ class DeepseekV2Model(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
+        """
+        模型的前向传播。
+
+        Args:
+            input_ids (torch.Tensor): 输入的 token ID。
+            positions (torch.Tensor): 输入 token 的位置。
+            forward_batch (ForwardBatch): 前向传播的批次信息。
+            input_embeds (torch.Tensor, optional): 输入的嵌入向量。默认为 None。
+
+        Returns:
+            torch.Tensor: 模型的输出隐藏状态。
+        """
+        # 获取总层数和设备信息
         total_num_layers = len(self.layers)
         device = input_embeds.device if input_embeds is not None else input_ids.device
+        
+        # 初始化一个 BumpAllocator 用于零内存分配
         zero_allocator = BumpAllocator(
             buffer_size=total_num_layers * 2 * (2 if forward_batch.can_run_tbo else 1),
             dtype=torch.float32,
@@ -2020,17 +2289,24 @@ class DeepseekV2Model(nn.Module):
         )
 
         if input_embeds is None:
+            # [num_tokens, hidden_size]
+            # 如果没有提供 input_embeds，则通过 embed_tokens 层计算
             hidden_states = self.embed_tokens(input_ids)
         else:
+            # 否则直接使用提供的 input_embeds
             hidden_states = input_embeds
 
+        # 初始化残差连接
         residual = None
 
+        # 根据是否可以运行 TBO 确定普通层的数量
         normal_num_layers = (
             self.first_k_dense_replace
             if forward_batch.can_run_tbo
             else total_num_layers
         )
+        
+        # 依次通过普通解码器层
         for i in range(normal_num_layers):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
@@ -2038,7 +2314,9 @@ class DeepseekV2Model(nn.Module):
                     positions, hidden_states, forward_batch, residual, zero_allocator
                 )
 
+        # 如果普通层数不等于总层数，则运行 TBO 优化
         if normal_num_layers != total_num_layers:
+            # 运行 TBO（Token-wise Branching Optimization）
             hidden_states, residual = model_forward_maybe_tbo(
                 layers=self.layers[normal_num_layers:],
                 enable_tbo=True,
@@ -2052,6 +2330,7 @@ class DeepseekV2Model(nn.Module):
                 zero_allocator=zero_allocator,
             )
 
+        # 如果不是空闲模式，则应用最终的归一化
         if not forward_batch.forward_mode.is_idle():
             if residual is None:
                 hidden_states = self.norm(hidden_states)
@@ -2061,6 +2340,14 @@ class DeepseekV2Model(nn.Module):
 
 
 class DeepseekV2ForCausalLM(nn.Module):
+    """
+    The DeepseekV2 model for causal language modeling.
+
+    Args:
+        config (PretrainedConfig): The configuration of the model.
+        quant_config (Optional[QuantizationConfig]): The quantization configuration.
+        prefix (str): The prefix for the model parameters.
+    """
 
     def __init__(
         self,
@@ -2095,11 +2382,18 @@ class DeepseekV2ForCausalLM(nn.Module):
 
     @property
     def routed_experts_weights_of_layer(self):
+        """
+        Get the weights of the routed experts for each layer.
+        """
         return self._routed_experts_weights_of_layer.value
 
     def determine_num_fused_shared_experts(
         self, architecture: str = "DeepseekV3ForCausalLM"
     ):
+        """
+        Determine the number of fused shared experts.
+        This is an optimization for Deepseek V3/R1 models on NVIDIA platforms with capability >= 8.0.
+        """
         self.num_fused_shared_experts = 0
         if global_server_args_dict["disable_shared_experts_fusion"]:
             return
@@ -2131,6 +2425,9 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.num_fused_shared_experts = self.config.n_shared_experts
 
     def get_input_embeddings(self) -> nn.Embedding:
+        """
+        Get the input embeddings.
+        """
         return self.model.embed_tokens
 
     @torch.no_grad()
@@ -2141,6 +2438,18 @@ class DeepseekV2ForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
+        """
+        Forward pass of the model.
+
+        Args:
+            input_ids (torch.Tensor): The input token IDs.
+            positions (torch.Tensor): The positions of the input tokens.
+            forward_batch (ForwardBatch): The forward batch information.
+            input_embeds (torch.Tensor, optional): The input embeddings. Defaults to None.
+
+        Returns:
+            torch.Tensor: The logits.
+        """
         hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
         return self.logits_processor(
@@ -2148,6 +2457,10 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
+        """
+        Perform post-processing after loading weights.
+        This is mainly for handling quantization and other model-specific optimizations.
+        """
 
         # Perform post-processing after loading weights
         if is_nextn:
