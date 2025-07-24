@@ -441,6 +441,15 @@ class ServerArgs:
                 f"DeepEP MoE is enabled. The expert parallel size is adjusted to be the same as the tensor parallel size[{self.tp_size}]."
             )
 
+        if self.pp_size > 1:
+            self.disable_overlap_schedule = True
+            logger.warning(
+                "Pipeline parallelism is incompatible with overlap schedule."
+            )
+
+        if self.ep_dispatch_algorithm == "static_avoid_rank":
+            assert self.ep_dispatch_avoid_rank is not None
+
         if self.enable_eplb and (self.expert_distribution_recorder_mode is None):
             self.expert_distribution_recorder_mode = "stat"
             logger.info(
