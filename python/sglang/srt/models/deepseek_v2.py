@@ -359,7 +359,10 @@ class DeepseekV2MoE(nn.Module):
             correction_bias=self.gate.e_score_correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
         )
+<<<<<<< HEAD
 
+=======
+>>>>>>> b3176fd8d (merge main (#3))
         self.experts = get_moe_impl_class()(
             num_experts=config.n_routed_experts
             + self.num_fused_shared_experts
