@@ -13,7 +13,7 @@ from sglang.srt.utils import (
 )
 
 try:
-    from deep_ep import Buffer, Config
+    from mxa_ep import Buffer
 
     from sglang.srt.layers.quantization.fp8_kernel import (
         sglang_per_token_group_quant_fp8,
@@ -70,34 +70,17 @@ class DeepEPBuffer:
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
 
-        num_nvl_bytes, num_rdma_bytes = 0, 0
+        num_mxa_bytes = 0
         if deepep_mode.enable_normal():
-            hidden_bytes = hidden_size * param_bytes
-            for config in (
-                DeepEPConfig.get_instance().normal_dispatch_config
-                or Buffer.get_dispatch_config(group.size()),
-                DeepEPConfig.get_instance().normal_combine_config
-                or Buffer.get_combine_config(group.size()),
-            ):
-                num_nvl_bytes = max(
-                    config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
-                    num_nvl_bytes,
-                )
-                num_rdma_bytes = max(
-                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
-                    num_rdma_bytes,
-                )
+            raise NotImplementedError
         if deepep_mode.enable_low_latency():
             assert num_max_dispatch_tokens_per_rank is not None
             assert num_experts is not None and num_experts % group.size() == 0
-            num_rdma_bytes = max(
-                Buffer.get_low_latency_rdma_size_hint(
-                    num_max_dispatch_tokens_per_rank,
-                    hidden_size,
-                    group.size(),
-                    num_experts,
-                ),
-                num_rdma_bytes,
+            num_mxa_bytes = Buffer.get_mxa_size_hint(
+                num_max_dispatch_tokens_per_rank,
+                hidden_size,
+                group.size(),
+                num_experts,
             )
 
         if deepep_mode == DeepEPMode.normal:
@@ -107,15 +90,7 @@ class DeepEPBuffer:
         else:
             raise NotImplementedError
 
-        cls._buffer = Buffer(
-            group,
-            num_nvl_bytes,
-            num_rdma_bytes,
-            low_latency_mode=deepep_mode.enable_low_latency(),
-            num_qps_per_rank=num_qps_per_rank,
-            # TODO can be false when unneeded
-            allow_mnnvl=True,
-        )
+        cls._buffer = Buffer(group, num_mxa_bytes)
         return cls._buffer
 
     @classmethod
@@ -565,7 +540,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
     ):
         buffer = self._get_buffer()
         packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
-            buffer.low_latency_dispatch(
+            buffer.dispatch(
                 hidden_states,
                 topk_idx,
                 self.num_max_dispatch_tokens_per_rank,
@@ -573,10 +548,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 use_fp8=use_fp8,
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
-                round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
-                use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
             )
         )
         return packed_recv_hidden, packed_recv_count, event, hook
@@ -587,16 +558,16 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        hidden_states, event, hook = self._combine_core(
+        hidden_states, gathered_experts, event, hook = self._combine_core(
             hidden_states,
             topk_idx,
             topk_weights,
         )
-        return hidden_states, event, hook
+        return hidden_states, gathered_experts, event, hook
 
-    def combine_b(self, hidden_states, event, hook):
+    def combine_b(self, hidden_states, gathered_experts, event, hook):
         hook() if self.return_recv_hook else event.current_stream_wait()
-        return hidden_states
+        return hidden_states, gathered_experts
 
     def _combine_core(
         self,
@@ -605,7 +576,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
     ):
         buffer = self._get_buffer()
-        combined_hidden_states, event, hook = buffer.low_latency_combine(
+        combined_hidden_states, gathered_experts, event, hook = buffer.combine(
             hidden_states,
             topk_idx,
             topk_weights,
@@ -614,7 +585,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             return_recv_hook=self.return_recv_hook,
         )
         self.handle = None
-        return combined_hidden_states, event, hook
+        return combined_hidden_states, gathered_experts, event, hook
 
     def _get_buffer(self):
         DeepEPBuffer.set_dispatch_mode_as_low_latency()
@@ -668,6 +639,7 @@ class DeepEPDispatcher:
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
+            self._low_latency_dispatcher._get_buffer()
         if self.deepep_mode.enable_normal():
             self._normal_dispatcher = _DeepEPDispatcherImplNormal(
                 async_finish=async_finish,

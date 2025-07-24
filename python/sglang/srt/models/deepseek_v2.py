@@ -710,7 +710,7 @@ class DeepseekV2MoE(nn.Module):
             forward_batch=forward_batch,
         )
         if self.ep_size > 1:
-            final_hidden_states = self.deepep_dispatcher.combine(
+            final_hidden_states, gathered_experts = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
