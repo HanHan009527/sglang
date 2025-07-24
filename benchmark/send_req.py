@@ -23,7 +23,7 @@ def send_request(request_id: int, url: str, payload: dict) -> dict:
             url,
             headers=HEADERS,
             json=payload,
-            timeout=300,  # 增加超时时间
+            timeout=30,  # 增加超时时间
         )
         response.raise_for_status()  # 如果状态码不是 2xx，则引发 HTTPError
 
