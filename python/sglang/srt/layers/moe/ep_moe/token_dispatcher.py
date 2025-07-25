@@ -13,7 +13,8 @@ from sglang.srt.utils import (
 )
 
 try:
-    from mxa_ep import Buffer
+    from deep_ep import Buffer, Config
+    from mxa_ep import Buffer as MxaBuffer
 
     from sglang.srt.layers.quantization.fp8_kernel import (
         sglang_per_token_group_quant_fp8,
@@ -70,18 +71,34 @@ class DeepEPBuffer:
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
 
-        num_mxa_bytes = 0
+        num_nvl_bytes, num_rdma_bytes = 0, 0
         if deepep_mode.enable_normal():
-            raise NotImplementedError
+            hidden_bytes = hidden_size * param_bytes
+            for config in (
+                DeepEPConfig.get_instance().normal_dispatch_config
+                or Buffer.get_dispatch_config(group.size()),
+                DeepEPConfig.get_instance().normal_combine_config
+                or Buffer.get_combine_config(group.size()),
+            ):
+                num_nvl_bytes = max(
+                    config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                    num_nvl_bytes,
+                )
+                num_rdma_bytes = max(
+                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                    num_rdma_bytes,
+                )
         if deepep_mode.enable_low_latency():
             assert num_max_dispatch_tokens_per_rank is not None
             assert num_experts is not None and num_experts % group.size() == 0
-            num_mxa_bytes = Buffer.get_mxa_size_hint(
+            num_mxa_bytes = MxaBuffer.get_mxa_size_hint(
                 num_max_dispatch_tokens_per_rank,
                 hidden_size,
                 group.size(),
                 num_experts,
             )
+            cls._buffer = MxaBuffer(group, num_mxa_bytes)
+            return cls._buffer
 
         if deepep_mode == DeepEPMode.normal:
             num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
@@ -90,7 +107,15 @@ class DeepEPBuffer:
         else:
             raise NotImplementedError
 
-        cls._buffer = Buffer(group, num_mxa_bytes)
+        cls._buffer = Buffer(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            low_latency_mode=deepep_mode.enable_low_latency(),
+            num_qps_per_rank=num_qps_per_rank,
+            # TODO can be false when unneeded
+            allow_mnnvl=True,
+        )
         return cls._buffer
 
     @classmethod
