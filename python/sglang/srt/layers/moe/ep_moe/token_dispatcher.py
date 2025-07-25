@@ -49,6 +49,7 @@ class DeepEPDispatchMode(IntEnum):
 
 class DeepEPBuffer:
     _buffer = None
+    _mxa_buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
     _hidden_size: Optional[int] = None
     _num_max_dispatch_tokens_per_rank: Optional[int] = None
@@ -64,8 +65,8 @@ class DeepEPBuffer:
         num_max_dispatch_tokens_per_rank: int = None,
         num_experts: int = None,
     ):
-        if cls._buffer is not None:
-            return cls._buffer
+        if cls._buffer is not None or cls._mxa_buffer is not None:
+            return cls._buffer, cls._mxa_buffer
 
         cls._hidden_size = hidden_size
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
@@ -97,8 +98,7 @@ class DeepEPBuffer:
                 group.size(),
                 num_experts,
             )
-            cls._buffer = MxaBuffer(group, num_mxa_bytes)
-            return cls._buffer
+            cls._mxa_buffer = MxaBuffer(group, num_mxa_bytes)
 
         if deepep_mode == DeepEPMode.normal:
             num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
@@ -116,7 +116,7 @@ class DeepEPBuffer:
             # TODO can be false when unneeded
             allow_mnnvl=True,
         )
-        return cls._buffer
+        return cls._buffer, cls._mxa_buffer
 
     @classmethod
     def clean_buffer(cls):
@@ -488,7 +488,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
-        )
+        )[0]
 
 
 class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
@@ -621,7 +621,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
-        )
+        )[1]
 
 
 @dataclass
