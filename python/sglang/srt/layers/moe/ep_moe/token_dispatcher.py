@@ -13,7 +13,8 @@ from sglang.srt.utils import (
 )
 
 try:
-    from mxa_ep import Buffer
+    from deep_ep import Buffer, Config
+    from mxa_ep import Buffer as MxaBuffer
 
     from sglang.srt.layers.quantization.fp8_kernel import (
         sglang_per_token_group_quant_fp8,
@@ -48,6 +49,7 @@ class DeepEPDispatchMode(IntEnum):
 
 class DeepEPBuffer:
     _buffer = None
+    _mxa_buffer = None
     _dispatch_mode: Optional[DeepEPDispatchMode] = None
     _hidden_size: Optional[int] = None
     _num_max_dispatch_tokens_per_rank: Optional[int] = None
@@ -63,25 +65,40 @@ class DeepEPBuffer:
         num_max_dispatch_tokens_per_rank: int = None,
         num_experts: int = None,
     ):
-        if cls._buffer is not None:
-            return cls._buffer
+        if cls._buffer is not None or cls._mxa_buffer is not None:
+            return cls._buffer, cls._mxa_buffer
 
         cls._hidden_size = hidden_size
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
 
-        num_mxa_bytes = 0
+        num_nvl_bytes, num_rdma_bytes = 0, 0
         if deepep_mode.enable_normal():
-            raise NotImplementedError
+            hidden_bytes = hidden_size * param_bytes
+            for config in (
+                DeepEPConfig.get_instance().normal_dispatch_config
+                or Buffer.get_dispatch_config(group.size()),
+                DeepEPConfig.get_instance().normal_combine_config
+                or Buffer.get_combine_config(group.size()),
+            ):
+                num_nvl_bytes = max(
+                    config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                    num_nvl_bytes,
+                )
+                num_rdma_bytes = max(
+                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                    num_rdma_bytes,
+                )
         if deepep_mode.enable_low_latency():
             assert num_max_dispatch_tokens_per_rank is not None
             assert num_experts is not None and num_experts % group.size() == 0
-            num_mxa_bytes = Buffer.get_mxa_size_hint(
+            num_mxa_bytes = MxaBuffer.get_mxa_size_hint(
                 num_max_dispatch_tokens_per_rank,
                 hidden_size,
                 group.size(),
                 num_experts,
             )
+            cls._mxa_buffer = MxaBuffer(group, num_mxa_bytes)
 
         if deepep_mode == DeepEPMode.normal:
             num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
@@ -90,8 +107,16 @@ class DeepEPBuffer:
         else:
             raise NotImplementedError
 
-        cls._buffer = Buffer(group, num_mxa_bytes)
-        return cls._buffer
+        cls._buffer = Buffer(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            low_latency_mode=deepep_mode.enable_low_latency(),
+            num_qps_per_rank=num_qps_per_rank,
+            # TODO can be false when unneeded
+            allow_mnnvl=True,
+        )
+        return cls._buffer, cls._mxa_buffer
 
     @classmethod
     def clean_buffer(cls):
@@ -463,7 +488,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
-        )
+        )[0]
 
 
 class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
@@ -596,7 +621,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
-        )
+        )[1]
 
 
 @dataclass
