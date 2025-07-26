@@ -657,7 +657,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             return hidden_states, gathered_experts
         else:
             hook() if self.return_recv_hook else event.current_stream_wait()
-            return hidden_states
+            return hidden_states, []
 
     def _combine_core(
         self,
