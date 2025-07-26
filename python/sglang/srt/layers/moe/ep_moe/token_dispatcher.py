@@ -652,7 +652,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             )
             return packed_recv_hidden, packed_recv_count, event, hook
 
-
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -715,7 +714,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             )
             self.handle = None
             return combined_hidden_states, event, hook
-
 
     def _get_buffer(self):
         DeepEPBuffer.set_dispatch_mode_as_low_latency()

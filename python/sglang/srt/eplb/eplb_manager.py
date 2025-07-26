@@ -75,7 +75,9 @@ class EPLBManager:
 
             rank = torch.distributed.get_rank()
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_path = os.path.join(output_dir, f"expert_metadata_rank_{rank}_{timestamp}.json")
+            file_path = os.path.join(
+                output_dir, f"expert_metadata_rank_{rank}_{timestamp}.json"
+            )
 
             data_to_save = {
                 "physical_to_logical_map": expert_location_metadata.physical_to_logical_map.cpu()

@@ -15,6 +15,7 @@ logging.basicConfig(
 
 HEADERS = {"Content-Type": "application/json"}
 
+
 def send_request(request_id: int, url: str, payload: dict) -> dict:
     """发送单个请求并返回详细结果"""
     start_time = time.time()
@@ -54,6 +55,7 @@ def send_request(request_id: int, url: str, payload: dict) -> dict:
 
     return result
 
+
 def main(args):
     """执行并发测试并输出结果"""
     logging.info(f"开始并发测试: {args.url}")
@@ -75,7 +77,9 @@ def main(args):
             executor.submit(send_request, i, args.url, payload)
             for i in range(1, args.total_requests + 1)
         ]
-        results = [future.result() for future in tqdm(futures, total=args.total_requests)]
+        results = [
+            future.result() for future in tqdm(futures, total=args.total_requests)
+        ]
 
     total_time = time.time() - start_time
 
@@ -112,6 +116,7 @@ def main(args):
             if not r["success"]:
                 logging.warning(f"  - 请求 #{r['request_id']}: {r['error']}")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="并发请求测试工具")
     parser.add_argument(
@@ -121,9 +126,7 @@ if __name__ == "__main__":
         default="http://127.0.0.1:30300/v1/chat/completions",
         help="目标 URL",
     )
-    parser.add_argument(
-        "-c", "--concurrency", type=int, default=10, help="并发数"
-    )
+    parser.add_argument("-c", "--concurrency", type=int, default=10, help="并发数")
     parser.add_argument(
         "-n", "--total-requests", type=int, default=100, help="总请求数"
     )

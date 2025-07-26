@@ -29,10 +29,10 @@ from tqdm import tqdm
 from transformers import PretrainedConfig
 
 from sglang.srt.distributed import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     parallel_state,
     tensor_model_parallel_all_reduce,
-    get_tensor_model_parallel_rank,
 )
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
@@ -220,10 +220,7 @@ class DeepseekV2MLP(nn.Module):
             tp_size=tp_size,
         )
         if hidden_act != "silu":
-            raise ValueError(
-                f"不支持的激活函数: {hidden_act}. "
-                "目前仅支持 silu。"
-            )
+            raise ValueError(f"不支持的激活函数: {hidden_act}. " "目前仅支持 silu。")
         self.act_fn = SiluAndMul()
 
     def forward(self, x, forward_batch=None, can_fuse_mlp_allreduce=False):
@@ -1136,6 +1133,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         Returns:
             AttnForwardMethod: 要使用的注意力前向传播方法。
         """
+
         def _dispatch_mla_subtype():
             if _is_hip:
                 if (
@@ -2223,6 +2221,7 @@ class DeepseekV2Model(nn.Module):
         quant_config (Optional[QuantizationConfig]): 量化配置。
         prefix (str): 模型参数的前缀。
     """
+
     fall_back_to_pt_during_load = False
 
     def __init__(
