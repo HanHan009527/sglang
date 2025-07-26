@@ -649,7 +649,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 topk_idx,
                 topk_weights,
             )
-            return hidden_states, event, hook
+            return hidden_states, [], event, hook
 
     def combine_b(self, hidden_states, gathered_experts, event, hook):
         if _use_mxa_ep:
