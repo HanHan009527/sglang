@@ -12,8 +12,13 @@ from sglang.srt.utils import (
     load_json_config,
 )
 
+_use_mxa_ep = get_bool_env_var("SGLANG_USE_MXA_EP")
+
 try:
-    from mxa_ep import Buffer
+    if _use_mxa_ep:
+        from mxa_ep import Buffer
+    else:
+        from deep_ep import Buffer, Config
 
     from sglang.srt.layers.quantization.fp8_kernel import (
         sglang_per_token_group_quant_fp8,
@@ -70,28 +75,77 @@ class DeepEPBuffer:
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
 
-        num_mxa_bytes = 0
-        if deepep_mode.enable_normal():
-            raise NotImplementedError
-        if deepep_mode.enable_low_latency():
-            assert num_max_dispatch_tokens_per_rank is not None
-            assert num_experts is not None and num_experts % group.size() == 0
-            num_mxa_bytes = Buffer.get_mxa_size_hint(
-                num_max_dispatch_tokens_per_rank,
-                hidden_size,
-                group.size(),
-                num_experts,
-            )
+        if _use_mxa_ep:
+            num_mxa_bytes = 0
+            if deepep_mode.enable_normal():
+                raise NotImplementedError
+            if deepep_mode.enable_low_latency():
+                assert num_max_dispatch_tokens_per_rank is not None
+                assert num_experts is not None and num_experts % group.size() == 0
+                num_mxa_bytes = Buffer.get_mxa_size_hint(
+                    num_max_dispatch_tokens_per_rank,
+                    hidden_size,
+                    group.size(),
+                    num_experts,
+                )
 
-        if deepep_mode == DeepEPMode.normal:
-            num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
-        elif deepep_mode in [DeepEPMode.low_latency, DeepEPMode.auto]:
-            num_qps_per_rank = num_experts // group.size()
+            if deepep_mode == DeepEPMode.normal:
+                num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
+            elif deepep_mode in [DeepEPMode.low_latency, DeepEPMode.auto]:
+                num_qps_per_rank = num_experts // group.size()
+            else:
+                raise NotImplementedError
+
+            cls._buffer = Buffer(group, num_mxa_bytes)
+            return cls._buffer
         else:
-            raise NotImplementedError
+            num_nvl_bytes, num_rdma_bytes = 0, 0
+            if deepep_mode.enable_normal():
+                hidden_bytes = hidden_size * param_bytes
+                for config in (
+                    DeepEPConfig.get_instance().normal_dispatch_config
+                    or Buffer.get_dispatch_config(group.size()),
+                    DeepEPConfig.get_instance().normal_combine_config
+                    or Buffer.get_combine_config(group.size()),
+                ):
+                    num_nvl_bytes = max(
+                        config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
+                        num_nvl_bytes,
+                    )
+                    num_rdma_bytes = max(
+                        config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                        num_rdma_bytes,
+                    )
+            if deepep_mode.enable_low_latency():
+                assert num_max_dispatch_tokens_per_rank is not None
+                assert num_experts is not None and num_experts % group.size() == 0
+                num_rdma_bytes = max(
+                    Buffer.get_low_latency_rdma_size_hint(
+                        num_max_dispatch_tokens_per_rank,
+                        hidden_size,
+                        group.size(),
+                        num_experts,
+                    ),
+                    num_rdma_bytes,
+                )
 
-        cls._buffer = Buffer(group, num_mxa_bytes)
-        return cls._buffer
+            if deepep_mode == DeepEPMode.normal:
+                num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
+            elif deepep_mode in [DeepEPMode.low_latency, DeepEPMode.auto]:
+                num_qps_per_rank = num_experts // group.size()
+            else:
+                raise NotImplementedError
+
+            cls._buffer = Buffer(
+                group,
+                num_nvl_bytes,
+                num_rdma_bytes,
+                low_latency_mode=deepep_mode.enable_low_latency(),
+                num_qps_per_rank=num_qps_per_rank,
+                # TODO can be false when unneeded
+                allow_mnnvl=True,
+            )
+            return cls._buffer
 
     @classmethod
     def clean_buffer(cls):
@@ -538,6 +592,42 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         use_fp8: bool = False,
     ):
+
+        if _use_mxa_ep:
+            buffer = self._get_buffer()
+            packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
+                buffer.dispatch(
+                    hidden_states,
+                    topk_idx,
+                    self.num_max_dispatch_tokens_per_rank,
+                    self.num_experts,
+                    use_fp8=use_fp8,
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                )
+            )
+            return packed_recv_hidden, packed_recv_count, event, hook
+
+        else:
+            buffer = self._get_buffer()
+            packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
+                buffer.low_latency_dispatch(
+                    hidden_states,
+                    topk_idx,
+                    self.num_max_dispatch_tokens_per_rank,
+                    self.num_experts,
+                    use_fp8=use_fp8,
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                    and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                    use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                    and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                )
+            )
+            return packed_recv_hidden, packed_recv_count, event, hook
+
+
         buffer = self._get_buffer()
         packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
             buffer.dispatch(
@@ -558,12 +648,23 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        hidden_states, gathered_experts, event, hook = self._combine_core(
-            hidden_states,
-            topk_idx,
-            topk_weights,
-        )
-        return hidden_states, gathered_experts, event, hook
+
+        if _use_mxa_ep:
+            hidden_states, gathered_experts, event, hook = self._combine_core(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+            )
+            return hidden_states, gathered_experts, event, hook
+
+        else:
+
+            hidden_states, event, hook = self._combine_core(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+            )
+            return hidden_states, event, hook
 
     def combine_b(self, hidden_states, gathered_experts, event, hook):
         hook() if self.return_recv_hook else event.current_stream_wait()
