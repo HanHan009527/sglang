@@ -496,6 +496,31 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return hidden_states
 
     def _combine_core(self, x: torch.Tensor, previous_event):
+        if _use_mxa_ep:
+            buffer = self._get_buffer()
+            combined_hidden_states, gathered_experts, event, hook = buffer.combine(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                self.handle,
+                async_finish=not self.return_recv_hook,
+                return_recv_hook=self.return_recv_hook,
+            )
+            self.handle = None
+            return combined_hidden_states, gathered_experts, event, hook
+        else:
+            buffer = self._get_buffer()
+            combined_hidden_states, event, hook = buffer.low_latency_combine(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                self.handle,
+                async_finish=not self.return_recv_hook,
+                return_recv_hook=self.return_recv_hook,
+            )
+            self.handle = None
+            return combined_hidden_states, event, hook
+
         buffer = self._get_buffer()
         combined_x, _, event = buffer.combine(
             x,
@@ -628,20 +653,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             return packed_recv_hidden, packed_recv_count, event, hook
 
 
-        buffer = self._get_buffer()
-        packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
-            buffer.dispatch(
-                hidden_states,
-                topk_idx,
-                self.num_max_dispatch_tokens_per_rank,
-                self.num_experts,
-                use_fp8=use_fp8,
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-            )
-        )
-        return packed_recv_hidden, packed_recv_count, event, hook
-
     def combine_a(
         self,
         hidden_states: torch.Tensor,
@@ -667,8 +678,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             return hidden_states, event, hook
 
     def combine_b(self, hidden_states, gathered_experts, event, hook):
-        hook() if self.return_recv_hook else event.current_stream_wait()
-        return hidden_states, gathered_experts
+        if _use_mxa_ep:
+            hook() if self.return_recv_hook else event.current_stream_wait()
+            return hidden_states, gathered_experts
+        else:
+            hook() if self.return_recv_hook else event.current_stream_wait()
+            return hidden_states
 
     def _combine_core(
         self,
@@ -676,17 +691,31 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        buffer = self._get_buffer()
-        combined_hidden_states, gathered_experts, event, hook = buffer.combine(
-            hidden_states,
-            topk_idx,
-            topk_weights,
-            self.handle,
-            async_finish=not self.return_recv_hook,
-            return_recv_hook=self.return_recv_hook,
-        )
-        self.handle = None
-        return combined_hidden_states, gathered_experts, event, hook
+        if _use_mxa_ep:
+            buffer = self._get_buffer()
+            combined_hidden_states, gathered_experts, event, hook = buffer.combine(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                self.handle,
+                async_finish=not self.return_recv_hook,
+                return_recv_hook=self.return_recv_hook,
+            )
+            self.handle = None
+            return combined_hidden_states, gathered_experts, event, hook
+        else:
+            buffer = self._get_buffer()
+            combined_hidden_states, event, hook = buffer.low_latency_combine(
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                self.handle,
+                async_finish=not self.return_recv_hook,
+                return_recv_hook=self.return_recv_hook,
+            )
+            self.handle = None
+            return combined_hidden_states, event, hook
+
 
     def _get_buffer(self):
         DeepEPBuffer.set_dispatch_mode_as_low_latency()
@@ -740,7 +769,8 @@ class DeepEPDispatcher:
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
-            self._low_latency_dispatcher._get_buffer()
+            if _use_mxa_ep:
+                self._low_latency_dispatcher._get_buffer()
         if self.deepep_mode.enable_normal():
             self._normal_dispatcher = _DeepEPDispatcherImplNormal(
                 async_finish=async_finish,
