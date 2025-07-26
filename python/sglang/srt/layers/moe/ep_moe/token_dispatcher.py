@@ -496,31 +496,6 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         return hidden_states
 
     def _combine_core(self, x: torch.Tensor, previous_event):
-        if _use_mxa_ep:
-            buffer = self._get_buffer()
-            combined_hidden_states, gathered_experts, event, hook = buffer.combine(
-                hidden_states,
-                topk_idx,
-                topk_weights,
-                self.handle,
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-            )
-            self.handle = None
-            return combined_hidden_states, gathered_experts, event, hook
-        else:
-            buffer = self._get_buffer()
-            combined_hidden_states, event, hook = buffer.low_latency_combine(
-                hidden_states,
-                topk_idx,
-                topk_weights,
-                self.handle,
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-            )
-            self.handle = None
-            return combined_hidden_states, event, hook
-
         buffer = self._get_buffer()
         combined_x, _, event = buffer.combine(
             x,
