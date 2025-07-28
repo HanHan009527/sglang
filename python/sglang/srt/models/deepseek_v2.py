@@ -2137,7 +2137,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             and not (self.enable_dp_attention and self.speculative_algorithm.is_eagle())
             and not self.is_nextn
         )
-        logging.info(f"Enter mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.is_decode}")
+        logging.info(f"Enter mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}")
         # MLP 计算
         hidden_states = self.mlp(hidden_states, forward_batch, can_fuse_mlp_allreduce)
 
