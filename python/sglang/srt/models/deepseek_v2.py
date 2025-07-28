@@ -2109,6 +2109,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         Returns:
             torch.Tensor: 输出的隐藏状态和残差。
         """
+        logging.info(f"Enter layer {self.layer_id}, is_moe_layer: {self.is_layer_sparse}")
 
         # 准备注意力计算
         hidden_states, residual = self.layer_communicator.prepare_attn(
@@ -2466,6 +2467,9 @@ class DeepseekV2ForCausalLM(nn.Module):
             print(f"SGLANG_DEBUG_EXIT_IF_AVOID_RANK is set to 1 and SGLANG_EP_AVOID_RANK is set to {avoid_rank}, exiting.")
             import sys
             sys.exit(0)
+
+        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
+
         if get_tensor_model_parallel_rank() == avoid_rank:
             hidden_states = torch.zeros((input_ids.size(0), self.config.hidden_size), dtype=self.config.torch_dtype, device='cuda')
         else:
