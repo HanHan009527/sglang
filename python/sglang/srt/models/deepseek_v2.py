@@ -2109,14 +2109,14 @@ class DeepseekV2DecoderLayer(nn.Module):
         Returns:
             torch.Tensor: 输出的隐藏状态和残差。
         """
-        logging.info(f"Enter layer {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.is_decode}")
+        logging.info(f"Enter layer {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}")
 
         # 准备注意力计算
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
 
-        logging.info(f"Enter self_attn {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.is_decode}")
+        logging.info(f"Enter self_attn {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}")
         # 自注意力计算
         hidden_states = self.self_attn(
             positions=positions,
@@ -2125,7 +2125,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             zero_allocator=zero_allocator,
         )
 
-        logging.info(f"Enter prepare_mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.is_decode}")
+        logging.info(f"Enter prepare_mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}")
         # 准备 MLP 计算
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
