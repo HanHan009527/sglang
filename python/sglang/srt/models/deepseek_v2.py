@@ -2462,6 +2462,10 @@ class DeepseekV2ForCausalLM(nn.Module):
             torch.Tensor: The logits.
         """
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
+        if os.environ.get("SGLANG_DEBUG_EXIT_IF_AVOID_RANK", "0") == "1" and avoid_rank != -1:
+            print(f"SGLANG_DEBUG_EXIT_IF_AVOID_RANK is set to 1 and SGLANG_EP_AVOID_RANK is set to {avoid_rank}, exiting.")
+            import sys
+            sys.exit(0)
         if get_tensor_model_parallel_rank() == avoid_rank:
             hidden_states = torch.zeros((input_ids.size(0), self.config.hidden_size), dtype=self.config.torch_dtype, device='cuda')
         else:
