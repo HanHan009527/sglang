@@ -508,7 +508,11 @@ class DeepseekV2MoE(nn.Module):
             else:
                 return self.forward_normal(hidden_states, can_fuse_mlp_allreduce)
         else:
-            return self.forward_deepep(hidden_states, forward_batch)
+            avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
+            if self.ep_rank == avoid_rank:
+                return torch.zeros_like(hidden_states)
+            else:
+                return self.forward_deepep(hidden_states, forward_batch)
 
     def forward_normal_dual_stream(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False

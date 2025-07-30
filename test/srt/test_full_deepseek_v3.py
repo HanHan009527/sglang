@@ -85,10 +85,16 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--enable-deepep-moe",
             "--deepep-mode",
             "low_latency",
+            "--enable-eplb",
+            "--ep-num-redundant-experts",
+            "32",
+            "--enable-dp-attention",
+            "--dp-size",
+            "8",
             "--max-prefill-tokens",
             "128",
             "--mem-fraction-static",
-            "0.5",
+            "0.8",
         ]
         cls.process = popen_launch_server(
             cls.model,
