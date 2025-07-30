@@ -2464,11 +2464,11 @@ class DeepseekV2ForCausalLM(nn.Module):
         Returns:
             torch.Tensor: The logits.
         """
-        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
-
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
         if get_tensor_model_parallel_rank() == avoid_rank:
-            hidden_states = torch.zeros_like(hidden_states)
+            hidden_states = torch.zeros((input_ids.size(0), self.config.hidden_size), dtype=self.config.torch_dtype, device='cuda')
+        else:
+            hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
