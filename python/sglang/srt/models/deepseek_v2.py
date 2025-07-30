@@ -744,7 +744,7 @@ class DeepseekV2MoE(nn.Module):
                 ]
                 finished_logical_experts[gathered_logical_experts] = 1
                 if i == 0:
-                    print(finished_logical_experts)
+                    print(gathered_experts)
             if final_hidden_states is None:
                 final_hidden_states = hidden_states
             else:
