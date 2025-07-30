@@ -89,7 +89,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--ep-dispatch-algorithm",
             "dynamic",
             "--ep-num-redundant-experts",
-            "32",
+            "40",
             "--enable-dp-attention",
             "--dp-size",
             "8",
