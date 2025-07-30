@@ -700,6 +700,7 @@ class DeepseekV2MoE(nn.Module):
                     (0, self.top_k), dtype=torch.float32, device=hidden_states.device
                 )
             if self.ep_size > 1:
+                print(hidden_states.shape, topk_idx.shape)
                 # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
                 (
                     hidden_states,
