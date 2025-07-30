@@ -743,7 +743,8 @@ class DeepseekV2MoE(nn.Module):
                     torch.nonzero(gathered_experts - broken_physical_experts).reshape(-1)
                 ]
                 finished_logical_experts[gathered_logical_experts] = 1
-                print(gathered_experts, gathered_logical_experts, finished_logical_experts)
+                if i == 0:
+                    print(gathered_experts)
             if final_hidden_states is None:
                 final_hidden_states = hidden_states
             else:
