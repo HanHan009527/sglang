@@ -91,10 +91,15 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--enable-dp-attention",
             "--dp-size",
             "8",
+            "--moe-dense-tp-size",
+            "1",
             "--max-prefill-tokens",
             "128",
             "--mem-fraction-static",
-            "0.8",
+            "0.9",
+            "--disable-cuda-graph",
+            "--dist-init-addr",
+            "192.168.0.235:5000",
         ]
         cls.process = popen_launch_server(
             cls.model,

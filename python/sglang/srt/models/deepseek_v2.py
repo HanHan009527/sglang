@@ -686,7 +686,7 @@ class DeepseekV2MoE(nn.Module):
                 num_token_non_padded=forward_batch.num_token_non_padded,
                 expert_location_dispatch_info=expert_location_dispatch_info,
             )
-            logging.info(f"topk_idx: {topk_idx}")
+            # logging.info(f"topk_idx: {topk_idx}")
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -790,7 +790,7 @@ class DeepseekV2MoE(nn.Module):
                         layer_id=self.layer_id,
                     ),
                 )
-                logging.info(f"topk_idx_local: {state.topk_idx_local}")
+                # logging.info(f"topk_idx_local: {state.topk_idx_local}")
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
