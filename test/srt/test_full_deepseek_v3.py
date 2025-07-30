@@ -97,6 +97,8 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "1",
             "--max-prefill-tokens",
             "128",
+            "--chunked-prefill-size",
+            "128",
             "--mem-fraction-static",
             "0.9",
             "--disable-cuda-graph",
