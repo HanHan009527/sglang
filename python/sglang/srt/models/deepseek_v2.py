@@ -665,7 +665,9 @@ class DeepseekV2MoE(nn.Module):
         expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
             layer_id=self.layer_id,
         )
-        broken_nodes = expert_location_dispatch_info.broken_nodes
+        # broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_nodes = torch.zeros((self.ep_size,), dtype=torch.int32, device='cuda')
+        broken_nodes[0] = 1
         broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
         num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
         broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
@@ -674,7 +676,6 @@ class DeepseekV2MoE(nn.Module):
             broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
             broken_physical_experts[broken_physical_expert_indices] = 1
         gathered_experts = broken_physical_experts.clone()
-        print('broken', broken_nodes, broken_physical_experts)
 
         max_attempts = 2 if self.ep_size > 1 else 1
         num_logical_experts = expert_location_dispatch_info.partial_logical_to_all_physical_map.shape[0]
@@ -742,7 +743,7 @@ class DeepseekV2MoE(nn.Module):
                     torch.nonzero(gathered_experts - broken_physical_experts).reshape(-1)
                 ]
                 finished_logical_experts[gathered_logical_experts] = 1
-                # print(gathered_experts, gathered_logical_experts, finished_logical_experts)
+                print(gathered_experts, gathered_logical_experts, finished_logical_experts)
             if final_hidden_states is None:
                 final_hidden_states = hidden_states
             else:
