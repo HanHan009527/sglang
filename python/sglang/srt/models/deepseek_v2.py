@@ -508,11 +508,7 @@ class DeepseekV2MoE(nn.Module):
             else:
                 return self.forward_normal(hidden_states, can_fuse_mlp_allreduce)
         else:
-            avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
-            if self.ep_rank == avoid_rank:
-                return torch.zeros_like(hidden_states)
-            else:
-                return self.forward_deepep(hidden_states, forward_batch)
+            return self.forward_deepep(hidden_states, forward_batch)
 
     def forward_normal_dual_stream(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False
@@ -669,68 +665,91 @@ class DeepseekV2MoE(nn.Module):
         expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
             layer_id=self.layer_id,
         )
-        broken_nodes = torch.zeros((self.ep_size,), dtype=torch.int32, device='cuda')
-        gathered_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
-        avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
-        if avoid_rank >= 0:
-            broken_nodes[avoid_rank] = 1
-            num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
-            gathered_experts[avoid_rank * num_experts_per_rank:(avoid_rank + 1) * num_experts_per_rank] = 1
-        if is_non_idle_and_non_empty(forward_mode, hidden_states):
-            # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states)
-            shared_output = self._forward_shared_experts(hidden_states)
-            topk_weights, topk_idx, _ = self.topk(
-                hidden_states,
-                router_logits,
-                num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=expert_location_dispatch_info,
-            )
-            # logging.info(f"topk_idx: {topk_idx}")
-        else:
-            topk_idx = torch.full(
-                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
-            )
-            topk_weights = torch.empty(
-                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
-            )
-        if self.ep_size > 1:
-            # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
-            (
-                hidden_states,
-                topk_idx,
-                topk_weights,
-                reorder_topk_ids,
-                num_recv_tokens_per_expert,
-                seg_indptr,
-                masked_m,
-                expected_m,
-            ) = self.deepep_dispatcher.dispatch(
+        broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
+        num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
+        broken_node_indices = torch.nonzero(broken_nodes).squeeze()
+        broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
+        broken_physical_experts[broken_physical_expert_indices] = 1
+        gathered_experts = broken_physical_experts.clone()
+
+        max_attempts = 2 if self.ep_size > 1 else 1
+        num_logical_experts = expert_location_dispatch_info.partial_logical_to_all_physical_map.shape[0]
+        finished_logical_experts = torch.zeros(
+            (num_logical_experts,), dtype=torch.int32, device=hidden_states.device
+        )
+        final_hidden_states = None
+        for i in range(max_attempts):
+            if is_non_idle_and_non_empty(forward_mode, hidden_states):
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
+                shared_output = self._forward_shared_experts(hidden_states)
+                topk_weights, topk_idx, _ = self.topk(
+                    hidden_states,
+                    router_logits,
+                    num_token_non_padded=forward_batch.num_token_non_padded,
+                    expert_location_dispatch_info=expert_location_dispatch_info,
+                )
+                # logging.info(f"topk_idx: {topk_idx}")
+            else:
+                topk_idx = torch.full(
+                    (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+                )
+                topk_weights = torch.empty(
+                    (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+                )
+            if self.ep_size > 1:
+                # TODO(ch-wan): 允许用户设置 num_max_dispatch_tokens_per_rank 的值
+                (
+                    hidden_states,
+                    topk_idx,
+                    topk_weights,
+                    reorder_topk_ids,
+                    num_recv_tokens_per_expert,
+                    seg_indptr,
+                    masked_m,
+                    expected_m,
+                ) = self.deepep_dispatcher.dispatch(
+                    hidden_states=hidden_states,
+                    topk_idx=topk_idx,
+                    topk_weights=topk_weights,
+                    broken_nodes=broken_nodes,
+                    forward_batch=forward_batch,
+                )
+            hidden_states = self.experts(
                 hidden_states=hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
-                broken_nodes=broken_nodes,
+                reorder_topk_ids=reorder_topk_ids,
+                seg_indptr=seg_indptr,
+                masked_m=masked_m,
+                expected_m=expected_m,
+                num_recv_tokens_per_expert=num_recv_tokens_per_expert,
                 forward_batch=forward_batch,
             )
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            reorder_topk_ids=reorder_topk_ids,
-            seg_indptr=seg_indptr,
-            masked_m=masked_m,
-            expected_m=expected_m,
-            num_recv_tokens_per_expert=num_recv_tokens_per_expert,
-            forward_batch=forward_batch,
-        )
-        if self.ep_size > 1:
-            final_hidden_states = self.deepep_dispatcher.combine(
-                hidden_states=final_hidden_states,
-                topk_idx=topk_idx,
-                topk_weights=topk_weights,
-                gathered_experts=gathered_experts,
-                forward_batch=forward_batch,
-            )
+            if self.ep_size > 1:
+                hidden_states = self.deepep_dispatcher.combine(
+                    hidden_states=hidden_states,
+                    topk_idx=topk_idx,
+                    topk_weights=topk_weights,
+                    gathered_experts=gathered_experts,
+                    forward_batch=forward_batch,
+                )
+                gathered_logical_experts = expert_location_dispatch_info.partial_physical_to_logical_map[
+                    gathered_experts - broken_physical_experts
+                ]
+                finished_logical_experts += gathered_logical_experts
+            if final_hidden_states is None:
+                final_hidden_states = hidden_states
+            else:
+                final_hidden_states += hidden_states
+            if finished_logical_experts.all():
+                break
+            else:
+                # TODO: avoid hardcoding the mapping
+                expert_location_dispatch_info.partial_logical_to_all_physical_map_num_valid[
+                    (finished_logical_experts == 0).nonzero(as_tuple=True)
+                ] = 1
 
         if shared_output is not None:
             x = shared_output

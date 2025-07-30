@@ -86,6 +86,8 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--deepep-mode",
             "low_latency",
             "--enable-eplb",
+            "--ep-dispatch-algorithm",
+            "dynamic",
             "--ep-num-redundant-experts",
             "32",
             "--enable-dp-attention",
