@@ -737,9 +737,9 @@ class DeepseekV2MoE(nn.Module):
                     forward_batch=forward_batch,
                 )
                 gathered_logical_experts = expert_location_dispatch_info.partial_physical_to_logical_map[
-                    gathered_experts - broken_physical_experts
+                    torch.nonzero(gathered_experts - broken_physical_experts).squeeze()
                 ]
-                finished_logical_experts += gathered_logical_experts
+                finished_logical_experts[gathered_logical_experts] = 1
             if final_hidden_states is None:
                 final_hidden_states = hidden_states
             else:
