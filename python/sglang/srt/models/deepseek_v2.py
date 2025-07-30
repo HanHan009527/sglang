@@ -508,11 +508,7 @@ class DeepseekV2MoE(nn.Module):
             else:
                 return self.forward_normal(hidden_states, can_fuse_mlp_allreduce)
         else:
-            avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
-            if self.ep_rank == avoid_rank:
-                return torch.zeros_like(hidden_states)
-            else:
-                return self.forward_deepep(hidden_states, forward_batch)
+            return self.forward_deepep(hidden_states, forward_batch)
 
     def forward_normal_dual_stream(
         self, hidden_states: torch.Tensor, can_fuse_mlp_allreduce: bool = False
@@ -669,13 +665,14 @@ class DeepseekV2MoE(nn.Module):
         expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
             layer_id=self.layer_id,
         )
-        broken_nodes = torch.zeros((self.ep_size,), dtype=torch.int32, device='cuda')
-        gathered_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
-        avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
-        if avoid_rank >= 0:
-            broken_nodes[avoid_rank] = 1
-            num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
-            gathered_experts[avoid_rank * num_experts_per_rank:(avoid_rank + 1) * num_experts_per_rank] = 1
+        broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
+        num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
+        broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
+        if broken_node_indices.size(0) > 0:
+            broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
+            broken_physical_experts[broken_physical_expert_indices] = 1
+        gathered_experts = broken_physical_experts.clone()
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
