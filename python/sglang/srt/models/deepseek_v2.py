@@ -669,8 +669,9 @@ class DeepseekV2MoE(nn.Module):
         broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
         num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
         broken_node_indices = torch.nonzero(broken_nodes).squeeze()
-        broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
-        broken_physical_experts[broken_physical_expert_indices] = 1
+        if broken_node_indices.size(0) > 0:
+            broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
+            broken_physical_experts[broken_physical_expert_indices] = 1
         gathered_experts = broken_physical_experts.clone()
 
         max_attempts = 2 if self.ep_size > 1 else 1
