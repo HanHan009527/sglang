@@ -669,27 +669,6 @@ class DeepseekV2MoE(nn.Module):
             layer_id=self.layer_id,
         )
         broken_nodes = expert_location_dispatch_info.broken_nodes
-        broken_physical_experts = torch.zeros(
-            (expert_location_dispatch_info.num_physical_experts,),
-            dtype=torch.int32,
-            device="cuda",
-        )
-        num_experts_per_rank = (
-            expert_location_dispatch_info.num_physical_experts // self.ep_size
-        )
-        broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
-        if broken_node_indices.size(0) > 0:
-            broken_physical_expert_indices = torch.cat(
-                [
-                    torch.arange(
-                        idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank
-                    )
-                    for idx in broken_node_indices
-                ]
-            )
-            broken_physical_experts[broken_physical_expert_indices] = 1
-
-        # logger.info(f"break nodes info broken_nodes: {broken_nodes}")
         # broken_physical_experts = torch.zeros(
         #     (expert_location_dispatch_info.num_physical_experts,),
         #     dtype=torch.int32,
@@ -698,9 +677,30 @@ class DeepseekV2MoE(nn.Module):
         # num_experts_per_rank = (
         #     expert_location_dispatch_info.num_physical_experts // self.ep_size
         # )
-        # broken_physical_experts.view(self.ep_size, num_experts_per_rank).copy_(
-        #     broken_nodes.unsqueeze(1)
-        # )
+        # broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
+        # if broken_node_indices.size(0) > 0:
+        #     broken_physical_expert_indices = torch.cat(
+        #         [
+        #             torch.arange(
+        #                 idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank
+        #             )
+        #             for idx in broken_node_indices
+        #         ]
+        #     )
+        #     broken_physical_experts[broken_physical_expert_indices] = 1
+
+        # logger.info(f"break nodes info broken_nodes: {broken_nodes}")
+        broken_physical_experts = torch.zeros(
+            (expert_location_dispatch_info.num_physical_experts,),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        num_experts_per_rank = (
+            expert_location_dispatch_info.num_physical_experts // self.ep_size
+        )
+        broken_physical_experts.view(self.ep_size, num_experts_per_rank).copy_(
+            broken_nodes.unsqueeze(1)
+        )
         gathered_experts = broken_physical_experts.clone()
 
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
