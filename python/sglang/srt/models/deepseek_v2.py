@@ -2426,7 +2426,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
 
         self.inference_counter = 0
-        self.trigger_at = 100
+        self.trigger_at = 20
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
