@@ -1588,6 +1588,15 @@ class ModelRunner:
             self.forward_pass_id,
             forward_batch,
         ):
+            # First call, discard result
+            _ = self._forward_raw(
+                forward_batch,
+                skip_attn_backend_init,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
+            # Second call, use result
             output = self._forward_raw(
                 forward_batch,
                 skip_attn_backend_init,
