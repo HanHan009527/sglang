@@ -1600,9 +1600,10 @@ class ModelRunner:
             get_global_expert_location_metadata().broken_nodes,
             get_global_expert_location_metadata().last_broken_nodes,
         ):
-            get_global_expert_location_metadata.last_broken_nodes = (
-                get_global_expert_location_metadata.broken_nodes.clone()
+            get_global_expert_location_metadata().last_broken_nodes = (
+                get_global_expert_location_metadata().broken_nodes.clone()
             )
+            logging.info(f"recompute _forward_raw")
             # self.eplb_manager.rebalance()
             output = self._forward_raw(
                 forward_batch,
