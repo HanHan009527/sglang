@@ -433,6 +433,7 @@ class DeepseekV2MoE(nn.Module):
         if global_server_args_dict["enable_deepep_moe"]:
             # TODO: 未来将支持 tp < ep
             self.ep_size = get_tensor_model_parallel_world_size()
+            self.ep_rank = get_tensor_model_parallel_rank()
             self.num_experts = (
                 config.n_routed_experts
                 + global_server_args_dict["ep_num_redundant_experts"]
@@ -661,6 +662,17 @@ class DeepseekV2MoE(nn.Module):
         """
         forward_mode = forward_batch.forward_mode
         shared_output = None
+        expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
+            layer_id=self.layer_id,
+        )
+        broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
+        num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
+        broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
+        if broken_node_indices.size(0) > 0:
+            broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
+            broken_physical_experts[broken_physical_expert_indices] = 1
+        gathered_experts = broken_physical_experts.clone()
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
@@ -669,11 +681,9 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states,
                 router_logits,
                 num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
-                    layer_id=self.layer_id,
-                ),
+                expert_location_dispatch_info=expert_location_dispatch_info,
             )
-            logging.info(f"topk_idx: {topk_idx}")
+            # logging.info(f"topk_idx: {topk_idx}")
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -696,6 +706,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
+                broken_nodes=broken_nodes,
                 forward_batch=forward_batch,
             )
         final_hidden_states = self.experts(
@@ -710,10 +721,11 @@ class DeepseekV2MoE(nn.Module):
             forward_batch=forward_batch,
         )
         if self.ep_size > 1:
-            final_hidden_states, gathered_experts = self.deepep_dispatcher.combine(
+            final_hidden_states = self.deepep_dispatcher.combine(
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
+                gathered_experts=gathered_experts,
                 forward_batch=forward_batch,
             )
 
@@ -775,7 +787,7 @@ class DeepseekV2MoE(nn.Module):
                         layer_id=self.layer_id,
                     ),
                 )
-                logging.info(f"topk_idx_local: {state.topk_idx_local}")
+                # logging.info(f"topk_idx_local: {state.topk_idx_local}")
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -2449,11 +2461,11 @@ class DeepseekV2ForCausalLM(nn.Module):
         Returns:
             torch.Tensor: The logits.
         """
-        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
-
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
         if get_tensor_model_parallel_rank() == avoid_rank:
-            hidden_states = torch.zeros_like(hidden_states)
+            hidden_states = torch.zeros((input_ids.size(0), self.config.hidden_size), dtype=self.config.torch_dtype, device='cuda')
+        else:
+            hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch

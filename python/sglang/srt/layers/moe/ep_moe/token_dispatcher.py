@@ -236,6 +236,7 @@ class _DeepEPDispatcherImplBase:
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        broken_nodes: torch.Tensor,
     ):
         raise NotImplementedError
 
@@ -247,6 +248,7 @@ class _DeepEPDispatcherImplBase:
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        gathered_experts: torch.Tensor,
     ):
         raise NotImplementedError
 
@@ -269,6 +271,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        broken_nodes: torch.Tensor,
     ):
         topk_idx = topk_idx.to(torch.int64)
         if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
@@ -458,6 +461,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        gathered_experts: torch.Tensor,
     ):
         if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter:
             output = hidden_states
@@ -535,6 +539,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        broken_nodes: torch.Tensor,
     ):
         buffer = self._get_buffer()
         topk_idx = topk_idx.to(torch.int64)
@@ -545,6 +550,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_idx,
+            broken_nodes,
             use_fp8=True,
         )
         return (
@@ -590,6 +596,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         self,
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
+        broken_nodes: torch.Tensor,
         use_fp8: bool = False,
     ):
 
@@ -599,6 +606,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 buffer.dispatch(
                     hidden_states,
                     topk_idx,
+                    broken_nodes,
                     self.num_max_dispatch_tokens_per_rank,
                     self.num_experts,
                     use_fp8=use_fp8,
@@ -632,51 +640,44 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        gathered_experts: torch.Tensor,
     ):
+        hidden_states, event, hook = self._combine_core(
+            hidden_states,
+            topk_idx,
+            topk_weights,
+            gathered_experts,
+        )
+        return hidden_states, event, hook
 
-        if _use_mxa_ep:
-            hidden_states, gathered_experts, event, hook = self._combine_core(
-                hidden_states,
-                topk_idx,
-                topk_weights,
-            )
-            return hidden_states, gathered_experts, event, hook
-
-        else:
-
-            hidden_states, event, hook = self._combine_core(
-                hidden_states,
-                topk_idx,
-                topk_weights,
-            )
-            return hidden_states, [], event, hook
-
-    def combine_b(self, hidden_states, gathered_experts, event, hook):
+    def combine_b(self, hidden_states, event, hook):
         if _use_mxa_ep:
             hook() if self.return_recv_hook else event.current_stream_wait()
-            return hidden_states, gathered_experts
+            return hidden_states
         else:
             hook() if self.return_recv_hook else event.current_stream_wait()
-            return hidden_states, []
+            return hidden_states
 
     def _combine_core(
         self,
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        gathered_experts: torch.Tensor,
     ):
         if _use_mxa_ep:
             buffer = self._get_buffer()
-            combined_hidden_states, gathered_experts, event, hook = buffer.combine(
+            combined_hidden_states, event, hook = buffer.combine(
                 hidden_states,
                 topk_idx,
                 topk_weights,
+                gathered_experts,
                 self.handle,
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
             )
             self.handle = None
-            return combined_hidden_states, gathered_experts, event, hook
+            return combined_hidden_states, event, hook
         else:
             buffer = self._get_buffer()
             combined_hidden_states, event, hook = buffer.low_latency_combine(
@@ -762,6 +763,7 @@ class DeepEPDispatcher:
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        broken_nodes: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
         self._update_stage(_Stage.INITIAL, _Stage.AFTER_DISPATCH_A)
@@ -769,6 +771,7 @@ class DeepEPDispatcher:
             hidden_states=hidden_states,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
+            broken_nodes=broken_nodes,
         )
         self._dispatch_intermediate_state = forward_batch, inner_state
 
@@ -788,6 +791,7 @@ class DeepEPDispatcher:
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
+        gathered_experts: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
         self._update_stage(_Stage.AFTER_DISPATCH_B, _Stage.AFTER_COMBINE_A)
@@ -795,6 +799,7 @@ class DeepEPDispatcher:
             hidden_states=hidden_states,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
+            gathered_experts=gathered_experts,
         )
         self._combine_intermediate_state = forward_batch, inner_state
 

@@ -39,6 +39,7 @@ class ExpertLocationMetadata:
     logical_to_all_physical_map_num_valid: torch.Tensor  # (layers, num_logical_experts)
     # (layers, num_logical_experts)
     logical_to_rank_dispatch_physical_map: Optional[torch.Tensor]
+    broken_nodes: torch.Tensor
 
     # -------------------------------- properties ------------------------------------
 
@@ -206,6 +207,8 @@ class ExpertLocationMetadata:
         avoid_rank_str = os.environ.get("SGLANG_EP_AVOID_RANK")
         avoid_rank = int(avoid_rank_str) if avoid_rank_str else -1
 
+        broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device='cuda')
+
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
@@ -235,6 +238,7 @@ class ExpertLocationMetadata:
                 if server_args.ep_dispatch_algorithm == "static"
                 else None
             ),
+            broken_nodes=broken_nodes,
         )
 
     # -------------------------------- mutation ------------------------------------

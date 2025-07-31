@@ -31,6 +31,8 @@ class ExpertLocationDispatchInfo:
     # (num_logical_experts,)
     partial_logical_to_all_physical_map_num_valid: torch.Tensor
     num_physical_experts: int
+    # (ep_size,)
+    broken_nodes: torch.Tensor
 
     @classmethod
     def init_new(cls, layer_id: int):
@@ -57,6 +59,7 @@ class ExpertLocationDispatchInfo:
                 layer_id, :
             ],
             num_physical_experts=expert_location_metadata.num_physical_experts,
+            broken_nodes=expert_location_metadata.broken_nodes,
         )
 
 
