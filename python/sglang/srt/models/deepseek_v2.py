@@ -725,6 +725,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=final_hidden_states,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
+                broken_nodes=broken_nodes,
                 gathered_experts=gathered_experts,
                 forward_batch=forward_batch,
             )
