@@ -33,7 +33,6 @@ class ExpertLocationDispatchInfo:
     num_physical_experts: int
     # (ep_size,)
     broken_nodes: torch.Tensor
-    last_broken_nodes: torch.Tensor
 
     @classmethod
     def init_new(cls, layer_id: int):
@@ -61,7 +60,6 @@ class ExpertLocationDispatchInfo:
             ],
             num_physical_experts=expert_location_metadata.num_physical_experts,
             broken_nodes=expert_location_metadata.broken_nodes,
-            last_broken_nodes=expert_location_metadata.last_broken_nodes,
         )
 
 

@@ -41,7 +41,6 @@ class ExpertLocationMetadata:
     logical_to_rank_dispatch_physical_map: Optional[torch.Tensor]
     broken_nodes: torch.Tensor
     last_broken_nodes: torch.Tensor
-    broken_changed: bool = False
 
     # -------------------------------- properties ------------------------------------
 
@@ -512,7 +511,7 @@ def compute_logical_to_rank_dispatch_physical_map_avoid_rank(
 
             # 如果筛选后没有专家可用，则回退到使用所有候选专家
             if not experts_to_choose_from:
-                logger.info("roll back to candidate_physical_expert_ids")
+                logger.info("fallback to candidate_physical_expert_ids")
                 experts_to_choose_from = candidate_physical_expert_ids
 
             # 获取当前逻辑专家在所有GPU上的分派映射视图

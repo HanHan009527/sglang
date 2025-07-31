@@ -669,7 +669,7 @@ class DeepseekV2MoE(nn.Module):
             layer_id=self.layer_id,
         )
         broken_nodes = expert_location_dispatch_info.broken_nodes
-        # logger.info(f"break nodes info broken_nodes: {broken_nodes}")
+        logger.info(f"break nodes info broken_nodes: {broken_nodes}")
         broken_physical_experts = torch.zeros(
             (expert_location_dispatch_info.num_physical_experts,),
             dtype=torch.int32,
