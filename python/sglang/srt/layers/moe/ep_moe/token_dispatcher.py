@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
 
-from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder, set_global_deepep_buffer
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.utils import (
@@ -744,7 +744,7 @@ class DeepEPDispatcher:
                 **common_kwargs,
             )
             if _use_mxa_ep:
-                self._low_latency_dispatcher._get_buffer()
+                set_global_deepep_buffer(self._low_latency_dispatcher._get_buffer())
         if self.deepep_mode.enable_normal():
             self._normal_dispatcher = _DeepEPDispatcherImplNormal(
                 async_finish=async_finish,
