@@ -40,6 +40,7 @@ class ExpertLocationMetadata:
     # (layers, num_logical_experts)
     logical_to_rank_dispatch_physical_map: Optional[torch.Tensor]
     broken_nodes: torch.Tensor
+    last_broken_nodes: torch.Tensor
 
     # -------------------------------- properties ------------------------------------
 
@@ -207,8 +208,7 @@ class ExpertLocationMetadata:
         avoid_rank_str = os.environ.get("SGLANG_EP_AVOID_RANK")
         avoid_rank = int(avoid_rank_str) if avoid_rank_str else -1
 
-        broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device='cuda')
-
+        broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device="cuda")
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
@@ -239,6 +239,7 @@ class ExpertLocationMetadata:
                 else None
             ),
             broken_nodes=broken_nodes,
+            last_broken_nodes=broken_nodes.clone(),
         )
 
     # -------------------------------- mutation ------------------------------------
@@ -510,6 +511,7 @@ def compute_logical_to_rank_dispatch_physical_map_avoid_rank(
 
             # 如果筛选后没有专家可用，则回退到使用所有候选专家
             if not experts_to_choose_from:
+                logger.info("fallback to candidate_physical_expert_ids")
                 experts_to_choose_from = candidate_physical_expert_ids
 
             # 获取当前逻辑专家在所有GPU上的分派映射视图

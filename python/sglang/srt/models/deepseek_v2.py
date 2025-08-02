@@ -35,7 +35,10 @@ from sglang.srt.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
-from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.eplb.expert_location import (
+    ModelConfigForExpertLocation,
+    get_global_expert_location_metadata,
+)
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.amx_utils import PackWeightMethod
@@ -666,13 +669,40 @@ class DeepseekV2MoE(nn.Module):
             layer_id=self.layer_id,
         )
         broken_nodes = expert_location_dispatch_info.broken_nodes
-        broken_physical_experts = torch.zeros((expert_location_dispatch_info.num_physical_experts,), dtype=torch.int32, device='cuda')
-        num_experts_per_rank = expert_location_dispatch_info.num_physical_experts // self.ep_size
-        broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
-        if broken_node_indices.size(0) > 0:
-            broken_physical_expert_indices = torch.cat([torch.arange(idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank) for idx in broken_node_indices])
-            broken_physical_experts[broken_physical_expert_indices] = 1
+        # broken_physical_experts = torch.zeros(
+        #     (expert_location_dispatch_info.num_physical_experts,),
+        #     dtype=torch.int32,
+        #     device="cuda",
+        # )
+        # num_experts_per_rank = (
+        #     expert_location_dispatch_info.num_physical_experts // self.ep_size
+        # )
+        # broken_node_indices = torch.nonzero(broken_nodes).reshape(-1)
+        # if broken_node_indices.size(0) > 0:
+        #     broken_physical_expert_indices = torch.cat(
+        #         [
+        #             torch.arange(
+        #                 idx * num_experts_per_rank, (idx + 1) * num_experts_per_rank
+        #             )
+        #             for idx in broken_node_indices
+        #         ]
+        #     )
+        #     broken_physical_experts[broken_physical_expert_indices] = 1
+
+        # logger.info(f"break nodes info broken_nodes: {broken_nodes}")
+        broken_physical_experts = torch.zeros(
+            (expert_location_dispatch_info.num_physical_experts,),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        num_experts_per_rank = (
+            expert_location_dispatch_info.num_physical_experts // self.ep_size
+        )
+        broken_physical_experts.view(self.ep_size, num_experts_per_rank).copy_(
+            broken_nodes.unsqueeze(1)
+        )
         gathered_experts = broken_physical_experts.clone()
+
         if is_non_idle_and_non_empty(forward_mode, hidden_states):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
@@ -709,6 +739,7 @@ class DeepseekV2MoE(nn.Module):
                 broken_nodes=broken_nodes,
                 forward_batch=forward_batch,
             )
+
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             topk_idx=topk_idx,
@@ -2109,12 +2140,18 @@ class DeepseekV2DecoderLayer(nn.Module):
         Returns:
             torch.Tensor: 输出的隐藏状态和残差。
         """
+        # logging.info(
+        #     f"Enter layer {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}"
+        # )
 
         # 准备注意力计算
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
 
+        # logging.info(
+        #     f"Enter self_attn {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}"
+        # )
         # 自注意力计算
         hidden_states = self.self_attn(
             positions=positions,
@@ -2123,6 +2160,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             zero_allocator=zero_allocator,
         )
 
+        # logging.info(
+        #     f"Enter prepare_mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}"
+        # )
         # 准备 MLP 计算
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -2134,7 +2174,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             and not (self.enable_dp_attention and self.speculative_algorithm.is_eagle())
             and not self.is_nextn
         )
-
+        # logging.info(
+        #     f"Enter mlp {self.layer_id}, is_moe_layer: {self.is_layer_sparse}, is_decode: {forward_batch.forward_mode.is_decode()}"
+        # )
         # MLP 计算
         hidden_states = self.mlp(hidden_states, forward_batch, can_fuse_mlp_allreduce)
 
@@ -2383,6 +2425,9 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
 
+        self.inference_counter = 0
+        self.trigger_at = int(os.environ.get("SGLANG_AVOID_EP_TRIGGER_AT", 10))
+
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
                 layer_id: layer.mlp.get_moe_weights()
@@ -2462,10 +2507,22 @@ class DeepseekV2ForCausalLM(nn.Module):
             torch.Tensor: The logits.
         """
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
-        if get_tensor_model_parallel_rank() == avoid_rank:
-            hidden_states = torch.zeros((input_ids.size(0), self.config.hidden_size), dtype=self.config.torch_dtype, device='cuda')
+
+        self.inference_counter += 1
+        trigger_condition = False
+        if self.inference_counter >= self.trigger_at:
+            trigger_condition = True
+
+        if get_tensor_model_parallel_rank() == avoid_rank and trigger_condition:
+            hidden_states = torch.zeros(
+                (input_ids.size(0), self.config.hidden_size),
+                dtype=self.config.torch_dtype,
+                device="cuda",
+            )
         else:
-            hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
+            hidden_states = self.model(
+                input_ids, positions, forward_batch, input_embeds
+            )
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
