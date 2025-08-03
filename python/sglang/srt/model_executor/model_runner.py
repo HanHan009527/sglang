@@ -1630,8 +1630,24 @@ class ModelRunner:
                 split_forward_count,
             )
 
-        if self.eplb_manager is not None:
-            self.eplb_manager.on_forward_pass_end()
+            if not torch.equal(
+                get_global_expert_location_metadata().broken_nodes,
+                get_global_expert_location_metadata().last_broken_nodes,
+            ):
+                get_global_expert_location_metadata().last_broken_nodes = (
+                    get_global_expert_location_metadata().broken_nodes.clone()
+                )
+                logging.info(f"recompute _forward_raw")
+                # self.eplb_manager.rebalance()
+                output = self._forward_raw(
+                    forward_batch,
+                    skip_attn_backend_init,
+                    pp_proxy_tensors,
+                    reinit_attn_backend,
+                    split_forward_count,
+                )
+            if self.eplb_manager is not None:
+                self.eplb_manager.on_forward_pass_end()
 
         return output
 

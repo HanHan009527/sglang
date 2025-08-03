@@ -583,6 +583,23 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         shared_output = None
+        expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
+            layer_id=self.layer_id,
+        )
+        broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_physical_experts = torch.zeros(
+            (expert_location_dispatch_info.num_physical_experts,),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        num_experts_per_rank = (
+            expert_location_dispatch_info.num_physical_experts // self.ep_size
+        )
+        broken_physical_experts.view(self.ep_size, num_experts_per_rank).copy_(
+            broken_nodes.unsqueeze(1)
+        )
+        gathered_experts = broken_physical_experts.clone()
+
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
@@ -591,9 +608,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states,
                 router_logits,
                 num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
-                    layer_id=self.layer_id,
-                ),
+                expert_location_dispatch_info=expert_location_dispatch_info,
             )
         else:
             topk_idx = torch.full(
@@ -674,6 +689,7 @@ class DeepseekV2MoE(nn.Module):
                 topk_idx=state.pop("topk_idx_local"),
                 topk_weights=state.pop("topk_weights_local"),
                 forward_batch=state.forward_batch,
+                broken_nodes=state.broken_nodes,
                 tbo_subbatch_index=state.get("tbo_subbatch_index"),
             )
 
@@ -697,6 +713,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=state.pop("hidden_states_experts_output"),
                 topk_idx=state.dispatch_output.topk_idx,
                 topk_weights=state.dispatch_output.topk_weights,
+                gathered_experts=state.gathered_experts,
                 forward_batch=state.forward_batch,
                 tbo_subbatch_index=state.get("tbo_subbatch_index"),
             )
@@ -2083,6 +2100,8 @@ class DeepseekV2ForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
+        self.inference_counter = 0
+        self.trigger_at = int(os.environ.get("SGLANG_AVOID_EP_TRIGGER_AT", 10))
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
@@ -2138,7 +2157,23 @@ class DeepseekV2ForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
+        avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
+
+        self.inference_counter += 1
+        trigger_condition = False
+        if self.inference_counter >= self.trigger_at:
+            trigger_condition = True
+
+        if get_tensor_model_parallel_rank() == avoid_rank and trigger_condition:
+            hidden_states = torch.zeros(
+                (input_ids.size(0), self.config.hidden_size),
+                dtype=self.config.torch_dtype,
+                device="cuda",
+            )
+        else:
+            hidden_states = self.model(
+                input_ids, positions, forward_batch, input_embeds
+            )
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
