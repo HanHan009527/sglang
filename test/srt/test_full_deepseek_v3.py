@@ -76,7 +76,7 @@ class TestDeepseekV3(CustomTestCase):
 class TestDeepseekV3Small(TestDeepseekV3):
     @classmethod
     def setUpClass(cls):
-        cls.model = "chwan/DeepSeek-V3-5layer"
+        cls.model = "/data00/697678ab8e528b85a2a7bddafea1fa4f/DeepSeek-V3-5layer"
         cls.base_url = DEFAULT_URL_FOR_TEST
         other_args = [
             "--trust-remote-code",
