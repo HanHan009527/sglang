@@ -26,6 +26,7 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.utils import get_bool_env_var, get_int_env_var, is_hip, load_json_config
 
 try:
+    _use_mxa_ep = get_bool_env_var("SGLANG_USE_MXA_EP")
     if _use_mxa_ep:
         from mxa_ep import Buffer
     else:
