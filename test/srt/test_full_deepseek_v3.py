@@ -98,8 +98,6 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--mem-fraction-static",
             "0.9",
             "--disable-cuda-graph",
-            "--dist-init-addr",
-            "192.168.0.235:5000",
         ]
         cls.process = popen_launch_server(
             cls.model,
