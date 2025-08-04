@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -495,6 +496,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         https://github.com/deepseek-ai/DeepEP?tab=readme-ov-file#example-use-in-inference-decoding
         """
         self.return_recv_hook = return_recv_hook
+        self._first_execution = True
+        self.timeout_us = int(os.environ.get("SGLANG_EP_TIMEOUT_US", 10000000))
 
     def dispatch_a(
         self,
@@ -565,7 +568,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     broken_nodes,
                     self.num_max_dispatch_tokens_per_rank,
                     self.num_experts,
-                    20000000,
+                    -1 if self._first_execution else self.timeout_us,
                     use_fp8=use_fp8,
                     async_finish=not self.return_recv_hook,
                     return_recv_hook=self.return_recv_hook,
@@ -628,11 +631,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 topk_idx,
                 topk_weights,
                 gathered_experts,
-                20000000,
+                -1 if self._first_execution else self.timeout_us,
                 self.handle,
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
             )
+            self._first_execution = False
             self.handle = None
             return combined_hidden_states, event, hook
         else:

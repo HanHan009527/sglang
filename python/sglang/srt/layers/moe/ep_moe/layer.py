@@ -389,6 +389,10 @@ class DeepEPMoE(EPMoE):
             layer_id=self.layer_id,
         )
         broken_nodes = expert_location_dispatch_info.broken_nodes
+        dispatch_output = self.dispatch(
+            hidden_states, topk_idx, topk_weights, broken_nodes, forward_batch
+        )
+        hidden_states = self.moe_impl(dispatch_output)
         broken_physical_experts = torch.zeros(
             (expert_location_dispatch_info.num_physical_experts,),
             dtype=torch.int32,
@@ -401,10 +405,6 @@ class DeepEPMoE(EPMoE):
             broken_nodes.unsqueeze(1)
         )
         gathered_experts = broken_physical_experts.clone()
-        dispatch_output = self.dispatch(
-            hidden_states, topk_idx, topk_weights, broken_nodes, forward_batch
-        )
-        hidden_states = self.moe_impl(dispatch_output)
         hidden_states = self.combine(
             hidden_states,
             dispatch_output.topk_idx,
