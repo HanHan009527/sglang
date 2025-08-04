@@ -429,6 +429,8 @@ class DeepseekV2MoE(nn.Module):
                 num_experts=self.num_experts,
                 num_local_experts=config.n_routed_experts // self.tp_size,
                 hidden_size=config.hidden_size,
+                num_hidden_layers=config.num_hidden_layers,
+                eplb_rebalance_num_iterations=config.eplb_rebalance_num_iterations,
                 params_dtype=config.torch_dtype,
                 deepep_mode=global_server_args_dict["deepep_mode"],
                 async_finish=True,
