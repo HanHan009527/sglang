@@ -339,7 +339,7 @@ class DeepseekV2MoE(nn.Module):
                 dict(
                     deepep_mode=global_server_args_dict["deepep_mode"],
                     num_hidden_layers=config.num_hidden_layers,
-                    eplb_rebalance_num_iterations=config.eplb_rebalance_num_iterations,
+                    eplb_rebalance_num_iterations=1000,  # TODO: find better way
                 )
                 if global_server_args_dict["moe_a2a_backend"].is_deepep()
                 else {}
@@ -434,7 +434,7 @@ class DeepseekV2MoE(nn.Module):
                 num_local_experts=config.n_routed_experts // self.tp_size,
                 hidden_size=config.hidden_size,
                 num_hidden_layers=config.num_hidden_layers,
-                eplb_rebalance_num_iterations=config.eplb_rebalance_num_iterations,
+                eplb_rebalance_num_iterations=1000,  # TODO: find better way
                 params_dtype=config.torch_dtype,
                 deepep_mode=global_server_args_dict["deepep_mode"],
                 async_finish=True,
