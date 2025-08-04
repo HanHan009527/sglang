@@ -122,6 +122,11 @@ class DeepEPBuffer:
 
         num_nvl_bytes, num_rdma_bytes = 0, 0
         if _use_mxa_ep:
+            bytes_reserved = (eplb_rebalance_num_iterations *
+                              num_hidden_layers *
+                              num_experts *
+                              group.size() *
+                              4)
             num_mxa_bytes = 0
             if deepep_mode.enable_normal():
                 raise NotImplementedError
@@ -133,6 +138,7 @@ class DeepEPBuffer:
                     hidden_size,
                     group.size(),
                     num_experts,
+                    bytes_reserved,
                 )
             if deepep_mode == DeepEPMode.NORMAL:
                 num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
@@ -140,12 +146,6 @@ class DeepEPBuffer:
                 num_qps_per_rank = num_experts // group.size()
             else:
                 raise NotImplementedError
-
-            bytes_reserved = (eplb_rebalance_num_iterations *
-                              num_hidden_layers *
-                              num_experts *
-                              group.size() *
-                              0)
 
             cls._buffer = Buffer(group, num_mxa_bytes, bytes_reserved)
             return cls._buffer
