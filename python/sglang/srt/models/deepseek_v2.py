@@ -336,7 +336,11 @@ class DeepseekV2MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
             **(
-                dict(deepep_mode=global_server_args_dict["deepep_mode"])
+                dict(
+                    deepep_mode=global_server_args_dict["deepep_mode"],
+                    num_hidden_layers=config.num_hidden_layers,
+                    eplb_rebalance_num_iterations=config.eplb_rebalance_num_iterations,
+                )
                 if global_server_args_dict["moe_a2a_backend"].is_deepep()
                 else {}
             ),
