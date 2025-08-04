@@ -789,9 +789,8 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             torch.cuda.empty_cache()
 
         if _global_deepep_buffer:
-            if self._rank != int(os.environ.get("SGLANG_EP_AVOID_RANK", -1)):
-                broken_nodes = get_global_expert_location_metadata().broken_nodes
-                _global_deepep_buffer.all_reduce_without(broken_nodes, logical_count_of_buffered_step)
+            broken_nodes = get_global_expert_location_metadata().broken_nodes
+            _global_deepep_buffer.all_reduce_without(broken_nodes, logical_count_of_buffered_step)
         else:
             torch.distributed.all_reduce(
                 logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM

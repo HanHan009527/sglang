@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, List
 
@@ -50,6 +51,9 @@ class EPLBManager:
             yield from self.rebalance()
 
     def rebalance(self):
+        if torch.distributed.get_rank() == int(os.environ.get("SGLANG_EP_AVOID_RANK", -1)):
+            logger.info("[EPLBManager] rebalance skipped")
+            return
         logger.info("[EPLBManager] rebalance start")
 
         enable_timing = self._rebalance_layers_per_chunk is None
