@@ -584,23 +584,6 @@ class DeepseekV2MoE(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         shared_output = None
-        expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
-            layer_id=self.layer_id,
-        )
-        broken_nodes = expert_location_dispatch_info.broken_nodes
-        broken_physical_experts = torch.zeros(
-            (expert_location_dispatch_info.num_physical_experts,),
-            dtype=torch.int32,
-            device="cuda",
-        )
-        num_experts_per_rank = (
-            expert_location_dispatch_info.num_physical_experts // self.ep_size
-        )
-        broken_physical_experts.view(self.ep_size, num_experts_per_rank).copy_(
-            broken_nodes.unsqueeze(1)
-        )
-        gathered_experts = broken_physical_experts.clone()
-
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
@@ -609,7 +592,9 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states,
                 router_logits,
                 num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=expert_location_dispatch_info,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
             )
         else:
             topk_idx = torch.full(

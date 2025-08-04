@@ -24,7 +24,7 @@ import einops
 import torch
 import torch.distributed
 
-from sglang.srt.eplb.expert_location import ExpertLocationMetadata
+from sglang.srt.eplb.expert_location import ExpertLocationMetadata, get_global_expert_location_metadata
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import ServerArgs
@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 # --------------------------------------- Entrypoint -----------------------------------------
 
 _OutputMode = Literal["file", "object"]
+
+_global_deepep_buffer: Optional[Any] = None  # should be mxa_ep.Buffer
+
+
+def set_global_deepep_buffer(buffer):
+    global _global_deepep_buffer
+    _global_deepep_buffer = buffer
 
 
 class ExpertDistributionRecorder(ABC):
@@ -781,9 +788,13 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             self._first_dump = False
             torch.cuda.empty_cache()
 
-        torch.distributed.all_reduce(
-            logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
-        )
+        if _global_deepep_buffer:
+            broken_nodes = get_global_expert_location_metadata().broken_nodes
+            _global_deepep_buffer.all_reduce_without(broken_nodes, logical_count_of_buffered_step)
+        else:
+            torch.distributed.all_reduce(
+                logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
+            )
 
         output = dict(
             rank=self._rank,

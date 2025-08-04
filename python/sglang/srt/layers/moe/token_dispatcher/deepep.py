@@ -13,7 +13,7 @@ from typing import (
     runtime_checkable,
 )
 
-from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder, set_global_deepep_buffer
 from sglang.srt.layers.moe.token_dispatcher.base_dispatcher import (
     BaseDispatcher,
     BaseDispatcherConfig,
@@ -131,9 +131,9 @@ class DeepEPBuffer:
                     group.size(),
                     num_experts,
                 )
-            if deepep_mode == DeepEPMode.normal:
+            if deepep_mode == DeepEPMode.NORMAL:
                 num_qps_per_rank = DeepEPConfig.get_instance().num_sms // 2
-            elif deepep_mode in [DeepEPMode.low_latency, DeepEPMode.auto]:
+            elif deepep_mode in [DeepEPMode.LOW_LATENCY, DeepEPMode.AUTO]:
                 num_qps_per_rank = num_experts // group.size()
             else:
                 raise NotImplementedError
@@ -565,6 +565,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                     broken_nodes,
                     self.num_max_dispatch_tokens_per_rank,
                     self.num_experts,
+                    20000000,
                     use_fp8=use_fp8,
                     async_finish=not self.return_recv_hook,
                     return_recv_hook=self.return_recv_hook,
@@ -627,6 +628,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 topk_idx,
                 topk_weights,
                 gathered_experts,
+                20000000,
                 self.handle,
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
@@ -699,8 +701,7 @@ class DeepEPDispatcher(BaseDispatcher):
                 **common_kwargs,
             )
             if _use_mxa_ep:
-                self._low_latency_dispatcher._get_buffer()
-
+                set_global_deepep_buffer(self._low_latency_dispatcher._get_buffer())
         if self.deepep_mode.enable_normal():
             self._normal_dispatcher = _DeepEPDispatcherImplNormal(
                 async_finish=async_finish,

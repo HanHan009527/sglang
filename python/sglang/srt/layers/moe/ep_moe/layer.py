@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from sglang.srt.distributed.parallel_state import get_moe_expert_parallel_world_size
+from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers.moe.ep_moe.kernels import (
     ep_gather,
     ep_scatter,
@@ -383,15 +384,32 @@ class DeepEPMoE(EPMoE):
         topk_weights: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        ep_size = get_moe_expert_parallel_world_size()
+        expert_location_dispatch_info = ExpertLocationDispatchInfo.init_new(
+            layer_id=self.layer_id,
+        )
+        broken_nodes = expert_location_dispatch_info.broken_nodes
+        broken_physical_experts = torch.zeros(
+            (expert_location_dispatch_info.num_physical_experts,),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        num_experts_per_rank = (
+            expert_location_dispatch_info.num_physical_experts // ep_size
+        )
+        broken_physical_experts.view(ep_size, num_experts_per_rank).copy_(
+            broken_nodes.unsqueeze(1)
+        )
+        gathered_experts = broken_physical_experts.clone()
         dispatch_output = self.dispatch(
-            hidden_states, topk_idx, topk_weights, torch.tensor([]), forward_batch
+            hidden_states, topk_idx, topk_weights, broken_nodes, forward_batch
         )
         hidden_states = self.moe_impl(dispatch_output)
         hidden_states = self.combine(
             hidden_states,
             dispatch_output.topk_idx,
             dispatch_output.topk_weights,
-            torch.tensor([]),
+            gathered_experts,
             forward_batch,
         )
         return hidden_states
