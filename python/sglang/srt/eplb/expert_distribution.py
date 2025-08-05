@@ -802,7 +802,7 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
                         torch.distributed.irecv(tensor=temp_tensor, src=i)
                         logical_count_of_buffered_step += temp_tensor
                 for i in range(num_ranks):
-                    if broken_nodes[i] == 1 and i != self._rank:
+                    if broken_nodes[i] == 0 and i != self._rank:
                         torch.distributed.isend(logical_count_of_buffered_step, dst=i)
             else:
                 torch.distributed.isend(logical_count_of_buffered_step, dst=root)
