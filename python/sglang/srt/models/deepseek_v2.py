@@ -2149,6 +2149,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         trigger_condition = False
         if self.inference_counter >= self.trigger_at:
             trigger_condition = True
+        logger.info(f"inference_counter: {self.inference_counter}, trigger_condition: {trigger_condition}, avoid_rank {avoid_rank}")
 
         if get_tensor_model_parallel_rank() == avoid_rank and trigger_condition:
             hidden_states = torch.zeros(
