@@ -790,7 +790,23 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
 
         if _global_deepep_buffer:
             broken_nodes = get_global_expert_location_metadata().broken_nodes
-            _global_deepep_buffer.all_reduce_without(broken_nodes, logical_count_of_buffered_step)
+            num_ranks = broken_nodes.shape[0]
+            root = -1
+            for i in range(num_ranks):
+                if broken_nodes[i] == 0:
+                    root = i
+            if self._rank == root:
+                for i in range(num_ranks):
+                    if broken_nodes[i] == 0 and i != self._rank:
+                        temp_tensor = torch.zeros_like(logical_count_of_buffered_step)
+                        torch.distributed.irecv(tensor=temp_tensor, src=i)
+                        logical_count_of_buffered_step += temp_tensor
+                for i in range(num_ranks):
+                    if broken_nodes[i] == 1 and i != self._rank:
+                        torch.distributed.isend(logical_count_of_buffered_step, dst=i)
+            else:
+                torch.distributed.isend(logical_count_of_buffered_step, dst=root)
+                torch.distributed.irecv(tensor=logical_count_of_buffered_step, src=root)
         else:
             torch.distributed.all_reduce(
                 logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
