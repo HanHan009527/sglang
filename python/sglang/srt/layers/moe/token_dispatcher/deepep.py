@@ -145,7 +145,7 @@ class DeepEPBuffer:
                               num_hidden_layers *
                               num_experts *
                               group.size() *
-                              0)
+                              4)
 
             cls._buffer = Buffer(group, num_mxa_bytes, bytes_reserved)
             return cls._buffer
