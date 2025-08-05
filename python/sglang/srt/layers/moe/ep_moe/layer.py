@@ -308,8 +308,6 @@ class DeepEPMoE(EPMoE):
         activation: str = "silu",
         routed_scaling_factor: Optional[float] = None,
         deepep_mode: DeepEPMode = DeepEPMode.AUTO,
-        num_hidden_layers: int = None,
-        eplb_rebalance_num_iterations: int = None,
     ):
         super().__init__(
             num_experts=num_experts,
@@ -338,8 +336,6 @@ class DeepEPMoE(EPMoE):
             num_experts=self.num_experts,
             num_local_experts=self.num_local_experts,
             hidden_size=hidden_size,
-            num_hidden_layers=num_hidden_layers,
-            eplb_rebalance_num_iterations=eplb_rebalance_num_iterations,
             params_dtype=params_dtype,
             deepep_mode=deepep_mode,
             async_finish=True,  # TODO
