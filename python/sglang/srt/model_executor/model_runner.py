@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -710,16 +710,21 @@ class ModelRunner:
         new_expert_location_metadata: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
-        self.expert_location_updater.update(
-            self.model.routed_experts_weights_of_layer,
-            new_expert_location_metadata,
-            update_layer_ids=update_layer_ids,
-            nnodes=self.server_args.nnodes,
-            rank=self.tp_rank,
+        self.update_weights_from_disk(
+            self.server_args.model_path,
+            self.server_args.load_format,
+            lambda name: "mlp.experts" in name and "mlp.shared_experts" not in name,
         )
+        # self.expert_location_updater.update(
+        #     self.model.routed_experts_weights_of_layer,
+        #     new_expert_location_metadata,
+        #     update_layer_ids=update_layer_ids,
+        #     nnodes=self.server_args.nnodes,
+        #     rank=self.tp_rank,
+        # )
 
     def update_weights_from_disk(
-        self, model_path: str, load_format: str
+        self, model_path: str, load_format: str, weight_name_filter: Optional[Callable[[str], bool]] = None
     ) -> tuple[bool, str]:
         """Update engine weights in-place from the disk."""
         logger.info(
@@ -741,6 +746,8 @@ class ModelRunner:
             iter = loader._get_weights_iterator(
                 DefaultModelLoader.Source.init_new(config, self.model)
             )
+            if weight_name_filter is not None:
+                iter = ((name, weight) for name, weight in iter if weight_name_filter(name))
             return iter
 
         def model_load_weights(model, iter):
@@ -1638,7 +1645,12 @@ class ModelRunner:
                     get_global_expert_location_metadata().broken_nodes.clone()
                 )
                 logging.info(f"recompute _forward_raw")
-                # self.eplb_manager.rebalance()
+                gen = self.eplb_manager.rebalance()
+                while True:
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        break
                 output = self._forward_raw(
                     forward_batch,
                     skip_attn_backend_init,
@@ -1646,8 +1658,8 @@ class ModelRunner:
                     reinit_attn_backend,
                     split_forward_count,
                 )
-            # if self.eplb_manager is not None:
-            #     self.eplb_manager.on_forward_pass_end()
+            if self.eplb_manager is not None:
+                self.eplb_manager.on_forward_pass_end()
 
         return output
 

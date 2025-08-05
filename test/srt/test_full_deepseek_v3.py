@@ -96,8 +96,10 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "1",
             "--max-prefill-tokens",
             "128",
+            "--chunked-prefill-size",
+            "1024",
             "--mem-fraction-static",
-            "0.9",
+            "0.8",
             "--disable-cuda-graph",
         ]
         cls.process = popen_launch_server(
