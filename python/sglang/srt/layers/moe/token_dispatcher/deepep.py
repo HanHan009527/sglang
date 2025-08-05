@@ -110,8 +110,6 @@ class DeepEPBuffer:
         deepep_mode: DeepEPMode,
         num_max_dispatch_tokens_per_rank: int = None,
         num_experts: int = None,
-        num_hidden_layers: int = None,
-        eplb_rebalance_num_iterations: int = None,
     ):
         if cls._buffer is not None:
             return cls._buffer
@@ -141,13 +139,7 @@ class DeepEPBuffer:
             else:
                 raise NotImplementedError
 
-            bytes_reserved = (eplb_rebalance_num_iterations *
-                              num_hidden_layers *
-                              num_experts *
-                              group.size() *
-                              4)
-
-            cls._buffer = Buffer(group, num_mxa_bytes, bytes_reserved)
+            cls._buffer = Buffer(group, num_mxa_bytes)
             return cls._buffer
         else:
 
@@ -271,8 +263,6 @@ class _DeepEPDispatcherImplBase:
         num_experts: int,
         num_local_experts: int,
         hidden_size: int,
-        num_hidden_layers: int,
-        eplb_rebalance_num_iterations: int,
         params_dtype: torch.dtype,
         deepep_mode: DeepEPMode,
     ):
@@ -288,8 +278,6 @@ class _DeepEPDispatcherImplBase:
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.hidden_size = hidden_size
-        self.num_hidden_layers = num_hidden_layers
-        self.eplb_rebalance_num_iterations = eplb_rebalance_num_iterations
         self.params_dtype = params_dtype
         self.deepep_mode = deepep_mode
 
@@ -673,8 +661,6 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
             self.num_experts,
-            self.num_hidden_layers,
-            self.eplb_rebalance_num_iterations,
         )
 
 
@@ -695,8 +681,6 @@ class DeepEPDispatcher(BaseDispatcher):
         num_experts: int = None,
         num_local_experts: int = None,
         hidden_size: int = None,
-        num_hidden_layers: int = None,
-        eplb_rebalance_num_iterations: int = None,
         params_dtype: torch.dtype = None,
         deepep_mode: DeepEPMode = DeepEPMode.AUTO,
         async_finish: bool = False,
@@ -711,8 +695,6 @@ class DeepEPDispatcher(BaseDispatcher):
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hidden_size=hidden_size,
-            num_hidden_layers=num_hidden_layers,
-            eplb_rebalance_num_iterations=eplb_rebalance_num_iterations,
             params_dtype=params_dtype,
             deepep_mode=deepep_mode,
         )
