@@ -223,7 +223,7 @@ def rebalance_experts(
     log2phy.view(num_layers, -1).scatter_(
         -1,
         phy2log * maxlogcnt + phyrank,
-        torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(
+        torch.arange(num_local_experts * num_ok_gpus, dtype=torch.int64, device=log2phy.device).expand(
             num_layers, -1
         ),
     )
