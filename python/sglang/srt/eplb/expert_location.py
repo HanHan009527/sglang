@@ -153,6 +153,13 @@ class ExpertLocationMetadata:
         num_groups = model_config_for_expert_location.num_groups
         num_nodes = server_args.nnodes
 
+        # If called from `compute_initial_expert_location_metadata`,
+        # `_global_expert_location_metadata` can be None.
+        if _global_expert_location_metadata is None:
+            broken_ranks = torch.zeros((common["ep_size"],), dtype=torch.int32, device="cuda")
+        else:
+            broken_ranks = _global_expert_location_metadata.broken_nodes
+
         physical_to_logical_map, logical_to_all_physical_map, expert_count = (
             eplb_algorithms.rebalance_experts(
                 tokens_per_expert=logical_count,
@@ -165,6 +172,7 @@ class ExpertLocationMetadata:
                     num_groups=num_groups,
                     num_nodes=num_nodes,
                 ),
+                broken_ranks=broken_ranks,
             )
         )
 
