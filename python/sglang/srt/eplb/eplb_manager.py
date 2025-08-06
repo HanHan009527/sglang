@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List
 import torch.cuda
 
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
-from sglang.srt.eplb.expert_location import compute_initial_expert_location_metadata
+from sglang.srt.eplb.expert_location import ExpertLocationMetadata
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
@@ -62,16 +62,11 @@ class EPLBManager:
             torch.cuda.synchronize()
             time_start = time.time()
 
-        # Running EPLB with broken_nodes and possibly small sample of logical count
-        # may produce wierd result. So we use the trivial one for now.
-        # logical_count = get_global_expert_distribution_recorder().dump_record(
-        #     output_mode="object"
-        # )["logical_count"]
-        # expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
-        #     self._server_args, self._model_runner.model_config, logical_count
-        # )
-        expert_location_metadata = compute_initial_expert_location_metadata(
-            self._server_args, self._model_runner.model_config
+        logical_count = get_global_expert_distribution_recorder().dump_record(
+            output_mode="object"
+        )["logical_count"]
+        expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
+            self._server_args, self._model_runner.model_config, logical_count
         )
         # Export the object to disk, with one file per GPU (rank)
         try:
