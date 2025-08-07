@@ -1655,13 +1655,7 @@ class ModelRunner:
                         next(gen)
                     except StopIteration:
                         break
-                output = self._forward_raw(
-                    forward_batch,
-                    skip_attn_backend_init,
-                    pp_proxy_tensors,
-                    reinit_attn_backend,
-                    split_forward_count,
-                )
+
             if self.eplb_manager is not None:
                 self.eplb_manager.on_forward_pass_end()
 
