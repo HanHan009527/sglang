@@ -24,7 +24,10 @@ import einops
 import torch
 import torch.distributed
 
-from sglang.srt.eplb.expert_location import ExpertLocationMetadata, get_global_expert_location_metadata
+from sglang.srt.eplb.expert_location import (
+    ExpertLocationMetadata,
+    get_global_expert_location_metadata,
+)
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import ServerArgs
@@ -809,13 +812,19 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
                 requests = []
                 for i in range(num_ranks):
                     if broken_nodes[i] == 0 and i != self._rank:
-                        req = torch.distributed.isend(logical_count_of_buffered_step, dst=i)
+                        req = torch.distributed.isend(
+                            logical_count_of_buffered_step, dst=i
+                        )
                         requests.append(req)
                 for req in requests:
                     req.wait()
             else:
-                torch.distributed.isend(tensor=logical_count_of_buffered_step, dst=root).wait()
-                torch.distributed.irecv(tensor=logical_count_of_buffered_step, src=root).wait()
+                torch.distributed.isend(
+                    tensor=logical_count_of_buffered_step, dst=root
+                ).wait()
+                torch.distributed.irecv(
+                    tensor=logical_count_of_buffered_step, src=root
+                ).wait()
         else:
             torch.distributed.all_reduce(
                 logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
