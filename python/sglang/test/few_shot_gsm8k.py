@@ -96,28 +96,14 @@ def run_eval(args):
         temperature=args.temperature if hasattr(args, "temperature") else 0,
         num_threads=args.parallel,
         progress_bar=True,
-        continue_on_error=True,
         return_logprob=getattr(args, "return_logprob", None),
         logprob_start_len=getattr(args, "logprob_start_len", None),
     )
     latency = time.perf_counter() - tic
 
     preds = []
-    for i, state in enumerate(states):
-        # Check for non-200 status code
-        # Check for errors from run_batch
-        if state.error:
-            print(f"Request {i} failed with error: {state.error}")
-            preds.append(INVALID)
-            continue
-        
-        # Check status code from metadata
-        # Get top-level metadata for status code
-        status_code = state.meta_info.get("status_code", 200)
-        meta_info = state.get_meta_info("answer")
-        if status_code != 200:
-            print(f"Request {i} failed with status code {status_code}")
-        preds.append(get_answer_value(state["answer"]))
+    for i in range(len(states)):
+        preds.append(get_answer_value(states[i]["answer"]))
 
     # print(f"{preds=}")
     # print(f"{labels=}")
