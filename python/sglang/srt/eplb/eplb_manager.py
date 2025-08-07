@@ -72,7 +72,7 @@ class EPLBManager:
         )
         # Export the object to disk, with one file per GPU (rank)
         try:
-            output_dir = "/tmp/expert_location_metadata"
+            output_dir = os.environ.get("EXPERT_METADATA_OUTPUT_DIR", "/tmp/expert_location_metadata")
             os.makedirs(output_dir, exist_ok=True)
 
             rank = torch.distributed.get_rank()
