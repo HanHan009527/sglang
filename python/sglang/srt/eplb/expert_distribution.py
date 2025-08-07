@@ -795,18 +795,27 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             for i in range(num_ranks):
                 if broken_nodes[i] == 0:
                     root = i
+                    break
             if self._rank == root:
+                requests = []
                 for i in range(num_ranks):
                     if broken_nodes[i] == 0 and i != self._rank:
                         temp_tensor = torch.zeros_like(logical_count_of_buffered_step)
-                        torch.distributed.irecv(tensor=temp_tensor, src=i)
-                        logical_count_of_buffered_step += temp_tensor
+                        req = torch.distributed.irecv(tensor=temp_tensor, src=i)
+                        requests.append((req, temp_tensor))
+                for req, temp_tensor in requests:
+                    req.wait()
+                    logical_count_of_buffered_step += temp_tensor
+                requests = []
                 for i in range(num_ranks):
                     if broken_nodes[i] == 0 and i != self._rank:
-                        torch.distributed.isend(logical_count_of_buffered_step, dst=i)
+                        req = torch.distributed.isend(logical_count_of_buffered_step, dst=i)
+                        requests.append(req)
+                for req in requests:
+                    req.wait()
             else:
-                torch.distributed.isend(logical_count_of_buffered_step, dst=root)
-                torch.distributed.irecv(tensor=logical_count_of_buffered_step, src=root)
+                torch.distributed.isend(tensor=logical_count_of_buffered_step, dst=root).wait()
+                torch.distributed.irecv(tensor=logical_count_of_buffered_step, src=root).wait()
         else:
             torch.distributed.all_reduce(
                 logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
