@@ -2086,8 +2086,8 @@ class DeepseekV2ForCausalLM(nn.Module):
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
         self.logits_processor = LogitsProcessor(config)
-        self.inference_counter = 0
-        self.trigger_at = int(os.environ.get("SGLANG_AVOID_EP_TRIGGER_AT", 10))
+        self.inference_counter = torch.tensor(0, device="cuda", dtype=torch.int32)
+        self.trigger_at = int(os.environ.get("SGLANG_AVOID_EP_TRIGGER_AT", 100))
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
@@ -2145,22 +2145,25 @@ class DeepseekV2ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
 
-        self.inference_counter += 1
-        trigger_condition = False
-        if self.inference_counter >= self.trigger_at:
-            trigger_condition = True
+        self.inference_counter.add_(1)
+        trigger_condition = self.inference_counter >= self.trigger_at
         logger.info(f"inference_counter: {self.inference_counter}, trigger_condition: {trigger_condition}, avoid_rank {avoid_rank}")
 
-        if get_tensor_model_parallel_rank() == avoid_rank and trigger_condition:
-            hidden_states = torch.zeros(
-                (input_ids.size(0), self.config.hidden_size),
-                dtype=self.config.torch_dtype,
-                device="cuda",
-            )
-        else:
-            hidden_states = self.model(
-                input_ids, positions, forward_batch, input_embeds
-            )
+        # 转换为GPU张量操作以支持重放阶段动态判断
+        avoid_rank_tensor = torch.tensor(avoid_rank, device="cuda", dtype=torch.int32)
+        rank_tensor = torch.tensor(get_tensor_model_parallel_rank(), device="cuda", dtype=torch.int32)
+        rank_condition = rank_tensor == avoid_rank_tensor
+        condition = rank_condition & trigger_condition
+
+        hidden_states_zero = torch.zeros(
+            (input_ids.size(0), self.config.hidden_size),
+            dtype=self.config.torch_dtype,
+            device="cuda",
+        )
+        hidden_states_model = self.model(
+            input_ids, positions, forward_batch, input_embeds
+        )
+        hidden_states = torch.where(condition, hidden_states_zero, hidden_states_model)
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch

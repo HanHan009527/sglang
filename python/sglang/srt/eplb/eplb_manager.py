@@ -10,6 +10,7 @@ from sglang.srt.eplb.expert_location import ExpertLocationMetadata
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
