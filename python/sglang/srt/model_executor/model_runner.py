@@ -712,14 +712,14 @@ class ModelRunner:
     ):
         old_expert_location_metadata = get_global_expert_location_metadata()
         assert old_expert_location_metadata is not None
+        old_expert_location_metadata.update(
+            new_expert_location_metadata,
+            update_layer_ids=update_layer_ids,
+        )
         self.update_weights_from_disk(
             self.server_args.model_path,
             self.server_args.load_format,
             lambda name: "mlp.experts" in name and "mlp.shared_experts" not in name,
-        )
-        old_expert_location_metadata.update(
-            new_expert_location_metadata,
-            update_layer_ids=update_layer_ids,
         )
 
     def update_weights_from_disk(
