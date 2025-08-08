@@ -2152,7 +2152,9 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         # 转换为GPU张量操作以支持重放阶段动态判断
         if get_tensor_model_parallel_rank() == avoid_rank and trigger_condition:
-            logger.info(f"inference_counter: {self.inference_counter}, trigger_condition: {trigger_condition}, avoid_rank {avoid_rank}")
+            logger.info(
+                f"inference_counter: {self.inference_counter}, trigger_condition: {trigger_condition}, avoid_rank {avoid_rank}"
+            )
             hidden_states = torch.zeros(
                 (input_ids.size(0), self.config.hidden_size),
                 dtype=self.config.torch_dtype,

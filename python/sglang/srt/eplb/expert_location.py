@@ -156,7 +156,9 @@ class ExpertLocationMetadata:
         # If called from `compute_initial_expert_location_metadata`,
         # `_global_expert_location_metadata` can be None.
         if _global_expert_location_metadata is None:
-            broken_ranks = torch.zeros((common["ep_size"],), dtype=torch.int32, device="cuda")
+            broken_ranks = torch.zeros(
+                (common["ep_size"],), dtype=torch.int32, device="cuda"
+            )
         else:
             broken_ranks = _global_expert_location_metadata.broken_nodes
 

@@ -1,7 +1,7 @@
+import json
 import logging
 import os
 import time
-import json
 from typing import TYPE_CHECKING, List
 
 import torch.cuda
@@ -11,6 +11,7 @@ from sglang.srt.eplb.expert_location import ExpertLocationMetadata
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
+
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -52,27 +53,15 @@ class EPLBManager:
 
             yield from self.rebalance()
 
-    def rebalance(self):
-        if torch.distributed.get_rank() == int(os.environ.get("SGLANG_EP_AVOID_RANK", -1)):
-            logger.info("[EPLBManager] rebalance skipped")
+    def _export_expert_metadata(self, expert_location_metadata):
+        """Export expert location metadata to JSON file if enabled by environment variable"""
+        if not os.environ.get("EXPORT_EXPERT_METADATA", "0") == "1":
             return
-        logger.info("[EPLBManager] rebalance start")
 
-        enable_timing = self._rebalance_layers_per_chunk is None
-
-        if enable_timing:
-            torch.cuda.synchronize()
-            time_start = time.time()
-
-        logical_count = get_global_expert_distribution_recorder().dump_record(
-            output_mode="object"
-        )["logical_count"]
-        expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
-            self._server_args, self._model_runner.model_config, logical_count
-        )
-        # Export the object to disk, with one file per GPU (rank)
         try:
-            output_dir = "/tmp/expert_location_metadata"
+            output_dir = os.environ.get(
+                "EXPERT_METADATA_OUTPUT_DIR", "/tmp/expert_location_metadata"
+            )
             os.makedirs(output_dir, exist_ok=True)
 
             rank = torch.distributed.get_rank()
@@ -92,6 +81,7 @@ class EPLBManager:
                 .numpy()
                 .tolist(),
             }
+
             if (
                 expert_location_metadata.logical_to_rank_dispatch_physical_map
                 is not None
@@ -108,14 +98,32 @@ class EPLBManager:
             logger.info(
                 f"[EPLBManager] Saved expert location metadata for rank {rank} to {file_path}"
             )
-        except ImportError as e:
-            logger.warning(
-                f"[EPLBManager] Could not save expert metadata, import error: {e}"
-            )
         except Exception as e:
             logger.error(
                 f"[EPLBManager] Error saving expert metadata: {e}", exc_info=True
             )
+
+    def rebalance(self):
+        if torch.distributed.get_rank() == int(
+            os.environ.get("SGLANG_EP_AVOID_RANK", -1)
+        ):
+            logger.info("[EPLBManager] rebalance skipped")
+            return
+        logger.info("[EPLBManager] rebalance start")
+
+        enable_timing = self._rebalance_layers_per_chunk is None
+
+        if enable_timing:
+            torch.cuda.synchronize()
+            time_start = time.time()
+
+        logical_count = get_global_expert_distribution_recorder().dump_record(
+            output_mode="object"
+        )["logical_count"]
+        expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
+            self._server_args, self._model_runner.model_config, logical_count
+        )
+        self._export_expert_metadata(expert_location_metadata)
 
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
         for chunk_index, update_layer_ids in enumerate(update_layer_ids_chunks):

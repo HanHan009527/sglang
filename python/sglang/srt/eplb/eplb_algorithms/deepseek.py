@@ -223,17 +223,21 @@ def rebalance_experts(
     log2phy.view(num_layers, -1).scatter_(
         -1,
         phy2log * maxlogcnt + phyrank,
-        torch.arange(num_local_experts * num_ok_gpus, dtype=torch.int64, device=log2phy.device).expand(
-            num_layers, -1
-        ),
+        torch.arange(
+            num_local_experts * num_ok_gpus, dtype=torch.int64, device=log2phy.device
+        ).expand(num_layers, -1),
     )
     if num_broken_ranks > 0:
         phy2log_slices = list(phy2log.view(num_layers, num_ok_gpus, -1).unbind(dim=1))
         broken_ranks_list = broken_ranks.tolist()
-        for (idx, broken) in enumerate(broken_ranks_list):
+        for idx, broken in enumerate(broken_ranks_list):
             if broken:
                 phy2log_slices.insert(idx, torch.zeros_like(phy2log_slices[0]))
-                log2phy = torch.where(log2phy >= idx * num_local_experts, log2phy + num_local_experts, log2phy)
+                log2phy = torch.where(
+                    log2phy >= idx * num_local_experts,
+                    log2phy + num_local_experts,
+                    log2phy,
+                )
         phy2log = torch.stack(phy2log_slices, dim=1).contiguous().view(num_layers, -1)
     return phy2log, log2phy, logcnt
 
