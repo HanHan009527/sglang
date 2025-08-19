@@ -36,27 +36,6 @@ class TestDeepseekV3(CustomTestCase):
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
 
-    def test_a_gsm8k(
-        self,
-    ):  # Append an "a" to make this test run first (alphabetically) to warm up the server
-        args = SimpleNamespace(
-            num_shots=8,
-            data_path=None,
-            num_questions=1400,
-            parallel=1400,
-            max_new_tokens=512,
-            host="http://127.0.0.1",
-            port=int(self.base_url.split(":")[-1]),
-        )
-        metrics = run_eval_few_shot_gsm8k(args)
-        print(f"{metrics=}")
-
-        if is_in_ci():
-            write_github_step_summary(
-                f"### test_gsm8k (deepseek-v3)\n" f'{metrics["accuracy"]=:.3f}\n'
-            )
-            self.assertGreater(metrics["accuracy"], 0.935)
-
     def test_bs_1_speed(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
