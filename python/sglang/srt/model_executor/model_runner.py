@@ -512,7 +512,10 @@ class ModelRunner:
             raise
 
         if self.device == "cuda":
-            backend = "nccl"
+            if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
+                backend = "mooncake"
+            else:
+                backend = "nccl"
         elif self.device == "xpu":
             backend = "xccl"
         elif self.device == "hpu":

@@ -38,17 +38,23 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+from mooncake import ep
 
 from sglang.srt.utils import (
     direct_register_custom_op,
     get_bool_env_var,
     get_int_env_var,
+    get_local_ip_auto,
     is_cuda_alike,
     is_hip,
     is_npu,
     is_shm_available,
     supports_custom_op,
 )
+
+
+if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
+    ep.set_host_ip(get_local_ip_auto())
 
 
 @dataclass

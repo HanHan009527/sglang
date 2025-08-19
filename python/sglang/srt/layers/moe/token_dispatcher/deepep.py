@@ -707,8 +707,6 @@ class DeepEPDispatcher(BaseDispatcher):
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
-            if _use_mxa_ep:
-                set_global_deepep_buffer(self._low_latency_dispatcher._get_buffer())
         if self.deepep_mode.enable_normal():
             self._normal_dispatcher = _DeepEPDispatcherImplNormal(
                 async_finish=async_finish,

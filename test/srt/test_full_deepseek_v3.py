@@ -76,7 +76,7 @@ class TestDeepseekV3(CustomTestCase):
 class TestDeepseekV3Small(TestDeepseekV3):
     @classmethod
     def setUpClass(cls):
-        cls.model = "/data00/697678ab8e528b85a2a7bddafea1fa4f/DeepSeek-V3-5layer"
+        cls.model = "chwan/DeepSeek-V3-5layer"
         cls.base_url = DEFAULT_URL_FOR_TEST
         other_args = [
             "--trust-remote-code",
@@ -86,9 +86,6 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "deepep",
             "--deepep-mode",
             "low_latency",
-            "--enable-eplb",
-            "--ep-num-redundant-experts",
-            "32",
             "--enable-dp-attention",
             "--dp-size",
             "8",
@@ -97,9 +94,9 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--max-prefill-tokens",
             "128",
             "--chunked-prefill-size",
-            "1024",
+            "512",
             "--mem-fraction-static",
-            "0.8",
+            "0.7",
             "--disable-cuda-graph",
         ]
         cls.process = popen_launch_server(
