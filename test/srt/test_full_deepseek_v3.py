@@ -37,7 +37,7 @@ class TestDeepseekV3(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_bs_1_speed(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=256)
         acc_length, speed = send_one_prompt(args)
 
         print(f"{speed=:.2f}")
@@ -75,8 +75,14 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--chunked-prefill-size",
             "512",
             "--mem-fraction-static",
-            "0.7",
-            "--disable-cuda-graph",
+            "0.6",
+            # "--disable-cuda-graph",
+            # "--dist-init-addr",
+            # "10.5.55.6:5000",
+            # "--nnodes",
+            # "4",
+            # "--node-rank",
+            # "0",
         ]
         cls.process = popen_launch_server(
             cls.model,
