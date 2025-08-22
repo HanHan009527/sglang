@@ -1006,14 +1006,14 @@ class Scheduler(
                     work_reqs,
                     self.attn_tp_group.rank,
                     self.attn_tp_cpu_group,
-                    src=self.attn_tp_group.ranks[-1],
+                    src=self.attn_tp_group.ranks[0],
                 )
             if self.tp_size != 1:
                 control_reqs = broadcast_pyobj(
                     control_reqs,
                     self.tp_group.rank,
                     self.tp_cpu_group,
-                    src=self.tp_group.ranks[-1],
+                    src=self.tp_group.ranks[0],
                 )
             recv_reqs = work_reqs + control_reqs
         elif self.tp_size != 1:
@@ -1021,7 +1021,7 @@ class Scheduler(
                 recv_reqs,
                 self.tp_group.rank,
                 self.tp_cpu_group,
-                src=self.tp_group.ranks[-1],
+                src=self.tp_group.ranks[0],
             )
         return recv_reqs
 
