@@ -233,6 +233,9 @@ class ExpertLocationMetadata:
         # `_global_expert_location_metadata` can be None.
         if _global_expert_location_metadata is None:
             broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device="cuda")
+            avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
+            if avoid_rank >= 0:
+                broken_nodes[avoid_rank] = 1
         else:
             broken_nodes = _global_expert_location_metadata.broken_nodes
         avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
