@@ -273,6 +273,7 @@ class ModelRunner:
                 )
             )
 
+        self.eplb_manager = None
         self.expert_location_updater = ExpertLocationUpdater()
 
         # Load the model
