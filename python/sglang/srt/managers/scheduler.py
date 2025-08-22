@@ -1968,7 +1968,7 @@ class Scheduler(
             local_info,
             group=group,
         )
-        print(global_info)
+        logger.info(f"global_info = {global_info}, broken_ranks_for_moe = {broken_ranks_for_moe}")
         global_info[:, 0, 0][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 1][broken_ranks_for_moe == 1] = 1
         global_info[:, 0, 2][broken_ranks_for_moe == 1] = 0
