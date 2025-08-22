@@ -273,11 +273,6 @@ class ModelRunner:
                 )
             )
 
-        self.eplb_manager = (
-            EPLBManager(self)
-            if self.server_args.enable_eplb and (not self.is_draft_worker)
-            else None
-        )
         self.expert_location_updater = ExpertLocationUpdater()
 
         # Load the model
