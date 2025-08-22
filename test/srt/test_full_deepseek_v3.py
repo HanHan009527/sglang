@@ -69,7 +69,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "low_latency",
             "--enable-eplb",
             "--ep-num-redundant-experts",
-            "128",
+            "256",
             "--enable-dp-attention",
             "--dp-size",
             "8",
