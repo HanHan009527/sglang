@@ -92,6 +92,7 @@ def topk_ids_logical_to_physical(
 def _topk_ids_logical_to_physical_static(
     topk_ids: torch.Tensor, info: Optional[ExpertLocationDispatchInfo]
 ) -> torch.Tensor:
+    print(info.partial_logical_to_rank_dispatch_physical_map[topk_ids])
     return info.partial_logical_to_rank_dispatch_physical_map[topk_ids]
 
 
