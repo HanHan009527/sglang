@@ -1968,9 +1968,11 @@ class Scheduler(
             local_info,
             group=group,
         )
+        print(global_info)
         global_info[:, 0, 0] = global_info[:, 0, 0].relu()
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
+        global_info[:, 0, 2] = global_info[:, 0, 2].relu()
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
         is_extend_in_batch = global_info[:, 0, 3].tolist()
 

@@ -1147,6 +1147,7 @@ def init_model_parallel_group(
         use_npu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        broken_ranks=broken_ranks,
     )
 
 
