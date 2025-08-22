@@ -55,7 +55,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     prepare_abort,
 )
-from sglang.srt.distributed import get_pp_group, get_world_group
+from sglang.srt.distributed import broken_ranks_for_moe, get_pp_group, get_world_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.hf_transformers_utils import (
     get_processor,
@@ -1968,6 +1968,7 @@ class Scheduler(
             local_info,
             group=group,
         )
+        global_info[:, 0, 0][broken_ranks_for_moe == 1] = 0
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
