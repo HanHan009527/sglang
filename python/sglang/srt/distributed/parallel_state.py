@@ -59,6 +59,10 @@ if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
 broken_ranks_for_moe = None
 
 
+def get_broken_ranks_for_moe():
+    return broken_ranks_for_moe
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.cuda.Stream

@@ -55,7 +55,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     prepare_abort,
 )
-from sglang.srt.distributed import broken_ranks_for_moe, get_pp_group, get_world_group
+from sglang.srt.distributed import get_broken_ranks_for_moe, get_pp_group, get_world_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.hf_transformers_utils import (
     get_processor,
@@ -1968,6 +1968,7 @@ class Scheduler(
             local_info,
             group=group,
         )
+        broken_ranks_for_moe = get_broken_ranks_for_moe()
         logger.info(f"global_info = {global_info}, broken_ranks_for_moe = {broken_ranks_for_moe}")
         global_info[:, 0, 0][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 1][broken_ranks_for_moe == 1] = 1
