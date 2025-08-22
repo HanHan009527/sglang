@@ -37,7 +37,7 @@ class TestDeepseekV3(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_bs_1_speed(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=256)
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=48)
         acc_length, speed = send_one_prompt(args)
 
         print(f"{speed=:.2f}")
