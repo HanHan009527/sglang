@@ -1975,6 +1975,7 @@ class Scheduler(
         global_info[:, 0, 3][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 4][broken_ranks_for_moe == 1] = 1
         global_info[:, 0, 5][broken_ranks_for_moe == 1] = 4
+        logger.info(f"global_info after = {global_info}")
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
