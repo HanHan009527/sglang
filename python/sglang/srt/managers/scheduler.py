@@ -1969,14 +1969,12 @@ class Scheduler(
             group=group,
         )
         broken_ranks_for_moe = get_broken_ranks_for_moe()
-        logger.info(f"global_info = {global_info}, broken_ranks_for_moe = {broken_ranks_for_moe}")
         global_info[:, 0, 0][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 1][broken_ranks_for_moe == 1] = 1
         global_info[:, 0, 2][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 3][broken_ranks_for_moe == 1] = 0
         global_info[:, 0, 4][broken_ranks_for_moe == 1] = 1
         global_info[:, 0, 5][broken_ranks_for_moe == 1] = 4
-        logger.info(f"global_info after = {global_info}")
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()

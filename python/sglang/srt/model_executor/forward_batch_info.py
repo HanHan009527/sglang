@@ -639,7 +639,6 @@ class ForwardBatch:
             buffer_len = max_num_tokens * sync_group_size
         else:
             buffer_len = sum(global_num_tokens)
-        print(f"global_num_tokens = {global_num_tokens}, buffer_len = {buffer_len}")
 
         self.gathered_buffer = torch.zeros(
             (buffer_len, model_runner.model_config.hidden_size),
