@@ -245,7 +245,7 @@ class GroupCoordinator:
         self.local_size = get_int_env_var("LOCAL_SIZE", 0)
 
         for ranks in group_ranks:
-            pg_options = None if broken_ranks is None else ep.MooncakeBackendOptions(broken_ranks)
+            pg_options = ep.MooncakeBackendOptions(broken_ranks) if broken_ranks is not None and get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND") else None
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend, pg_options=pg_options
             )

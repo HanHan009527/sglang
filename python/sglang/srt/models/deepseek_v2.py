@@ -2085,7 +2085,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             prefix=add_prefix("lm_head", prefix),
             use_attn_tp_group=global_server_args_dict["enable_dp_lm_head"],
         )
-        self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
+        self.logits_processor = LogitsProcessor(config)
         self.inference_counter = 0
         self.trigger_at = int(os.environ.get("SGLANG_AVOID_EP_TRIGGER_AT", 100))
 
