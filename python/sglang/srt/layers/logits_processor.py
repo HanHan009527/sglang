@@ -441,12 +441,14 @@ class LogitsProcessor(nn.Module):
         guarantee the given hidden_states follow this constraint.
         """
         if self.do_tensor_parallel_all_gather_dp_attn:
+            logger.info(f"before {hidden_states.shape}")
             logits_metadata.compute_dp_attention_metadata()
             hidden_states, local_hidden_states = (
                 logits_metadata.gathered_buffer,
                 hidden_states,
             )
             dp_gather_replicate(hidden_states, local_hidden_states, logits_metadata)
+            logger.info(f"after {hidden_states.shape}")
 
         if hasattr(lm_head, "weight"):
             if use_intel_amx_backend(lm_head):
@@ -467,6 +469,8 @@ class LogitsProcessor(nn.Module):
 
         if self.logit_scale is not None:
             logits.mul_(self.logit_scale)
+
+        logger.info(f"before logits shape: {logits.shape} {lm_head.weight.shape} ({self.config.vocab_size})")
 
         if self.do_tensor_parallel_all_gather:
             if self.use_attn_tp_group:
@@ -499,6 +503,8 @@ class LogitsProcessor(nn.Module):
             else:
                 logits = tensor_model_parallel_all_gather(logits)
 
+        logger.info(f"after logits shape: {logits.shape} {local_hidden_states.shape}")
+
         if self.do_tensor_parallel_all_gather_dp_attn:
             logits, global_logits = (
                 torch.empty(
@@ -509,6 +515,7 @@ class LogitsProcessor(nn.Module):
                 logits,
             )
             dp_scatter(logits, global_logits, logits_metadata)
+        logger.info(f"scattered logits shape: {logits.shape}")
 
         if logits_metadata.next_token_logits_buffer is not None:
             logits_buffer = logits_metadata.next_token_logits_buffer

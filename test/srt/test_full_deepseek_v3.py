@@ -60,7 +60,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
         other_args = [
             "--trust-remote-code",
             "--tp",
-            "8",
+            "4",
             "--disable-overlap-schedule",
             "--disable-custom-all-reduce",
             "--moe-a2a-backend",
@@ -72,7 +72,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "256",
             "--enable-dp-attention",
             "--dp-size",
-            "8",
+            "4",
             "--moe-dense-tp-size",
             "1",
             "--max-prefill-tokens",
