@@ -1143,7 +1143,7 @@ def init_model_parallel_group(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=False,
+        use_pynccl=False if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND") else not is_npu(),
         use_pymscclpp=use_mscclpp_allreduce,
         use_custom_allreduce=use_custom_allreduce,
         use_hpu_communicator=True,
@@ -1230,7 +1230,7 @@ def graph_capture():
 
 logger = logging.getLogger(__name__)
 
-_ENABLE_CUSTOM_ALL_REDUCE = False
+_ENABLE_CUSTOM_ALL_REDUCE = True
 _ENABLE_MSCCLPP_ALL_REDUCE = False
 
 
