@@ -73,6 +73,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--enable-dp-attention",
             "--dp-size",
             "4",
+            "--enable-dp-lm-head",
             "--moe-dense-tp-size",
             "1",
             "--max-prefill-tokens",
