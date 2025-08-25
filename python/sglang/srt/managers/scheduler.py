@@ -1938,6 +1938,7 @@ class Scheduler(
         if disable_overlap_schedule:
             group = tp_group.device_group
             device = tp_group.device
+            torch.distributed.barrier(group=tp_group.cpu_group)
         else:
             group = tp_group.cpu_group
             device = "cpu"
