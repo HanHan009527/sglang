@@ -30,9 +30,12 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.utils import get_bool_env_var, get_int_env_var, is_hip, load_json_config
 
 try:
-    _use_mxa_ep = get_bool_env_var("SGLANG_USE_MXA_EP")
-    if _use_mxa_ep:
-        from mxa_ep import Buffer
+    _use_mooncake_ep = get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND")
+    if _use_mooncake_ep:
+        if get_bool_env_var("SGLANG_USE_MXA_EP"):
+            from mxa_ep import Buffer
+        else:
+            from mooncake.mooncake_ep_buffer import Buffer
     else:
         from deep_ep import Buffer, Config
 
@@ -122,7 +125,7 @@ class DeepEPBuffer:
         cls._num_experts = num_experts
 
         num_nvl_bytes, num_rdma_bytes = 0, 0
-        if _use_mxa_ep:
+        if _use_mooncake_ep:
             num_mxa_bytes = 0
             if deepep_mode.enable_normal():
                 raise NotImplementedError
@@ -562,7 +565,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         broken_nodes: torch.Tensor,
         use_fp8: bool = False,
     ):
-        if _use_mxa_ep:
+        if _use_mooncake_ep:
             buffer = self._get_buffer()
             packed_recv_hidden, packed_recv_count, self.handle, event, hook = (
                 buffer.dispatch(
@@ -613,7 +616,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         return hidden_states, event, hook
 
     def combine_b(self, hidden_states, event, hook):
-        if _use_mxa_ep:
+        if _use_mooncake_ep:
             hook() if self.return_recv_hook else event.current_stream_wait()
             return hidden_states
         else:
@@ -627,7 +630,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
         gathered_experts: torch.Tensor,
     ):
-        if _use_mxa_ep:
+        if _use_mooncake_ep:
             buffer = self._get_buffer()
             combined_hidden_states, event, hook = buffer.combine(
                 hidden_states,
