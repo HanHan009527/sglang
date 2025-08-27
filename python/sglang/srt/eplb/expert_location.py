@@ -235,7 +235,9 @@ class ExpertLocationMetadata:
             broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device="cuda")
         else:
             broken_nodes = _global_expert_location_metadata.broken_nodes
-        avoid_rank = int(os.environ.get("SGLANG_EP_AVOID_RANK", -1))
+        broken_indices = broken_nodes.nonzero().view(-1)
+        assert broken_indices.numel() <= 1
+        avoid_rank = broken_indices[0].item() if broken_indices.numel() == 1 else -1
 
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
