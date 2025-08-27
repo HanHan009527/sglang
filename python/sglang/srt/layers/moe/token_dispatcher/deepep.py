@@ -14,10 +14,7 @@ from typing import (
     runtime_checkable,
 )
 
-from sglang.srt.eplb.expert_distribution import (
-    get_global_expert_distribution_recorder,
-    set_global_deepep_buffer,
-)
+from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers.moe.token_dispatcher.base_dispatcher import (
     BaseDispatcher,
     BaseDispatcherConfig,
