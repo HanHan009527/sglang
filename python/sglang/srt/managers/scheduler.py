@@ -1064,7 +1064,6 @@ class Scheduler(
             and self.server_args.load_balance_method == "minimum_tokens"
         ):
             self.recv_dp_balance_id_this_term.append(recv_req.dp_balance_id)
-        logger.info(f"generate request {recv_req}")
 
         # Create a new request
         if (
