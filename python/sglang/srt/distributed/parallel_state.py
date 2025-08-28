@@ -57,10 +57,14 @@ if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
     ep.set_host_ip(get_local_ip_auto())
 
 broken_ranks_for_moe = None
+broken_ranks_for_moe_cpu = None
 
 
 def get_broken_ranks_for_moe():
     return broken_ranks_for_moe
+
+def get_broken_ranks_for_moe_cpu():
+    return broken_ranks_for_moe_cpu
 
 
 @dataclass
@@ -233,6 +237,7 @@ class GroupCoordinator:
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
         broken_ranks: Optional[torch.Tensor] = None,
+        broken_ranks_cpu: Optional[torch.Tensor] = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -252,7 +257,8 @@ class GroupCoordinator:
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
-                cpu_group = torch.distributed.new_group(ranks, backend="mooncake-cpu")
+                pg_options = ep.MooncakeBackendOptions(broken_ranks_cpu) if broken_ranks_cpu is not None and get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND") else None
+                cpu_group = torch.distributed.new_group(ranks, backend="mooncake-cpu", pg_options=pg_options)
             else:
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
@@ -1134,6 +1140,7 @@ def init_model_parallel_group(
     group_name: Optional[str] = None,
     use_mscclpp_allreduce: Optional[bool] = None,
     broken_ranks: Optional[torch.Tensor] = None,
+    broken_ranks_cpu: Optional[torch.Tensor] = None,
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
@@ -1152,6 +1159,7 @@ def init_model_parallel_group(
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
         broken_ranks=broken_ranks,
+        broken_ranks_cpu=broken_ranks_cpu,
     )
 
 
@@ -1356,6 +1364,10 @@ def initialize_model_parallel(
     broken_ranks_for_moe = torch.zeros(
         (tensor_model_parallel_size,), dtype=torch.int32, device="cuda"
     )
+    global broken_ranks_for_moe_cpu
+    broken_ranks_for_moe_cpu = torch.zeros(
+        (tensor_model_parallel_size,), dtype=torch.int32, device="cpu"
+    )
     _TP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -1365,6 +1377,7 @@ def initialize_model_parallel(
         ),
         group_name="tp",
         broken_ranks=broken_ranks_for_moe,
+        broken_ranks_cpu=broken_ranks_for_moe_cpu,
     )
 
     if duplicate_tp_group:

@@ -61,7 +61,6 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--trust-remote-code",
             "--tp",
             "8",
-            "--disable-overlap-schedule",
             "--disable-custom-all-reduce",
             "--moe-a2a-backend",
             "deepep",

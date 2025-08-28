@@ -55,7 +55,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     prepare_abort,
 )
-from sglang.srt.distributed import get_broken_ranks_for_moe, get_pp_group, get_world_group
+from sglang.srt.distributed import get_broken_ranks_for_moe, get_broken_ranks_for_moe_cpu, get_pp_group, get_world_group
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.hf_transformers_utils import (
     get_processor,
@@ -1940,9 +1940,12 @@ class Scheduler(
             group = tp_group.device_group
             device = tp_group.device
             torch.distributed.barrier(group=tp_group.cpu_group)
+            broken_ranks_for_moe = get_broken_ranks_for_moe()
         else:
             group = tp_group.cpu_group
             device = "cpu"
+            broken_ranks_for_moe = get_broken_ranks_for_moe_cpu()
+        logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
 
         local_info = torch.tensor(
             [
@@ -1970,8 +1973,6 @@ class Scheduler(
             local_info,
             group=group,
         )
-        broken_ranks_for_moe = get_broken_ranks_for_moe()
-        logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
         global_info.view(-1, 6)[broken_ranks_for_moe == 1, :] = torch.tensor(
             [0, 1, 0, 0, 1, ForwardMode.IDLE.value],
             device=global_info.device,
