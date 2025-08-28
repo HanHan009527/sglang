@@ -2150,7 +2150,11 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
 
         broken_ranks_for_attn_tp = get_broken_ranks_for_attn_tp()
-        torch._assert_async((broken_ranks_for_attn_tp == 0).all())
+        hidden_states = torch.where(
+            (broken_ranks_for_attn_tp == 1).any(),
+            torch.zeros_like(hidden_states),
+            hidden_states,
+        )
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
