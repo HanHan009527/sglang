@@ -51,6 +51,7 @@ from sglang.srt.layers.communicator import (
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
     get_attention_tp_size,
+    get_broken_ranks_for_attn_tp,
     get_local_attention_dp_size,
 )
 from sglang.srt.layers.layernorm import RMSNorm
@@ -2147,6 +2148,9 @@ class DeepseekV2ForCausalLM(nn.Module):
         hidden_states = self.model(
             input_ids, positions, forward_batch, input_embeds
         )
+
+        broken_ranks_for_attn_tp = get_broken_ranks_for_attn_tp()
+        torch._assert_async((broken_ranks_for_attn_tp == 0).all())
 
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
