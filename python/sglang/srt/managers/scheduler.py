@@ -1971,7 +1971,11 @@ class Scheduler(
         )
         broken_ranks_for_moe = get_broken_ranks_for_moe()
         logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
-        global_info.view(-1, 6)[broken_ranks_for_moe == 1, :] = [0, 1, 0, 0, 1, ForwardMode.IDLE.value]
+        global_info.view(-1, 6)[broken_ranks_for_moe == 1, :] = torch.tensor(
+            [0, 1, 0, 0, 1, ForwardMode.IDLE.value],
+            device=global_info.device,
+            dtype=global_info.dtype,
+        )
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
