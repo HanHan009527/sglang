@@ -1061,7 +1061,7 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
-    BLOCK_D = 1024 if not is_in_ci() else 128  # block size of quantization
+    BLOCK_D = 1024 # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
