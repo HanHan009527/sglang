@@ -129,16 +129,13 @@ def initialize_dp_attention(
     )
 
     tp_group = get_tp_group()
-    backend = torch.distributed.get_backend(tp_group.device_group)
-    if backend == "mooncake":
-        backend = "nccl"  # Use classical distributed backend within DP groups
     _ATTN_TP_GROUP = GroupCoordinator(
         [
             list(range(head, head + _ATTN_TP_SIZE))
             for head in range(0, pp_size * tp_size, _ATTN_TP_SIZE)
         ],
         tp_group.local_rank,
-        backend,
+        torch.distributed.get_backend(tp_group.device_group),
         use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
         use_pymscclpp=False,
         use_custom_allreduce=False,
@@ -146,6 +143,7 @@ def initialize_dp_attention(
         use_xpu_communicator=False,
         use_npu_communicator=False,
         group_name="attention_tp",
+        broken_ranks=broken_ranks_for_attn_tp,
     )
 
 
