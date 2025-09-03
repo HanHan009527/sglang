@@ -37,7 +37,7 @@ class TestDeepseekV3(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_bs_1_speed(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=48)
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
 
         print(f"{speed=:.2f}")
@@ -68,7 +68,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "low_latency",
             "--enable-eplb",
             "--ep-num-redundant-experts",
-            "256",
+            "48",
             "--enable-dp-attention",
             "--dp-size",
             "8",
