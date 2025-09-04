@@ -80,7 +80,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "--chunked-prefill-size",
             "512",
             "--mem-fraction-static",
-            "0.4",
+            "0.8",
             "--disaggregation-mode",
             "decode",
             "--disaggregation-ib-device",
