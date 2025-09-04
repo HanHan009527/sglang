@@ -37,7 +37,7 @@ class TestDeepseekV3(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_bs_1_speed(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        args = BenchArgs(port=30301, max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
 
         print(f"{speed=:.2f}")
@@ -60,7 +60,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
         other_args = [
             "--trust-remote-code",
             "--tp",
-            "8",
+            "4",
             "--disable-custom-all-reduce",
             "--moe-a2a-backend",
             "deepep",
@@ -71,7 +71,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "48",
             "--enable-dp-attention",
             "--dp-size",
-            "8",
+            "4",
             "--enable-dp-lm-head",
             "--moe-dense-tp-size",
             "1",
@@ -81,6 +81,8 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "512",
             "--mem-fraction-static",
             "0.4",
+            "--disaggregation-mode",
+            "decode",
             # "--disable-cuda-graph",
             # "--dist-init-addr",
             # "10.5.55.6:5000",
