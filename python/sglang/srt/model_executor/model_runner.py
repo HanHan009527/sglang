@@ -1648,11 +1648,11 @@ class ModelRunner:
             )
 
             if not torch.equal(
-                get_global_expert_location_metadata().broken_nodes,
-                get_global_expert_location_metadata().last_broken_nodes,
+                get_global_expert_location_metadata().broken_ranks,
+                get_global_expert_location_metadata().last_broken_ranks,
             ):
-                get_global_expert_location_metadata().last_broken_nodes = (
-                    get_global_expert_location_metadata().broken_nodes.clone()
+                get_global_expert_location_metadata().last_broken_ranks = (
+                    get_global_expert_location_metadata().broken_ranks.clone()
                 )
                 logging.info(f"recompute _forward_raw")
                 gen = self.eplb_manager.rebalance()

@@ -676,7 +676,7 @@ class DeepseekV2MoE(nn.Module):
                 topk_idx=state.pop("topk_idx_local"),
                 topk_weights=state.pop("topk_weights_local"),
                 forward_batch=state.forward_batch,
-                broken_nodes=state.broken_nodes,
+                broken_ranks=state.broken_ranks,
                 tbo_subbatch_index=state.get("tbo_subbatch_index"),
             )
 
@@ -700,7 +700,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=state.pop("hidden_states_experts_output"),
                 topk_idx=state.dispatch_output.topk_idx,
                 topk_weights=state.dispatch_output.topk_weights,
-                gathered_experts=state.gathered_experts,
+                broken_ranks=state.broken_ranks,
                 forward_batch=state.forward_batch,
                 tbo_subbatch_index=state.get("tbo_subbatch_index"),
             )
