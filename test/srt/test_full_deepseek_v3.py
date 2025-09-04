@@ -83,7 +83,7 @@ class TestDeepseekV3Small(TestDeepseekV3):
             "0.4",
             "--disaggregation-mode",
             "decode",
-            "disaggregation-ib-device",
+            "--disaggregation-ib-device",
             "mlx5_1,mlx5_2",
             # "--disable-cuda-graph",
             # "--dist-init-addr",
