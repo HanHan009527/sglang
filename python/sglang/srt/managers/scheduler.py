@@ -1945,7 +1945,7 @@ class Scheduler(
             group = tp_group.cpu_group
             device = "cpu"
             broken_ranks_for_moe = get_broken_ranks_for_moe_cpu()
-        logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
+        # logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
 
         local_info = torch.tensor(
             [
