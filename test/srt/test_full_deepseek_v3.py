@@ -1,4 +1,5 @@
 import unittest
+import os
 from types import SimpleNamespace
 
 import requests
@@ -98,6 +99,21 @@ class TestDeepseekV3Small(TestDeepseekV3):
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=other_args,
+            env={
+                "GLOO_SOCKET_IFNAME": "eth0",
+                "NCCL_IB_DISABLE": "0",
+                "NCCL_SOCKET_IFNAME": "eth0",
+                "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK": "1",
+                "NCCL_MIN_NCHANNELS": "24",
+                "NCCL_IB_QPS_PER_CONNECTION": "8",
+                "SGL_ENABLE_JIT_DEEPGEMM": "1",
+                "MC_CUSTOM_TOPO_JSON": "/sgl-workspace/nic_priority_matrix.json",
+                "SGLANG_USE_MOONCAKE_BACKEND": "1",
+                "SGLANG_USE_MXA_EP": "0",
+                "MC_WORKERS_PER_CTX": "1",
+                **os.environ
+            },
+
         )
 
 
