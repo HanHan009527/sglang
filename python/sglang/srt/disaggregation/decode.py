@@ -574,6 +574,7 @@ class DecodeTransferQueue:
     def pop_transferred(self) -> List[Req]:
         if not self.queue:
             return []
+        
         polls = poll_and_all_reduce(
             [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
         )
@@ -601,6 +602,7 @@ class DecodeTransferQueue:
                 indices_to_remove.add(i)
                 continue
             elif poll == KVPoll.Success:
+                logger.info(f"[DecodeTransferQueue] Request {decode_req.req.rid} transfer succeeded")
                 idx = decode_req.metadata_buffer_index
                 (
                     output_id,
@@ -638,12 +640,14 @@ class DecodeTransferQueue:
                 # special handling for sampling_params.max_new_tokens == 1
                 if decode_req.req.sampling_params.max_new_tokens == 1:
                     # finish immediately
+                    logger.info(f"[DecodeTransferQueue] Request {decode_req.req.rid} has max_new_tokens=1, finishing immediately")
                     decode_req.req.check_finished()
                     self.scheduler.stream_output(
                         [decode_req.req], decode_req.req.return_logprob
                     )
                     self.tree_cache.cache_finished_req(decode_req.req)
                 else:
+                    logger.info(f"[DecodeTransferQueue] Adding request {decode_req.req.rid} to transferred_reqs")
                     transferred_reqs.append(decode_req.req)
 
                 indices_to_remove.add(i)
@@ -652,6 +656,10 @@ class DecodeTransferQueue:
                 KVPoll.WaitingForInput,
                 KVPoll.Transferring,
             ]:
+                # Only log when status changes to avoid log explosion
+                if not hasattr(decode_req, 'last_poll_status') or decode_req.last_poll_status != poll:
+                    logger.info(f"[DecodeTransferQueue] Request {decode_req.req.rid} status: {poll}")
+                    decode_req.last_poll_status = poll
                 pass
             else:
                 logger.error(f"[DecodeTransferQueue] Unexpected poll case for request {decode_req.req.rid}: {poll}")
@@ -665,8 +673,14 @@ class DecodeTransferQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
+        
+        # Only log when there are transferred requests to avoid log explosion
         if transferred_reqs:
-            logger.info(f"[DecodeTransferQueue] Returning {len(transferred_reqs)} transferred requests")
+            logger.info(f"[DecodeTransferQueue] Transferred {len(transferred_reqs)} requests to waiting queue")
+            # Log the request IDs only when there are a small number of requests
+            if len(transferred_reqs) <= 3:
+                for req in transferred_reqs:
+                    logger.info(f"[DecodeTransferQueue] Transferred request: {req.rid}")
 
         return transferred_reqs
 
@@ -904,6 +918,10 @@ class SchedulerDisaggregationDecodeMixin:
         req_conns = self.disagg_decode_prealloc_queue.pop_preallocated()
         if req_conns:
             logger.info(f"[Scheduler] Preallocated {len(req_conns)} requests from decode_prealloc_queue")
+            for req_conn in req_conns:
+                logger.info(f"[Scheduler] Added request {req_conn.req.rid} to transfer queue")
+        else:
+            logger.info(f"[Scheduler] No requests preallocated from decode_prealloc_queue")
         self.disagg_decode_transfer_queue.extend(req_conns)
         
         alloc_reqs = (
