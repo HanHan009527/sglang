@@ -1501,9 +1501,12 @@ class Scheduler(
         )
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
+        logger.info(f"[Scheduler] get_next_batch_to_run called, waiting_queue size: {len(self.waiting_queue)}, running_batch size: {len(self.running_batch.reqs) if self.running_batch else 0}")
+        
         # Merge the prefill batch into the running batch
         chunked_req_to_exclude = set()
         if self.chunked_req:
+            logger.info(f"[Scheduler] Processing chunked_req with rid: {self.chunked_req.rid}")
             # Move the chunked request out of the batch so that we can merge
             # only finished requests to running_batch.
             chunked_req_to_exclude.add(self.chunked_req)
@@ -1527,12 +1530,15 @@ class Scheduler(
             # Merge the new batch into the running batch
             if not self.last_batch.is_empty():
                 if self.running_batch.is_empty():
+                    logger.info(f"[Scheduler] Setting running_batch to last_batch with {len(self.last_batch.reqs)} requests")
                     self.running_batch = self.last_batch
                 else:
                     # Merge running_batch with prefill batch
+                    logger.info(f"[Scheduler] Merging last_batch with {len(self.last_batch.reqs)} requests into running_batch with {len(self.running_batch.reqs)} requests")
                     self.running_batch.merge_batch(self.last_batch)
 
         new_batch = self.get_new_batch_prefill()
+        logger.info(f"[Scheduler] get_new_batch_prefill returned: {'None' if new_batch is None else f'batch with {len(new_batch.reqs)} requests'}")
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 
@@ -1544,13 +1550,21 @@ class Scheduler(
 
         if new_batch is not None:
             # Run prefill first if possible
+            logger.info(f"[Scheduler] Returning prefill batch with {len(new_batch.reqs)} requests")
             ret = new_batch
         else:
             # Run decode
             if not self.running_batch.is_empty():
+                logger.info(f"[Scheduler] Updating running_batch with {len(self.running_batch.reqs)} requests")
                 self.running_batch = self.update_running_batch(self.running_batch)
-                ret = self.running_batch if not self.running_batch.is_empty() else None
+                if not self.running_batch.is_empty():
+                    logger.info(f"[Scheduler] Returning running_batch with {len(self.running_batch.reqs)} requests")
+                    ret = self.running_batch
+                else:
+                    logger.info("[Scheduler] Running batch is empty after update, returning None")
+                    ret = None
             else:
+                logger.info("[Scheduler] Running batch is empty, returning None")
                 ret = None
 
         # Handle DP attention
@@ -1562,6 +1576,7 @@ class Scheduler(
                 self.handle_dp_balance_data(ret)
             ret = self.prepare_mlp_sync_batch(ret)
 
+        logger.info(f"[Scheduler] get_next_batch_to_run returning: {'None' if ret is None else f'batch with {len(ret.reqs)} requests, mode: {ret.forward_mode}'}")
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
@@ -1768,6 +1783,9 @@ class Scheduler(
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
         self.forward_ct += 1
+        logger.info(f"[Scheduler] run_batch called with batch containing {len(batch.reqs)} requests, forward_mode: {batch.forward_mode}")
+        for i, req in enumerate(batch.reqs):
+            logger.info(f"[Scheduler] Request {i} in batch: rid={req.rid}, status={req.status if hasattr(req, 'status') else 'N/A'}")
 
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
@@ -1779,21 +1797,27 @@ class Scheduler(
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()
+                logger.info(f"[Scheduler] Created model_worker_batch with bid: {model_worker_batch.bid}")
 
                 # update the consumer index of hicache to the running batch
                 self.tp_worker.set_hicache_consumer(
                     model_worker_batch.hicache_consumer_index
                 )
                 if self.pp_group.is_last_rank:
+                    logger.info(f"[Scheduler] Calling tp_worker.forward_batch_generation for PP last rank")
                     logits_output, next_token_ids, can_run_cuda_graph = (
                         self.tp_worker.forward_batch_generation(model_worker_batch)
                     )
+                    logger.info(f"[Scheduler] TP worker forward_batch_generation completed for PP last rank")
                 else:
+                    logger.info(f"[Scheduler] Calling tp_worker.forward_batch_generation for non-PP last rank")
                     pp_hidden_states_proxy_tensors, _, can_run_cuda_graph = (
                         self.tp_worker.forward_batch_generation(model_worker_batch)
                     )
+                    logger.info(f"[Scheduler] TP worker forward_batch_generation completed for non-PP last rank")
                 bid = model_worker_batch.bid
             else:
+                logger.info(f"[Scheduler] Running with speculative algorithm: {self.spec_algorithm}")
                 (
                     logits_output,
                     next_token_ids,

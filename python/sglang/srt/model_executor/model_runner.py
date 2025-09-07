@@ -1633,12 +1633,14 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
+        logger.info(f"[ModelRunner] forward called with forward_mode: {forward_batch.forward_mode}, batch_size: {forward_batch.batch_size()}")
         self.forward_pass_id += 1
 
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
             forward_batch,
         ):
+            logger.info(f"[ModelRunner] Calling _forward_raw")
             output = self._forward_raw(
                 forward_batch,
                 skip_attn_backend_init,
@@ -1646,6 +1648,7 @@ class ModelRunner:
                 reinit_attn_backend,
                 split_forward_count,
             )
+            logger.info(f"[ModelRunner] _forward_raw completed")
 
             if not torch.equal(
                 get_global_expert_location_metadata().broken_nodes,
@@ -1661,6 +1664,7 @@ class ModelRunner:
                         next(gen)
                     except StopIteration:
                         break
+                logger.info(f"[ModelRunner] Recomputing _forward_raw after rebalance")
                 output = self._forward_raw(
                     forward_batch,
                     skip_attn_backend_init,
@@ -1668,9 +1672,11 @@ class ModelRunner:
                     reinit_attn_backend,
                     split_forward_count,
                 )
+                logger.info(f"[ModelRunner] Recomputed _forward_raw completed")
             if self.eplb_manager is not None:
                 self.eplb_manager.on_forward_pass_end()
 
+        logger.info(f"[ModelRunner] forward completed, returning output type: {type(output)}")
         return output
 
     def _forward_raw(
@@ -1681,49 +1687,66 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
+        logger.info(f"[ModelRunner] _forward_raw called with forward_mode: {forward_batch.forward_mode}")
         can_run_cuda_graph = bool(
             forward_batch.forward_mode.is_cuda_graph()
             and self.cuda_graph_runner
             and self.cuda_graph_runner.can_run(forward_batch)
         )
+        logger.info(f"[ModelRunner] can_run_cuda_graph: {can_run_cuda_graph}")
+        
         if can_run_cuda_graph:
+            logger.info(f"[ModelRunner] Using CUDA graph runner")
             ret = self.cuda_graph_runner.replay(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            logger.info(f"[ModelRunner] CUDA graph runner replay completed")
             return ret, can_run_cuda_graph
 
         # For MLP sync
         if forward_batch.global_num_tokens_cpu is not None:
+            logger.info(f"[ModelRunner] Preparing MLP sync batch")
             forward_batch.prepare_mlp_sync_batch(self)
 
         if forward_batch.forward_mode.is_decode():
+            logger.info(f"[ModelRunner] Calling forward_decode")
             ret = self.forward_decode(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            logger.info(f"[ModelRunner] forward_decode completed")
         elif forward_batch.forward_mode.is_extend():
+            logger.info(f"[ModelRunner] Calling forward_extend")
             ret = self.forward_extend(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            logger.info(f"[ModelRunner] forward_extend completed")
         elif forward_batch.forward_mode.is_split_prefill():
+            logger.info(f"[ModelRunner] Calling forward_split_prefill")
             ret = self.forward_split_prefill(
                 forward_batch,
                 reinit_attn_backend=reinit_attn_backend,
                 forward_count=split_forward_count,
             )
+            logger.info(f"[ModelRunner] forward_split_prefill completed")
         elif forward_batch.forward_mode.is_idle():
+            logger.info(f"[ModelRunner] Calling forward_idle")
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)
+            logger.info(f"[ModelRunner] forward_idle completed")
         else:
+            logger.error(f"[ModelRunner] Invalid forward mode: {forward_batch.forward_mode}")
             raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
         if forward_batch.global_num_tokens_cpu is not None:
+            logger.info(f"[ModelRunner] Post-processing MLP sync batch")
             forward_batch.post_forward_mlp_sync_batch(ret)
 
+        logger.info(f"[ModelRunner] _forward_raw completed, returning output type: {type(ret)}")
         return ret, can_run_cuda_graph
 
     def _preprocess_logits(

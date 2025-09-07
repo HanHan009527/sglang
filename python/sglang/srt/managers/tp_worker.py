@@ -224,7 +224,9 @@ class TpModelWorker:
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
+        logger.info(f"[TPWorker] forward_batch_generation called with batch_size: {len(model_worker_batch.seq_lens)}, bid: {model_worker_batch.bid}")
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+        logger.info(f"[TPWorker] Created forward_batch with forward_mode: {forward_batch.forward_mode}")
 
         pp_proxy_tensors = None
         if not self.pp_group.is_first_rank:
@@ -233,27 +235,35 @@ class TpModelWorker:
                     all_gather_group=self.get_attention_tp_group()
                 )
             )
+            logger.info(f"[TPWorker] Received PP proxy tensors for non-first rank")
 
         if self.pp_group.is_last_rank:
+            logger.info(f"[TPWorker] Calling model_runner.forward for PP last rank")
             logits_output, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch, pp_proxy_tensors=pp_proxy_tensors
             )
+            logger.info(f"[TPWorker] model_runner.forward completed for PP last rank")
             if launch_done is not None:
                 launch_done.set()
 
             if skip_sample:
+                logger.info(f"[TPWorker] Skipping sample step")
                 next_token_ids = None
             else:
+                logger.info(f"[TPWorker] Calling model_runner.sample")
                 next_token_ids = self.model_runner.sample(
                     logits_output, model_worker_batch
                 )
+                logger.info(f"[TPWorker] model_runner.sample completed")
 
             return logits_output, next_token_ids, can_run_cuda_graph
         else:
+            logger.info(f"[TPWorker] Calling model_runner.forward for non-PP last rank")
             pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            logger.info(f"[TPWorker] model_runner.forward completed for non-PP last rank")
             return pp_proxy_tensors.tensors, None, can_run_cuda_graph
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):
