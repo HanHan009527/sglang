@@ -269,19 +269,42 @@ class DataParallelController:
     def round_robin_scheduler(self, req: Req):
         if self.server_args.disaggregation_mode == "null":
             if req.data_parallel_rank is not None:
-                logger.debug(f"Direct routing to DP rank {req.data_parallel_rank}")
+                logger.info(
+                    f"[DataParallelController] Direct routing request {req.rid} to DP rank {req.data_parallel_rank}"
+                )
                 self.workers[req.data_parallel_rank].send_pyobj(req)
+                logger.info(
+                    f"[DataParallelController] Finished sending request {req.rid} to DP rank {req.data_parallel_rank}"
+                )
             else:
+                logger.info(
+                    f"[DataParallelController] Round-robin routing request {req.rid} to DP rank {self.round_robin_counter}"
+                )
                 self.workers[self.round_robin_counter].send_pyobj(req)
+                logger.info(
+                    f"[DataParallelController] Finished sending request {req.rid} to DP rank {self.round_robin_counter}"
+                )
                 self.round_robin_counter = (self.round_robin_counter + 1) % len(
                     self.workers
                 )
         else:
             if req.data_parallel_rank is not None:
-                logger.debug(f"Direct routing to DP rank {req.data_parallel_rank}")
+                logger.info(
+                    f"[DataParallelController] Direct routing request {req.rid} to DP rank {req.data_parallel_rank}"
+                )
                 self.workers[req.data_parallel_rank].send_pyobj(req)
+                logger.info(
+                    f"[DataParallelController] Finished sending request {req.rid} to DP rank {req.data_parallel_rank}"
+                )
             else:
-                self.workers[req.bootstrap_room % len(self.workers)].send_pyobj(req)
+                target_worker = req.bootstrap_room % len(self.workers)
+                logger.info(
+                    f"[DataParallelController] Bootstrap routing request {req.rid} to DP rank {target_worker}"
+                )
+                self.workers[target_worker].send_pyobj(req)
+                logger.info(
+                    f"[DataParallelController] Finished sending request {req.rid} to DP rank {target_worker}"
+                )
 
     def shortest_queue_scheduler(self, input_requests):
         raise NotImplementedError()
@@ -306,12 +329,21 @@ class DataParallelController:
                 for local_token, onfly_dict in zip(local_tokens, onfly_info)
             ]
             target_worker = total_tokens.index(min(total_tokens))
+            logger.info(
+                f"[DataParallelController] Minimum-tokens routing request {req.rid} to DP rank {target_worker}"
+            )
             onfly_info[target_worker][req.dp_balance_id] = len(req.input_ids)
             # 2. write the new onfly info to the shm
             self.balance_meta.set_shared_onfly_info(onfly_info)
 
         # logger.info(f"dp workers {local_tokens=}, {onfly_info=}, {target_worker=}")
+        logger.info(
+            f"[DataParallelController] Sending minimum-tokens routed request {req.rid} to DP rank {target_worker}"
+        )
         self.workers[target_worker].send_pyobj(req)
+        logger.info(
+            f"[DataParallelController] Finished sending minimum-tokens routed request {req.rid} to DP rank {target_worker}"
+        )
 
     def event_loop(self):
         while True:
@@ -321,6 +353,13 @@ class DataParallelController:
                 except zmq.ZMQError:
                     break
 
+                if hasattr(recv_req, "rid"):
+                    logger.info(f"[DataParallelController] Received request {recv_req.rid}")
+                else:
+                    logger.info(
+                        f"[DataParallelController] Received control message: {type(recv_req)}"
+                    )
+
                 if isinstance(
                     recv_req,
                     (
@@ -328,14 +367,20 @@ class DataParallelController:
                         TokenizedEmbeddingReqInput,
                     ),
                 ):
+                    logger.info(f"[DataParallelController] Dispatching work request {getattr(recv_req, 'rid', 'unknown')} to worker")
                     self.dispatching(recv_req)
+                    logger.info(f"[DataParallelController] Finished dispatching work request {getattr(recv_req, 'rid', 'unknown')}")
                 elif isinstance(recv_req, BlockReqInput):
+                    logger.info(f"[DataParallelController] Broadcasting block request to all workers")
                     for worker in self.workers:
                         worker.send_pyobj(recv_req)
+                    logger.info(f"[DataParallelController] Finished broadcasting block request")
                 else:
+                    logger.info(f"[DataParallelController] Sending control message to workers (step={self.control_message_step})")
                     # Send other control messages to first worker of tp group
                     for worker in self.workers[:: self.control_message_step]:
                         worker.send_pyobj(recv_req)
+                    logger.info(f"[DataParallelController] Finished sending control message")
 
 
 def run_data_parallel_controller_process(

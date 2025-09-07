@@ -953,6 +953,7 @@ class Scheduler(
                 while True:
                     try:
                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                        logger.info(f"[Scheduler] Received request: {type(recv_req)} with rid: {getattr(recv_req, 'rid', 'N/A')}")
                     except zmq.ZMQError:
                         break
                     recv_reqs.append(recv_req)
@@ -960,6 +961,7 @@ class Scheduler(
                 while True:
                     try:
                         recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
+                        logger.info(f"[Scheduler] Received RPC request: {type(recv_rpc)} with rid: {getattr(recv_rpc, 'rid', 'N/A')}")
                     except zmq.ZMQError:
                         break
                     recv_reqs.append(recv_rpc)
@@ -975,11 +977,13 @@ class Scheduler(
                     (self.pp_rank - 1) * self.tp_size + dp_offset,
                     self.pp_rank * self.tp_size + dp_offset,
                 )
+                logger.info(f"[Scheduler] Received point-to-point requests from previous rank")
             else:
                 recv_reqs = None
 
         if self.input_blocker is not None:
             recv_reqs = self.input_blocker.handle(recv_reqs)
+            logger.info(f"[Scheduler] Handled input blocker, requests count: {len(recv_reqs) if recv_reqs else 0}")
 
         if self.server_args.enable_dp_attention:
             if self.attn_tp_rank == 0:
@@ -1015,7 +1019,8 @@ class Scheduler(
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
-            recv_reqs = work_reqs + control_reqs
+            recv_reqs = work_reqs + control_reqs if work_reqs is not None and control_reqs is not None else (work_reqs or control_reqs or [])
+            logger.info(f"[Scheduler] After DP attention broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
         elif self.tp_size != 1:
             recv_reqs = broadcast_pyobj(
                 recv_reqs,
@@ -1023,20 +1028,27 @@ class Scheduler(
                 self.tp_cpu_group,
                 src=self.tp_group.ranks[0],
             )
+            logger.info(f"[Scheduler] After TP broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
+        logger.info(f"[Scheduler] Final requests count to process: {len(recv_reqs) if recv_reqs else 0}")
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
-        for recv_req in recv_reqs:
+        logger.info(f"[Scheduler] Processing input requests, count: {len(recv_reqs) if recv_reqs else 0}")
+        for i, recv_req in enumerate(recv_reqs):
+            logger.info(f"[Scheduler] Processing request {i}: {type(recv_req)} with rid: {getattr(recv_req, 'rid', 'N/A')}")
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None or not self.running_batch.is_empty()
             ):
+                logger.info(f"[Scheduler] Skipping health check request {getattr(recv_req, 'rid', 'N/A')}")
                 self.return_health_check_ct += 1
                 continue
 
             # If it is a work request, accept or reject the request based on the request queue size.
             if is_work_request(recv_req):
+                logger.info(f"[Scheduler] Handling work request {getattr(recv_req, 'rid', 'N/A')}, current waiting queue size: {len(self.waiting_queue)}")
                 if len(self.waiting_queue) + 1 > self.max_queued_requests:
+                    logger.info(f"[Scheduler] Request queue is full, rejecting request {getattr(recv_req, 'rid', 'N/A')}")
                     abort_req = AbortReq(
                         recv_req.rid,
                         finished_reason={
@@ -1048,23 +1060,30 @@ class Scheduler(
                     self.send_to_tokenizer.send_pyobj(abort_req)
                     continue
             output = self._request_dispatcher(recv_req)
+            logger.info(f"[Scheduler] Dispatched request {getattr(recv_req, 'rid', 'N/A')}, output type: {type(output)}")
             if output is not None:
                 if isinstance(output, RpcReqOutput):
                     if self.recv_from_rpc is not None:
+                        logger.info(f"[Scheduler] Sending RPC output for request {getattr(recv_req, 'rid', 'N/A')}")
                         self.recv_from_rpc.send_pyobj(output)
                 else:
+                    logger.info(f"[Scheduler] Sending output for request {getattr(recv_req, 'rid', 'N/A')} to tokenizer")
                     self.send_to_tokenizer.send_pyobj(output)
+        logger.info(f"[Scheduler] Finished processing input requests")
 
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        logger.info(f"[Scheduler] Handling generate request {recv_req.rid}")
         if (
             self.server_args.enable_dp_attention
             and self.server_args.load_balance_method == "minimum_tokens"
         ):
             self.recv_dp_balance_id_this_term.append(recv_req.dp_balance_id)
-        logger.info(f"generate request {recv_req}")
+            logger.info(f"[Scheduler] Added DP balance ID for request {recv_req.rid}")
+
+        logger.info(f"[Scheduler] Generate request details: {recv_req}")
 
         # Create a new request
         if (
@@ -1072,11 +1091,13 @@ class Scheduler(
             or recv_req.session_params.id is None
             or recv_req.session_params.id not in self.sessions
         ):
+            logger.info(f"[Scheduler] Creating new request {recv_req.rid} (not from session)")
             if recv_req.input_embeds is not None:
                 # Generate fake input_ids based on the length of input_embeds
                 seq_length = len(recv_req.input_embeds)
                 fake_input_ids = [1] * seq_length
                 recv_req.input_ids = fake_input_ids
+                logger.info(f"[Scheduler] Generated fake input_ids for request {recv_req.rid}, length: {seq_length}")
 
             if recv_req.bootstrap_port is None:
                 # Use default bootstrap port
@@ -1114,12 +1135,14 @@ class Scheduler(
                     logger.error(error_msg)
                     prepare_abort(req, error_msg)
                     self.stream_output([req], req.return_logprob)
+                    logger.info(f"[Scheduler] Aborted disaggregated request {recv_req.rid} due to missing room ID")
                     return
 
             if (
                 recv_req.session_params is not None
                 and recv_req.session_params.id is not None
             ):
+                logger.info(f"[Scheduler] Session ID specified but not found for request {recv_req.rid}")
                 req.set_finish_with_abort(
                     f"Invalid request: session id {recv_req.session_params.id} does not exist"
                 )
@@ -1127,14 +1150,17 @@ class Scheduler(
                 return
         else:
             # Create a new request from a previous session
+            logger.info(f"[Scheduler] Creating request {recv_req.rid} from existing session {recv_req.session_params.id}")
             session = self.sessions[recv_req.session_params.id]
             req = session.create_req(recv_req, self.tokenizer)
             if isinstance(req.finished_reason, FINISH_ABORT):
+                logger.info(f"[Scheduler] Request {recv_req.rid} from session was aborted")
                 self._add_request_to_queue(req)
                 return
 
         # Handle multimodal inputs
         if recv_req.mm_inputs is not None:
+            logger.info(f"[Scheduler] Handling multimodal inputs for request {recv_req.rid}")
             image_inputs = MultimodalInputs.from_dict(recv_req.mm_inputs)
             # Expand a single image token into multiple dummy tokens for receiving image embeddings
             req.origin_input_ids = self.pad_input_ids_func(
@@ -1143,22 +1169,24 @@ class Scheduler(
             req.extend_image_inputs(image_inputs)
 
             if len(req.origin_input_ids) >= self.max_req_input_len:
-                req.set_finish_with_abort(
-                    error_msg=(
-                        "Multimodal prompt is too long after expanding multimodal tokens. "
-                        f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
-                    )
+                error_msg = (
+                    "Multimodal prompt is too long after expanding multimodal tokens. "
+                    f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
                 )
+                logger.info(f"[Scheduler] Multimodal request {recv_req.rid} too long: {error_msg}")
+                req.set_finish_with_abort(error_msg)
                 self._add_request_to_queue(req)
                 return
 
         # Validate prompt length
+        logger.info(f"[Scheduler] Validating input length for request {recv_req.rid}")
         error_msg = validate_input_length(
             req,
             self.max_req_input_len,
             self.server_args.allow_auto_truncate,
         )
         if error_msg:
+            logger.info(f"[Scheduler] Request {recv_req.rid} failed input length validation: {error_msg}")
             req.set_finish_with_abort(error_msg)
             self._add_request_to_queue(req)
             return
@@ -1173,6 +1201,7 @@ class Scheduler(
         if req.logprob_start_len >= len(req.origin_input_ids):
             error_msg = f"{req.logprob_start_len=} is higher than the number of input tokens {len(req.origin_input_ids)=}. Please use a smaller logprob_start_len."
             req.logprob_start_len = len(req.origin_input_ids) - 1
+            logger.info(f"[Scheduler] Request {recv_req.rid} has invalid logprob_start_len: {error_msg}")
             req.set_finish_with_abort(error_msg)
             self._add_request_to_queue(req)
             return
@@ -1194,6 +1223,7 @@ class Scheduler(
             or req.sampling_params.ebnf is not None
             or req.sampling_params.structural_tag is not None
         ):
+            logger.info(f"[Scheduler] Initializing grammar cache for request {recv_req.rid}")
             assert self.grammar_backend is not None
             if req.sampling_params.json_schema is not None:
                 key = ("json", req.sampling_params.json_schema)
@@ -1213,26 +1243,35 @@ class Scheduler(
             else:
                 if value is INVALID_GRAMMAR_OBJ:  # We hit a cached invalid grammar.
                     error_msg = f"Invalid grammar request with cache hit: {key=}"
+                    logger.info(f"[Scheduler] Request {recv_req.rid} has invalid cached grammar: {error_msg}")
                     req.set_finish_with_abort(error_msg)
 
         if add_to_grammar_queue:
             req.queue_time_start = time.perf_counter()
+            logger.info(f"[Scheduler] Adding request {recv_req.rid} to grammar queue")
             self.grammar_queue.append(req)
         else:
+            logger.info(f"[Scheduler] Adding request {recv_req.rid} to regular queue")
             self._add_request_to_queue(req)
+        logger.info(f"[Scheduler] Finished handling generate request {recv_req.rid}")
 
     def _add_request_to_queue(self, req: Req):
+        logger.info(f"[Scheduler] Adding request {req.rid} to queue")
         req.queue_time_start = time.perf_counter()
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            logger.info(f"[Scheduler] Adding request {req.rid} to prefill bootstrap queue")
             self._prefetch_kvcache(req)
             self.disagg_prefill_bootstrap_queue.add(
                 req, self.model_config.num_key_value_heads
             )
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            logger.info(f"[Scheduler] Adding request {req.rid} to decode prealloc queue")
             self.disagg_decode_prealloc_queue.add(req)
         else:
+            logger.info(f"[Scheduler] Adding request {req.rid} to regular waiting queue, current size: {len(self.waiting_queue)}")
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
+            logger.info(f"[Scheduler] Request {req.rid} added to waiting queue, new size: {len(self.waiting_queue)}")
 
     def _prefetch_kvcache(self, req: Req):
         if self.enable_hicache_storage:
@@ -2541,6 +2580,7 @@ def run_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
+        logger.info(f"Scheduler process started for GPU {gpu_id}")
         scheduler = Scheduler(
             server_args,
             port_args,
