@@ -1061,14 +1061,14 @@ class DeepseekV2AttentionMLA(nn.Module):
         zero_allocator: BumpAllocator,
     ):
         # Log entry to forward method
-        logger.info(f"[DeepSeekV2] ENTER forward method")
-        logger.info(f"[DeepSeekV2] positions shape: {positions.shape}")
-        logger.info(f"[DeepSeekV2] hidden_states shape: {hidden_states.shape}")
-        logger.info(f"[DeepSeekV2] forward_batch req_count: {len(forward_batch.reqs) if forward_batch and hasattr(forward_batch, 'reqs') else 0}")
+        # logger.info(f"[DeepSeekV2] ENTER forward method")
+        # logger.info(f"[DeepSeekV2] positions shape: {positions.shape}")
+        # logger.info(f"[DeepSeekV2] hidden_states shape: {hidden_states.shape}")
+        # logger.info(f"[DeepSeekV2] forward_batch req_count: {len(forward_batch.reqs) if forward_batch and hasattr(forward_batch, 'reqs') else 0}")
         
         if forward_batch and hasattr(forward_batch, 'reqs') and forward_batch.reqs:
             req_rids = [req.rid for req in forward_batch.reqs]
-            logger.info(f"[DeepSeekV2] Request RIDs: {req_rids}")
+            # logger.info(f"[DeepSeekV2] Request RIDs: {req_rids}")
         
         s = self.forward_prepare(
             positions=positions,
@@ -1077,9 +1077,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             zero_allocator=zero_allocator,
         )
         
-        logger.info("[DeepSeekV2] Finished forward_prepare, calling forward_core")
+        # logger.info("[DeepSeekV2] Finished forward_prepare, calling forward_core")
         result = self.forward_core(s)
-        logger.info(f"[DeepSeekV2] EXIT forward method, result shape: {result.shape}")
+        # logger.info(f"[DeepSeekV2] EXIT forward method, result shape: {result.shape}")
         return result
 
     def forward_prepare(
@@ -2158,10 +2158,18 @@ class DeepseekV2ForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
+        logger.info("Enter DeepseekV2ForCausalLM.forward")
+        logger.info(f"  input_ids shape: {input_ids.shape}")
+        logger.info(f"  positions shape: {positions.shape}")
+        if input_embeds is not None:
+            logger.info(f"  input_embeds shape: {input_embeds.shape}")
+        else:
+            logger.info("  input_embeds is None")
         # 转换为GPU张量操作以支持重放阶段动态判断
         hidden_states = self.model(
             input_ids, positions, forward_batch, input_embeds
         )
+        logger.info(f"  hidden_states shape after model call: {hidden_states.shape}")
 
         broken_ranks_for_attn_tp = get_broken_ranks_for_attn_tp()
         hidden_states = torch.where(
@@ -2169,10 +2177,14 @@ class DeepseekV2ForCausalLM(nn.Module):
             torch.zeros_like(hidden_states),
             hidden_states,
         )
+        logger.info(f"  hidden_states shape after where call: {hidden_states.shape}")
 
-        return self.logits_processor(
+        logits = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
+        logger.info(f"  logits shape: {logits.shape}")
+        logger.info("Exit DeepseekV2ForCausalLM.forward")
+        return logits
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
 
