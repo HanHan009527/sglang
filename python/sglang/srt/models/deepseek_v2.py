@@ -2182,7 +2182,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         logits = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
-        logger.info(f"  logits shape: {logits.shape}")
+        logger.info(f"  logits shape: {logits.next_token_logits.shape}")
         logger.info("Exit DeepseekV2ForCausalLM.forward")
         return logits
 
