@@ -1071,6 +1071,25 @@ class Scheduler(
             if hasattr(self._request_dispatcher, '_lookup'):
                 logger.info(f"[Scheduler] _request_dispatcher has _lookup attribute")
             
+            # Log the type of recv_req and dispatch details
+            logger.info(f"[Scheduler] recv_req type: {type(recv_req)}")
+            logger.info(f"[Scheduler] recv_req class: {recv_req.__class__}")
+            logger.info(f"[Scheduler] recv_req rid: {getattr(recv_req, 'rid', 'N/A')}")
+            
+            # Log the dispatch lookup information
+            if hasattr(self._request_dispatcher, '_lookup'):
+                lookup_dict = getattr(self._request_dispatcher, '_lookup', {})
+                logger.info(f"[Scheduler] Dispatch lookup keys: {list(lookup_dict.keys())}")
+                
+                # Check which handler will be used for this request type
+                for handler_type, handler_func in lookup_dict.items():
+                    if isinstance(recv_req, handler_type):
+                        logger.info(f"[Scheduler] Will use handler: {handler_func.__name__} for type: {handler_type}")
+                        break
+                else:
+                    logger.warning(f"[Scheduler] No handler found for type: {type(recv_req)}")
+            
+            # Call the dispatcher and track the result
             output = self._request_dispatcher(recv_req)
             logger.info(f"[Scheduler] Dispatched request {getattr(recv_req, 'rid', 'N/A')}, output type: {type(output)}")
             if output is not None:
