@@ -669,38 +669,51 @@ class SchedulerOutputProcessorMixin:
         # Send to detokenizer
         if rids:
             if self.model_config.is_multimodal_gen:
+                logger.info(f"[Scheduler] Skipping detokenizer send for multimodal request rids: {rids}")
                 return
 
-            self.send_to_detokenizer.send_pyobj(
-                BatchTokenIDOut(
-                    rids,
-                    finished_reasons,
-                    decoded_texts,
-                    decode_ids_list,
-                    read_offsets,
-                    output_ids,
-                    skip_special_tokens,
-                    spaces_between_special_tokens,
-                    no_stop_trim,
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    spec_verify_ct,
-                    input_token_logprobs_val,
-                    input_token_logprobs_idx,
-                    output_token_logprobs_val,
-                    output_token_logprobs_idx,
-                    input_top_logprobs_val,
-                    input_top_logprobs_idx,
-                    output_top_logprobs_val,
-                    output_top_logprobs_idx,
-                    input_token_ids_logprobs_val,
-                    input_token_ids_logprobs_idx,
-                    output_token_ids_logprobs_val,
-                    output_token_ids_logprobs_idx,
-                    output_hidden_states,
+            logger.info(f"[Scheduler] Sending batch output to detokenizer for rids: {rids}")
+            logger.info(f"[Scheduler] Request details - finished_reasons: {finished_reasons}")
+            logger.info(f"[Scheduler] Request details - prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}")
+            
+            try:
+                self.send_to_detokenizer.send_pyobj(
+                    BatchTokenIDOut(
+                        rids,
+                        finished_reasons,
+                        decoded_texts,
+                        decode_ids_list,
+                        read_offsets,
+                        output_ids,
+                        skip_special_tokens,
+                        spaces_between_special_tokens,
+                        no_stop_trim,
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        spec_verify_ct,
+                        input_token_logprobs_val,
+                        input_token_logprobs_idx,
+                        output_token_logprobs_val,
+                        output_token_logprobs_idx,
+                        input_top_logprobs_val,
+                        input_top_logprobs_idx,
+                        output_top_logprobs_val,
+                        output_top_logprobs_idx,
+                        input_token_ids_logprobs_val,
+                        input_token_ids_logprobs_idx,
+                        output_token_ids_logprobs_val,
+                        output_token_ids_logprobs_idx,
+                        output_hidden_states,
+                    )
                 )
-            )
+                logger.info(f"[Scheduler] Successfully sent batch output to detokenizer for rids: {rids}")
+            except Exception as e:
+                logger.error(f"[Scheduler] Failed to send batch output to detokenizer for rids: {rids}, error: {e}")
+                # Log detailed information about the failed send operation
+                logger.error(f"[Scheduler] Failed send details - rids count: {len(rids)}")
+                logger.error(f"[Scheduler] Failed send details - decode_ids_list lengths: {[len(x) for x in decode_ids_list]}")
+                logger.error(f"[Scheduler] Failed send details - output_ids lengths: {[len(x) for x in output_ids]}")
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
         rids = []

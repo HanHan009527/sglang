@@ -106,9 +106,24 @@ class DetokenizerManager:
     def event_loop(self):
         """The event loop that handles requests"""
         while True:
+            logger.info("[Detokenizer] Waiting for input from scheduler...")
             recv_obj = self.recv_from_scheduler.recv_pyobj()
+            logger.info(f"[Detokenizer] Received object type: {type(recv_obj)}")
+            if hasattr(recv_obj, 'rids'):
+                logger.info(f"[Detokenizer] Processing batch with rids: {recv_obj.rids}")
+            
             output = self._request_dispatcher(recv_obj)
-            self.send_to_tokenizer.send_pyobj(output)
+            logger.info(f"[Detokenizer] Dispatcher output type: {type(output)}")
+            if hasattr(output, 'rids'):
+                logger.info(f"[Detokenizer] Sending output for rids: {output.rids}")
+            
+            try:
+                self.send_to_tokenizer.send_pyobj(output)
+                logger.info(f"[Detokenizer] Successfully sent output to tokenizer")
+            except Exception as e:
+                logger.error(f"[Detokenizer] Failed to send output to tokenizer: {e}")
+                if hasattr(output, 'rids'):
+                    logger.error(f"[Detokenizer] Failed output rids: {output.rids}")
 
     def trim_matched_stop(
         self, output: Union[str, List[int]], finished_reason: Dict, no_stop_trim: bool
