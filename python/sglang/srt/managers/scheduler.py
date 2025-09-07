@@ -1069,7 +1069,7 @@ class Scheduler(
                 else:
                     logger.info(f"[Scheduler] Sending output for request {getattr(recv_req, 'rid', 'N/A')} to tokenizer")
                     self.send_to_tokenizer.send_pyobj(output)
-        logger.info(f"[Scheduler] Finished processing input requests")
+        # logger.info(f"[Scheduler] Finished processing input requests")
 
     def handle_generate_request(
         self,
@@ -1253,7 +1253,7 @@ class Scheduler(
         else:
             logger.info(f"[Scheduler] Adding request {recv_req.rid} to regular queue")
             self._add_request_to_queue(req)
-        logger.info(f"[Scheduler] Finished handling generate request {recv_req.rid}")
+        # logger.info(f"[Scheduler] Finished handling generate request {recv_req.rid}")
 
     def _add_request_to_queue(self, req: Req):
         logger.info(f"[Scheduler] Adding request {req.rid} to queue")
