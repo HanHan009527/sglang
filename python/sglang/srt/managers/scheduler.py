@@ -754,31 +754,21 @@ class Scheduler(
         """A normal scheduler loop."""
         logger.info("[Scheduler] Starting event_loop_normal")
         while True:
-            logger.info("[Scheduler] Calling recv_requests")
             recv_reqs = self.recv_requests()
-            logger.info(f"[Scheduler] recv_requests returned with {len(recv_reqs) if recv_reqs else 0} requests")
             self.process_input_requests(recv_reqs)
-            logger.info("[Scheduler] process_input_requests completed")
 
-            logger.info("[Scheduler] Calling get_next_batch_to_run")
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
-            logger.info(f"[Scheduler] get_next_batch_to_run returned: {'None' if batch is None else f'batch with {len(batch.reqs)} requests'}")
 
             if batch:
-                logger.info(f"[Scheduler] Calling run_batch with batch containing {len(batch.reqs)} requests")
+                logger.info(f"[Scheduler] Running batch with {len(batch.reqs)} requests")
                 result = self.run_batch(batch)
-                logger.info(f"[Scheduler] run_batch completed, calling process_batch_result")
                 self.process_batch_result(batch, result)
-                logger.info("[Scheduler] process_batch_result completed")
             else:
-                logger.info("[Scheduler] No batch to run, calling self_check_during_idle")
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
-                logger.info("[Scheduler] self_check_during_idle completed")
 
             self.last_batch = batch
-            logger.info("[Scheduler] Event loop iteration completed")
 
     @DynamicGradMode()
     def event_loop_overlap(self):

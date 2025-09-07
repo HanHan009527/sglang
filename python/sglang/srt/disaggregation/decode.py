@@ -662,49 +662,34 @@ class SchedulerDisaggregationDecodeMixin:
         """A normal scheduler loop for decode worker in disaggregation mode."""
         logger.info("[Scheduler] Starting event_loop_normal_disagg_decode")
         while True:
-            logger.info("[Scheduler] Calling recv_requests")
             recv_reqs = self.recv_requests()
-            logger.info(f"[Scheduler] recv_requests returned with {len(recv_reqs) if recv_reqs else 0} requests")
             self.process_input_requests(recv_reqs)
-            logger.info("[Scheduler] process_input_requests completed")
             
             # polling and allocating kv cache
-            logger.info("[Scheduler] Calling process_decode_queue")
             self.process_decode_queue()
-            logger.info(f"[Scheduler] process_decode_queue completed, waiting_queue size: {len(self.waiting_queue)}, decode_prealloc_queue size: {len(self.disagg_decode_prealloc_queue.queue)}, decode_transfer_queue size: {len(self.disagg_decode_transfer_queue.queue)}")
             
-            logger.info("[Scheduler] Calling get_next_disagg_decode_batch_to_run")
             batch = self.get_next_disagg_decode_batch_to_run()
             self.cur_batch = batch
-            logger.info(f"[Scheduler] get_next_disagg_decode_batch_to_run returned: {'None' if batch is None else f'batch with {len(batch.reqs)} requests, mode: {batch.forward_mode}'}")
 
             prepare_mlp_sync_flag = require_mlp_sync(self.server_args)
-            logger.info(f"[Scheduler] prepare_mlp_sync_flag: {prepare_mlp_sync_flag}")
 
             if batch:
-                logger.info(f"[Scheduler] Processing batch with {len(batch.reqs)} requests, forward_mode: {batch.forward_mode}")
                 # Generate fake extend output.
                 if batch.forward_mode.is_extend():
-                    logger.info("[Scheduler] Batch forward_mode is extend, streaming output")
+                    logger.info(f"[Scheduler] Processing extend batch with {len(batch.reqs)} requests")
                     # Note: Logprobs should be handled on the prefill engine.
                     self.stream_output(
                         batch.reqs, any(req.return_logprob for req in batch.reqs)
                     )
                     if prepare_mlp_sync_flag:
-                        logger.info("[Scheduler] Preparing MLP sync for idle batch")
                         self._prepare_idle_batch_and_run(None)
                 else:
-                    logger.info("[Scheduler] Batch forward_mode is not extend, running batch")
+                    logger.info(f"[Scheduler] Running decode batch with {len(batch.reqs)} requests")
                     if prepare_mlp_sync_flag:
-                        logger.info("[Scheduler] Preparing MLP sync for batch")
                         self.prepare_mlp_sync_batch(batch)
-                    logger.info("[Scheduler] Calling run_batch")
                     result = self.run_batch(batch)
-                    logger.info("[Scheduler] run_batch completed, calling process_batch_result")
                     self.process_batch_result(batch, result)
-                    logger.info("[Scheduler] process_batch_result completed")
             elif prepare_mlp_sync_flag:
-                logger.info("[Scheduler] No batch to run but prepare_mlp_sync_flag is True, preparing idle batch")
                 batch, _ = self._prepare_idle_batch_and_run(None)
 
             if batch is None and (
@@ -713,12 +698,9 @@ class SchedulerDisaggregationDecodeMixin:
                 + len(self.disagg_decode_prealloc_queue.queue)
                 == 0
             ):
-                logger.info("[Scheduler] No batch and all queues are empty, calling self_check_during_idle")
                 self.self_check_during_idle()
-                logger.info("[Scheduler] self_check_during_idle completed")
 
             self.last_batch = batch
-            logger.info("[Scheduler] Event loop iteration completed")
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
@@ -808,50 +790,37 @@ class SchedulerDisaggregationDecodeMixin:
         self: Scheduler,
     ) -> Optional[Tuple[ScheduleBatch, bool]]:
         """Create fake completed prefill if possible and merge with running batch"""
-        logger.info("[Scheduler] get_next_disagg_decode_batch_to_run called")
         # Merge the prefill batch into the running batch
         last_batch = self.last_batch
-        logger.info(f"[Scheduler] last_batch: {'None' if last_batch is None else f'batch with {len(last_batch.reqs)} requests, mode: {last_batch.forward_mode}'}")
         
         if last_batch and last_batch.forward_mode.is_extend():
-            logger.info("[Scheduler] Processing last_batch with extend mode")
             # chunked prefill doesn't happen in decode instance.
             assert self.chunked_req is None
             # Filter finished batches.
-            logger.info("[Scheduler] Filtering finished batches")
             last_batch.filter_batch()
-            logger.info(f"[Scheduler] After filter, last_batch is_empty: {last_batch.is_empty()}")
             
             if not last_batch.is_empty():
                 if self.running_batch.is_empty():
-                    logger.info("[Scheduler] Setting running_batch to last_batch")
                     self.running_batch = last_batch
                 else:
-                    logger.info(f"[Scheduler] Merging last_batch with {len(last_batch.reqs)} requests into running_batch with {len(self.running_batch.reqs)} requests")
                     # merge running_batch with prefill batch
                     self.running_batch.merge_batch(last_batch)
 
-        logger.info("[Scheduler] Calling get_new_prebuilt_batch")
         new_prebuilt_batch = self.get_new_prebuilt_batch()
-        logger.info(f"[Scheduler] get_new_prebuilt_batch returned: {'None' if new_prebuilt_batch is None else f'batch with {len(new_prebuilt_batch.reqs)} requests'}")
 
         ret: Optional[ScheduleBatch] = None
         if new_prebuilt_batch:
-            logger.info("[Scheduler] Returning new_prebuilt_batch")
+            logger.info(f"[Scheduler] Created new prebuilt batch with {len(new_prebuilt_batch.reqs)} requests")
             ret = new_prebuilt_batch
         else:
-            logger.info(f"[Scheduler] No new_prebuilt_batch, running_batch is_empty: {self.running_batch.is_empty()}")
             if self.running_batch.is_empty():
-                logger.info("[Scheduler] Running batch is empty, returning None")
                 ret = None
             else:
-                logger.info("[Scheduler] Updating running_batch")
                 self.running_batch = self.update_running_batch(self.running_batch)
-                logger.info(f"[Scheduler] After update, running_batch is_empty: {self.running_batch.is_empty()}")
                 ret = self.running_batch if not self.running_batch.is_empty() else None
-                logger.info(f"[Scheduler] Returning {'running_batch' if ret is not None else 'None'}")
+                if ret:
+                    logger.info(f"[Scheduler] Updated running batch with {len(ret.reqs)} requests")
 
-        logger.info(f"[Scheduler] get_next_disagg_decode_batch_to_run returning: {'None' if ret is None else f'batch with {len(ret.reqs)} requests, mode: {ret.forward_mode}'}")
         return ret
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
@@ -885,6 +854,8 @@ class SchedulerDisaggregationDecodeMixin:
         if len(can_run_list) == 0:
             return None
 
+        logger.info(f"[Scheduler] Creating new prebuilt batch with {len(can_run_list)} requests from waiting_queue")
+
         # construct a schedule batch with those requests and mark as decode
         new_batch = ScheduleBatch.init_new(
             can_run_list,
@@ -904,31 +875,24 @@ class SchedulerDisaggregationDecodeMixin:
         return new_batch
 
     def process_decode_queue(self: Scheduler):
-        logger.info("[Scheduler] process_decode_queue called")
-        logger.info(f"[Scheduler] Initial queue sizes - waiting_queue: {len(self.waiting_queue)}, decode_prealloc_queue: {len(self.disagg_decode_prealloc_queue.queue)}, decode_transfer_queue: {len(self.disagg_decode_transfer_queue.queue)}, retracted_queue: {len(self.disagg_decode_prealloc_queue.retracted_queue)}")
-        
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
-        logger.info("[Scheduler] Calling resume_retracted_reqs")
         resumed_reqs = self.disagg_decode_prealloc_queue.resume_retracted_reqs()
-        logger.info(f"[Scheduler] resume_retracted_reqs returned {len(resumed_reqs)} requests")
+        if resumed_reqs:
+            logger.info(f"[Scheduler] Resumed {len(resumed_reqs)} retracted requests")
         self.waiting_queue.extend(resumed_reqs)
-        logger.info(f"[Scheduler] After extending, waiting_queue size: {len(self.waiting_queue)}")
         
         if len(self.disagg_decode_prealloc_queue.retracted_queue) > 0:
-            logger.info(f"[Scheduler] Still have {len(self.disagg_decode_prealloc_queue.retracted_queue)} retracted requests, not allocating new requests")
             # if there are still retracted requests, we do not allocate new requests
             return
 
-        logger.info("[Scheduler] Calling pop_preallocated")
         req_conns = self.disagg_decode_prealloc_queue.pop_preallocated()
-        logger.info(f"[Scheduler] pop_preallocated returned {len(req_conns)} requests")
+        if req_conns:
+            logger.info(f"[Scheduler] Preallocated {len(req_conns)} requests from decode_prealloc_queue")
         self.disagg_decode_transfer_queue.extend(req_conns)
-        logger.info(f"[Scheduler] After extending, decode_transfer_queue size: {len(self.disagg_decode_transfer_queue.queue)}")
         
-        logger.info("[Scheduler] Calling pop_transferred")
         alloc_reqs = (
             self.disagg_decode_transfer_queue.pop_transferred()
         )  # the requests which kv has arrived
-        logger.info(f"[Scheduler] pop_transferred returned {len(alloc_reqs)} requests")
+        if alloc_reqs:
+            logger.info(f"[Scheduler] Transferred {len(alloc_reqs)} requests to waiting_queue")
         self.waiting_queue.extend(alloc_reqs)
-        logger.info(f"[Scheduler] Final queue sizes - waiting_queue: {len(self.waiting_queue)}, decode_prealloc_queue: {len(self.disagg_decode_prealloc_queue.queue)}, decode_transfer_queue: {len(self.disagg_decode_transfer_queue.queue)}, retracted_queue: {len(self.disagg_decode_prealloc_queue.retracted_queue)}")
