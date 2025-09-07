@@ -1060,13 +1060,27 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
     ):
+        # Log entry to forward method
+        logger.info(f"[DeepSeekV2] ENTER forward method")
+        logger.info(f"[DeepSeekV2] positions shape: {positions.shape}")
+        logger.info(f"[DeepSeekV2] hidden_states shape: {hidden_states.shape}")
+        logger.info(f"[DeepSeekV2] forward_batch req_count: {len(forward_batch.reqs) if forward_batch and hasattr(forward_batch, 'reqs') else 0}")
+        
+        if forward_batch and hasattr(forward_batch, 'reqs') and forward_batch.reqs:
+            req_rids = [req.rid for req in forward_batch.reqs]
+            logger.info(f"[DeepSeekV2] Request RIDs: {req_rids}")
+        
         s = self.forward_prepare(
             positions=positions,
             hidden_states=hidden_states,
             forward_batch=forward_batch,
             zero_allocator=zero_allocator,
         )
-        return self.forward_core(s)
+        
+        logger.info("[DeepSeekV2] Finished forward_prepare, calling forward_core")
+        result = self.forward_core(s)
+        logger.info(f"[DeepSeekV2] EXIT forward method, result shape: {result.shape}")
+        return result
 
     def forward_prepare(
         self,

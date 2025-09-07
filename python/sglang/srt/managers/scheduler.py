@@ -1106,7 +1106,16 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        logger.info(f"[Scheduler] ===== ENTER handle_generate_request for rid: {recv_req.rid} =====")
         logger.info(f"[Scheduler] Handling generate request {recv_req.rid}")
+        
+        # Log detailed request information
+        logger.info(f"[Scheduler] Request session_params: {getattr(recv_req, 'session_params', 'None')}")
+        logger.info(f"[Scheduler] Request input_ids length: {len(getattr(recv_req, 'input_ids', []))}")
+        logger.info(f"[Scheduler] Request input_text: '{getattr(recv_req, 'input_text', 'None')}'")
+        logger.info(f"[Scheduler] Request sampling_params: {getattr(recv_req, 'sampling_params', 'None')}")
+        logger.info(f"[Scheduler] Request stream: {getattr(recv_req, 'stream', 'None')}")
+        
         if (
             self.server_args.enable_dp_attention
             and self.server_args.load_balance_method == "minimum_tokens"
