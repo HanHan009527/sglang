@@ -306,18 +306,16 @@ class DecodePreallocQueue:
         if all(decode_req.waiting_for_input for decode_req in self.queue):
             return
 
-        logger.info(f"[DecodePreallocQueue] _update_handshake_waiters called with {len(self.queue)} requests")
         polls = poll_and_all_reduce(
             [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
         )
 
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
-            logger.debug(f"[DecodePreallocQueue] Request {decode_req.req.rid} has handshake poll status: {poll}")
             if poll == KVPoll.Bootstrapping:
-                logger.debug(f"[DecodePreallocQueue] Request {decode_req.req.rid} still bootstrapping")
                 pass
             elif poll == KVPoll.WaitingForInput:
-                logger.info(f"[DecodePreallocQueue] Request {decode_req.req.rid} is now waiting for input")
+                if not decode_req.waiting_for_input:
+                    logger.info(f"[DecodePreallocQueue] Request {decode_req.req.rid} is now waiting for input")
                 decode_req.waiting_for_input = True
             elif poll == KVPoll.Failed:
                 error_message = f"Decode handshake failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
@@ -337,7 +335,6 @@ class DecodePreallocQueue:
 
     def pop_preallocated(self) -> List[DecodeRequest]:
         """Pop the preallocated requests from the pending queue (FIFO)."""
-        logger.info(f"[DecodePreallocQueue] pop_preallocated called with {len(self.queue)} requests in queue")
         self._update_handshake_waiters()
 
         preallocated_reqs = []
@@ -352,7 +349,6 @@ class DecodePreallocQueue:
         allocatable_tokens = self._allocatable_tokens(
             retractable_tokens=retractable_tokens, count_retracted=True
         )
-        logger.info(f"[DecodePreallocQueue] allocatable_tokens: {allocatable_tokens}, retractable_tokens: {retractable_tokens}")
         
         # First, remove all failed requests from the queue
         for i, decode_req in enumerate(self.queue):
@@ -369,15 +365,12 @@ class DecodePreallocQueue:
                 continue
 
             if not decode_req.waiting_for_input:
-                logger.debug(f"[DecodePreallocQueue] Request {decode_req.req.rid} is not waiting for input, skipping")
                 continue
 
             if self.req_to_token_pool.available_size() <= 0:
-                logger.debug(f"[DecodePreallocQueue] No available req_to_token_pool slots, breaking")
                 break
 
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
-                logger.debug(f"[DecodePreallocQueue] No available metadata buffer indices, breaking")
                 break
 
             # Memory estimation: don't add if the projected memory cannot be met
@@ -396,14 +389,11 @@ class DecodePreallocQueue:
                 )
                 > allocatable_tokens
             ):
-                logger.debug(f"[DecodePreallocQueue] Not enough space for request {decode_req.req.rid} (max tokens check), breaking")
                 break
             if required_tokens_for_request > allocatable_tokens:
-                logger.debug(f"[DecodePreallocQueue] Not enough space for request {decode_req.req.rid} (required tokens check), breaking")
                 break
 
             allocatable_tokens -= required_tokens_for_request
-            logger.info(f"[DecodePreallocQueue] Pre-allocating for request {decode_req.req.rid}")
             self._pre_alloc(decode_req.req)
 
             kv_indices = (
@@ -435,7 +425,8 @@ class DecodePreallocQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
-        logger.info(f"[DecodePreallocQueue] Returning {len(preallocated_reqs)} preallocated requests, {len(self.queue)} requests remaining in queue")
+        if preallocated_reqs:
+            logger.info(f"[DecodePreallocQueue] Returning {len(preallocated_reqs)} preallocated requests")
 
         return preallocated_reqs
 
@@ -583,7 +574,6 @@ class DecodeTransferQueue:
     def pop_transferred(self) -> List[Req]:
         if not self.queue:
             return []
-        logger.info(f"[DecodeTransferQueue] pop_transferred called with {len(self.queue)} requests in queue")
         polls = poll_and_all_reduce(
             [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
         )
@@ -591,7 +581,6 @@ class DecodeTransferQueue:
         transferred_reqs = []
         indices_to_remove = set()
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
-            logger.debug(f"[DecodeTransferQueue] Request {decode_req.req.rid} has poll status: {poll}")
             if poll == KVPoll.Failed:
                 error_message = f"Decode transfer failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
                 try:
@@ -612,8 +601,6 @@ class DecodeTransferQueue:
                 indices_to_remove.add(i)
                 continue
             elif poll == KVPoll.Success:
-                logger.info(f"[DecodeTransferQueue] Request {decode_req.req.rid} transfer succeeded")
-
                 idx = decode_req.metadata_buffer_index
                 (
                     output_id,
@@ -651,14 +638,12 @@ class DecodeTransferQueue:
                 # special handling for sampling_params.max_new_tokens == 1
                 if decode_req.req.sampling_params.max_new_tokens == 1:
                     # finish immediately
-                    logger.info(f"[DecodeTransferQueue] Request {decode_req.req.rid} has max_new_tokens=1, finishing immediately")
                     decode_req.req.check_finished()
                     self.scheduler.stream_output(
                         [decode_req.req], decode_req.req.return_logprob
                     )
                     self.tree_cache.cache_finished_req(decode_req.req)
                 else:
-                    logger.info(f"[DecodeTransferQueue] Adding request {decode_req.req.rid} to transferred_reqs")
                     transferred_reqs.append(decode_req.req)
 
                 indices_to_remove.add(i)
@@ -667,7 +652,6 @@ class DecodeTransferQueue:
                 KVPoll.WaitingForInput,
                 KVPoll.Transferring,
             ]:
-                logger.debug(f"[DecodeTransferQueue] Request {decode_req.req.rid} still in progress with status {poll}")
                 pass
             else:
                 logger.error(f"[DecodeTransferQueue] Unexpected poll case for request {decode_req.req.rid}: {poll}")
@@ -681,7 +665,8 @@ class DecodeTransferQueue:
         self.queue = [
             entry for i, entry in enumerate(self.queue) if i not in indices_to_remove
         ]
-        logger.info(f"[DecodeTransferQueue] Returning {len(transferred_reqs)} transferred requests, {len(self.queue)} requests remaining in queue")
+        if transferred_reqs:
+            logger.info(f"[DecodeTransferQueue] Returning {len(transferred_reqs)} transferred requests")
 
         return transferred_reqs
 
