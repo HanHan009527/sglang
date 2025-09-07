@@ -1633,7 +1633,7 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
-        logger.info(f"[ModelRunner] forward called with forward_mode: {forward_batch.forward_mode}, batch_size: {forward_batch.batch_size()}")
+        logger.info(f"[ModelRunner] forward called with forward_mode: {forward_batch.forward_mode}, batch_size: {forward_batch.batch_size}")
         self.forward_pass_id += 1
 
         with get_global_expert_distribution_recorder().with_forward_pass(
