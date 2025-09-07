@@ -1020,7 +1020,7 @@ class Scheduler(
                     src=self.tp_group.ranks[0],
                 )
             recv_reqs = work_reqs + control_reqs if work_reqs is not None and control_reqs is not None else (work_reqs or control_reqs or [])
-            logger.info(f"[Scheduler] After DP attention broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
+            # logger.info(f"[Scheduler] After DP attention broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
         elif self.tp_size != 1:
             recv_reqs = broadcast_pyobj(
                 recv_reqs,
@@ -1028,14 +1028,14 @@ class Scheduler(
                 self.tp_cpu_group,
                 src=self.tp_group.ranks[0],
             )
-            logger.info(f"[Scheduler] After TP broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
-        logger.info(f"[Scheduler] Final requests count to process: {len(recv_reqs) if recv_reqs else 0}")
+            # logger.info(f"[Scheduler] After TP broadcast, requests count: {len(recv_reqs) if recv_reqs else 0}")
+        # logger.info(f"[Scheduler] Final requests count to process: {len(recv_reqs) if recv_reqs else 0}")
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
-        logger.info(f"[Scheduler] Processing input requests, count: {len(recv_reqs) if recv_reqs else 0}")
+        # logger.info(f"[Scheduler] Processing input requests, count: {len(recv_reqs) if recv_reqs else 0}")
         for i, recv_req in enumerate(recv_reqs):
-            logger.info(f"[Scheduler] Processing request {i}: {type(recv_req)} with rid: {getattr(recv_req, 'rid', 'N/A')}")
+            # logger.info(f"[Scheduler] Processing request {i}: {type(recv_req)} with rid: {getattr(recv_req, 'rid', 'N/A')}")
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None or not self.running_batch.is_empty()
