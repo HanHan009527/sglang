@@ -1059,6 +1059,18 @@ class Scheduler(
                     )
                     self.send_to_tokenizer.send_pyobj(abort_req)
                     continue
+            
+            # Log the type of _request_dispatcher
+            logger.info(f"[Scheduler] _request_dispatcher type: {type(self._request_dispatcher)}")
+            logger.info(f"[Scheduler] _request_dispatcher class: {self._request_dispatcher.__class__}")
+            logger.info(f"[Scheduler] _request_dispatcher module: {self._request_dispatcher.__class__.__module__}")
+            
+            # Check if it has the expected attributes/methods
+            if hasattr(self._request_dispatcher, 'dispatch'):
+                logger.info(f"[Scheduler] _request_dispatcher has dispatch method")
+            if hasattr(self._request_dispatcher, '_lookup'):
+                logger.info(f"[Scheduler] _request_dispatcher has _lookup attribute")
+            
             output = self._request_dispatcher(recv_req)
             logger.info(f"[Scheduler] Dispatched request {getattr(recv_req, 'rid', 'N/A')}, output type: {type(output)}")
             if output is not None:
