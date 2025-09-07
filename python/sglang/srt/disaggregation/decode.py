@@ -920,8 +920,6 @@ class SchedulerDisaggregationDecodeMixin:
             logger.info(f"[Scheduler] Preallocated {len(req_conns)} requests from decode_prealloc_queue")
             for req_conn in req_conns:
                 logger.info(f"[Scheduler] Added request {req_conn.req.rid} to transfer queue")
-        else:
-            logger.info(f"[Scheduler] No requests preallocated from decode_prealloc_queue")
         self.disagg_decode_transfer_queue.extend(req_conns)
         
         alloc_reqs = (
