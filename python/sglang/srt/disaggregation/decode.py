@@ -894,7 +894,6 @@ class SchedulerDisaggregationDecodeMixin:
         return new_batch
 
     def process_decode_queue(self: Scheduler):
-        logger.info("[Mooncake Debug] process_decode_queue called")
         
         # try to resume retracted requests if there are enough space for another `num_reserved_decode_tokens` decode steps
         resumed_reqs = self.disagg_decode_prealloc_queue.resume_retracted_reqs()
@@ -919,4 +918,3 @@ class SchedulerDisaggregationDecodeMixin:
             logger.info(f"[Mooncake Debug] Got {len(alloc_reqs)} transferred requests with KV cache")
         self.waiting_queue.extend(alloc_reqs)
         
-        logger.info(f"[Mooncake Debug] Total waiting queue size after processing: {len(self.waiting_queue)}")
