@@ -1978,7 +1978,6 @@ class Scheduler(
             device=global_info.device,
             dtype=global_info.dtype,
         )
-        logger.info(f"global_info = {global_info}. Finished all_gather operation.")
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
