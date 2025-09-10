@@ -320,6 +320,9 @@ class DataParallelController:
                     recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError:
                     break
+                
+                if recv_req is not None:
+                    logger.info(f"Received a request of type {type(recv_req).__name__}")
 
                 if isinstance(
                     recv_req,
