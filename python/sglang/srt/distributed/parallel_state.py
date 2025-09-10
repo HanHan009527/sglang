@@ -250,23 +250,32 @@ class GroupCoordinator:
         self.local_size = get_int_env_var("LOCAL_SIZE", 0)
 
         for ranks in group_ranks:
-            pg_options = ep.MooncakeBackendOptions(broken_ranks) if broken_ranks is not None and get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND") else None
+            use_mooncake = get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND")
+            logger.info(f"[Mooncake Debug] Creating groups for ranks {ranks}, use_mooncake={use_mooncake}")
+            
+            pg_options = ep.MooncakeBackendOptions(broken_ranks) if broken_ranks is not None and use_mooncake else None
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend, pg_options=pg_options
             )
+            logger.info(f"[Mooncake Debug] Created device_group with backend {torch_distributed_backend}")
+            
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            if get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND"):
-                pg_options = ep.MooncakeBackendOptions(broken_ranks_cpu) if broken_ranks_cpu is not None and get_bool_env_var("SGLANG_USE_MOONCAKE_BACKEND") else None
+            if use_mooncake:
+                pg_options = ep.MooncakeBackendOptions(broken_ranks_cpu) if broken_ranks_cpu is not None and use_mooncake else None
                 cpu_group = torch.distributed.new_group(ranks, backend="mooncake-cpu", pg_options=pg_options)
+                logger.info(f"[Mooncake Debug] Created mooncake-cpu backend cpu_group")
             else:
                 cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                logger.info(f"[Mooncake Debug] Created gloo backend cpu_group")
+                
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
                 self.rank_in_group = ranks.index(self.rank)
                 self.device_group = device_group
                 self.cpu_group = cpu_group
+                logger.info(f"[Mooncake Debug] Set up group for rank {self.rank}: world_size={self.world_size}, rank_in_group={self.rank_in_group}")
 
         assert self.cpu_group is not None
         assert self.device_group is not None
