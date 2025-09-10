@@ -1945,8 +1945,8 @@ class Scheduler(
             group = tp_group.cpu_group
             device = "cpu"
             broken_ranks_for_moe = get_broken_ranks_for_moe_cpu()
-        logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}")
-
+        if torch.any(broken_ranks_for_moe != 0):
+            logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}. Finished barrier operation.")
         local_info = torch.tensor(
             [
                 num_tokens,
@@ -1978,6 +1978,7 @@ class Scheduler(
             device=global_info.device,
             dtype=global_info.dtype,
         )
+        logger.info(f"global_info = {global_info}. Finished all_gather operation.")
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
