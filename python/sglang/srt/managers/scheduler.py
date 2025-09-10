@@ -2029,8 +2029,6 @@ class Scheduler(
             if not disable_cuda_graph:
                 local_batch.can_run_dp_cuda_graph = can_cuda_graph
                 logger.info(f"[Mooncake Debug] Set can_run_dp_cuda_graph to {can_cuda_graph}")
-        else:
-            logger.info(f"[Mooncake Debug] local_batch is None and max(global_num_tokens)={max(global_num_tokens)} <= 0, no batch created")
 
         return local_batch
 
