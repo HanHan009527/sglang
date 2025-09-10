@@ -830,37 +830,28 @@ class SchedulerDisaggregationDecodeMixin:
         else:
             if self.running_batch.is_empty():
                 ret = None
-                logger.info("[Mooncake Debug] Running batch is empty, returning None")
             else:
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
                 if ret:
                     logger.info(f"[Mooncake Debug] Returning updated running_batch with forward_mode={ret.forward_mode}")
-                else:
-                    logger.info("[Mooncake Debug] Updated running_batch is empty, returning None")
 
         return ret
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
         """Create a schedulebatch for fake completed prefill"""
-        logger.info("[Mooncake Debug] get_new_prebuilt_batch called")
         
         if self.grammar_queue:
-            logger.info(f"[Mooncake Debug] Processing {len(self.grammar_queue)} grammar requests")
             self.move_ready_grammar_requests()
 
         if len(self.waiting_queue) == 0:
-            logger.info("[Mooncake Debug] Waiting queue is empty, returning None")
             return None
 
         curr_batch_size = self.running_batch.batch_size()
-        logger.info(f"[Mooncake Debug] Current batch size: {curr_batch_size}")
 
         batch_size = min(self.req_to_token_pool.size, self.max_running_requests)
-        logger.info(f"[Mooncake Debug] Max batch size: {batch_size}")
 
         num_not_used_batch = batch_size - curr_batch_size
-        logger.info(f"[Mooncake Debug] Number of unused batch slots: {num_not_used_batch}")
 
         # pop req from waiting queue
         can_run_list: List[Req] = []
