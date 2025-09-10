@@ -1907,13 +1907,6 @@ class Scheduler(
         require_mlp_tp_gather: bool,
         disable_overlap_schedule: bool,
     ):
-        # 使用静态变量来跟踪调用次数，避免日志爆炸
-        # if not hasattr(prepare_mlp_sync_batch_raw, "call_count"):
-        #     prepare_mlp_sync_batch_raw.call_count = 0
-        
-        # prepare_mlp_sync_batch_raw.call_count += 1
-        log_this_call = True  # 每100次调用记录一次日志
-        
         # Check if other DP workers have running batches
         if local_batch is None:
             num_tokens = 0
@@ -1946,19 +1939,19 @@ class Scheduler(
         if disable_overlap_schedule:
             group = tp_group.device_group
             device = tp_group.device
-            if log_this_call:
+            if local_batch is not None:
                 logger.info(f"[Mooncake Debug] Using device_group for barrier, disable_overlap_schedule=True")
             torch.distributed.barrier(group=tp_group.cpu_group)
             broken_ranks_for_moe = get_broken_ranks_for_moe()
-            if log_this_call or torch.any(broken_ranks_for_moe != 0):
+            if local_batch is not None or torch.any(broken_ranks_for_moe != 0):
                 logger.info(f"[Mooncake Debug] Got broken_ranks_for_moe from device: {broken_ranks_for_moe}")
         else:
             group = tp_group.cpu_group
             device = "cpu"
-            if log_this_call:
+            if local_batch is not None:
                 logger.info(f"[Mooncake Debug] Using cpu_group for barrier, disable_overlap_schedule=False")
             broken_ranks_for_moe = get_broken_ranks_for_moe_cpu()
-            if log_this_call or torch.any(broken_ranks_for_moe != 0):
+            if local_batch is not None or torch.any(broken_ranks_for_moe != 0):
                 logger.info(f"[Mooncake Debug] Got broken_ranks_for_moe_cpu from CPU: {broken_ranks_for_moe}")
         if torch.any(broken_ranks_for_moe != 0):
             logger.info(f"broken_ranks_for_moe = {broken_ranks_for_moe}. Finished barrier operation.")
@@ -1983,27 +1976,27 @@ class Scheduler(
             dtype=torch.int64,
             device=device,
         )
-        if log_this_call:
+        if local_batch is not None:
             logger.info(f"[Mooncake Debug] Created global_info with shape {global_info.shape} on device {device}")
         torch.distributed.all_gather_into_tensor(
             global_info.flatten(),
             local_info,
             group=group,
         )
-        if log_this_call:
+        if local_batch is not None:
             logger.info(f"[Mooncake Debug] Completed all_gather_into_tensor with group {group}")
         global_info.view(-1, 6)[broken_ranks_for_moe == 1, :] = torch.tensor(
             [0, 1, 0, 0, 1, ForwardMode.IDLE.value],
             device=global_info.device,
             dtype=global_info.dtype,
         )
-        if log_this_call or torch.any(broken_ranks_for_moe != 0):
+        if local_batch is not None or torch.any(broken_ranks_for_moe != 0):
             logger.info(f"[Mooncake Debug] Updated global_info for broken_ranks_for_moe")
         global_num_tokens = global_info[:, 0, 0].tolist()
         can_cuda_graph = min(global_info[:, 0, 1].tolist())
         global_num_tokens_for_logprob = global_info[:, 0, 2].tolist()
         is_extend_in_batch = global_info[:, 0, 3].tolist()
-        if log_this_call:
+        if local_batch is not None:
             logger.info(f"[Mooncake Debug] Extracted values from global_info - global_num_tokens: {global_num_tokens}, can_cuda_graph: {can_cuda_graph}, global_num_tokens_for_logprob: {global_num_tokens_for_logprob}, is_extend_in_batch: {is_extend_in_batch}")
 
         tbo_split_seq_index, global_forward_mode = tbo_preparer.compute_output(
@@ -2011,40 +2004,33 @@ class Scheduler(
         )
 
         if local_batch is None and max(global_num_tokens) > 0:
-            if log_this_call:
-                logger.info(f"[Mooncake Debug] Creating idle batch since local_batch is None but max(global_num_tokens)={max(global_num_tokens)} > 0")
+            logger.info(f"[Mooncake Debug] Creating idle batch since local_batch is None but max(global_num_tokens)={max(global_num_tokens)} > 0")
             local_batch = get_idle_batch()
 
         if local_batch is not None:
-            if log_this_call:
-                logger.info(f"[Mooncake Debug] Processing local_batch with forward_mode={local_batch.forward_mode}")
+            logger.info(f"[Mooncake Debug] Processing local_batch with forward_mode={local_batch.forward_mode}")
             # TODO: handle the case when moe_dense_tp_size != 1
             if not require_mlp_tp_gather:
                 local_batch.global_num_tokens = [num_tokens]
                 local_batch.global_num_tokens_for_logprob = [num_tokens_for_logprob]
-                if log_this_call:
-                    logger.info(f"[Mooncake Debug] Set local_batch global tokens without mlp_tp_gather")
+                logger.info(f"[Mooncake Debug] Set local_batch global tokens without mlp_tp_gather")
             else:
                 local_batch.global_num_tokens = global_num_tokens
                 local_batch.global_num_tokens_for_logprob = (
                     global_num_tokens_for_logprob
                 )
-                if log_this_call:
-                    logger.info(f"[Mooncake Debug] Set local_batch global tokens with mlp_tp_gather")
+                logger.info(f"[Mooncake Debug] Set local_batch global tokens with mlp_tp_gather")
             local_batch.is_extend_in_batch = any(is_extend_in_batch)
             local_batch.tbo_split_seq_index = tbo_split_seq_index
             local_batch.global_forward_mode = global_forward_mode
-            if log_this_call:
-                logger.info(f"[Mooncake Debug] Set local_batch properties - is_extend_in_batch: {local_batch.is_extend_in_batch}, global_forward_mode: {local_batch.global_forward_mode}")
+            logger.info(f"[Mooncake Debug] Set local_batch properties - is_extend_in_batch: {local_batch.is_extend_in_batch}, global_forward_mode: {local_batch.global_forward_mode}")
 
             # Check forward mode for cuda graph
             if not disable_cuda_graph:
                 local_batch.can_run_dp_cuda_graph = can_cuda_graph
-                if log_this_call:
-                    logger.info(f"[Mooncake Debug] Set can_run_dp_cuda_graph to {can_cuda_graph}")
+                logger.info(f"[Mooncake Debug] Set can_run_dp_cuda_graph to {can_cuda_graph}")
         else:
-            if log_this_call:
-                logger.info(f"[Mooncake Debug] local_batch is None and max(global_num_tokens)={max(global_num_tokens)} <= 0, no batch created")
+            logger.info(f"[Mooncake Debug] local_batch is None and max(global_num_tokens)={max(global_num_tokens)} <= 0, no batch created")
 
         return local_batch
 
