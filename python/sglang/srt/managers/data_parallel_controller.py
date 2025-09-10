@@ -281,7 +281,9 @@ class DataParallelController:
                 logger.debug(f"Direct routing to DP rank {req.data_parallel_rank}")
                 self.workers[req.data_parallel_rank].send_pyobj(req)
             else:
-                self.workers[req.bootstrap_room % len(self.workers)].send_pyobj(req)
+                target_worker = req.bootstrap_room % len(self.workers)
+                logger.info(f"Dispatching request to DP rank {target_worker}")
+                self.workers[target_worker].send_pyobj(req)
 
     def shortest_queue_scheduler(self, input_requests):
         raise NotImplementedError()
