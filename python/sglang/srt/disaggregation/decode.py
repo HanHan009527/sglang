@@ -802,7 +802,6 @@ class SchedulerDisaggregationDecodeMixin:
         self: Scheduler,
     ) -> Optional[Tuple[ScheduleBatch, bool]]:
         """Create fake completed prefill if possible and merge with running batch"""
-        logger.info("[Mooncake Debug] get_next_disagg_decode_batch_to_run called")
         
         # Merge the prefill batch into the running batch
         last_batch = self.last_batch
