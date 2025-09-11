@@ -21,6 +21,7 @@ Life cycle of a request in the decode server
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -718,6 +719,10 @@ class SchedulerDisaggregationDecodeMixin:
                 self._last_was_idle = False
 
             self.last_batch = batch
+            
+            # Sleep for 3 seconds at the end of each loop
+            logger.info("[Mooncake Debug] Sleeping for 3 seconds")
+            time.sleep(3)
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
@@ -807,15 +812,18 @@ class SchedulerDisaggregationDecodeMixin:
         self: Scheduler,
     ) -> Optional[Tuple[ScheduleBatch, bool]]:
         """Create fake completed prefill if possible and merge with running batch"""
+        logger.info("[Mooncake Debug] === get_next_disagg_decode_batch_to_run called ===")
         
         # Merge the prefill batch into the running batch
         last_batch = self.last_batch
+        logger.info(f"[Mooncake Debug] last_batch exists: {last_batch is not None}")
         if last_batch and last_batch.forward_mode.is_extend():
             logger.info("[Mooncake Debug] Processing last_batch with extend mode")
             # chunked prefill doesn't happen in decode instance.
             assert self.chunked_req is None
             # Filter finished batches.
             last_batch.filter_batch()
+            logger.info(f"[Mooncake Debug] After filter, last_batch is_empty: {last_batch.is_empty()}")
             if not last_batch.is_empty():
                 if self.running_batch.is_empty():
                     self.running_batch = last_batch
@@ -825,50 +833,68 @@ class SchedulerDisaggregationDecodeMixin:
                     self.running_batch.merge_batch(last_batch)
                     logger.info("[Mooncake Debug] Merged running_batch with last_batch")
 
+        logger.info("[Mooncake Debug] Calling get_new_prebuilt_batch")
         new_prebuilt_batch = self.get_new_prebuilt_batch()
+        logger.info(f"[Mooncake Debug] get_new_prebuilt_batch returned: {new_prebuilt_batch is not None}")
 
         ret: Optional[ScheduleBatch] = None
         if new_prebuilt_batch:
             ret = new_prebuilt_batch
-            logger.info(f"[Mooncake Debug] Returning new_prebuilt_batch with forward_mode={ret.forward_mode}")
+            logger.info(f"[Mooncake Debug] Returning new_prebuilt_batch with forward_mode={ret.forward_mode}, batch_size={ret.batch_size()}")
         else:
+            logger.info(f"[Mooncake Debug] No new_prebuilt_batch, checking running_batch")
             if self.running_batch.is_empty():
                 ret = None
+                logger.info("[Mooncake Debug] Running batch is empty, returning None")
             else:
+                logger.info("[Mooncake Debug] Running batch not empty, updating it")
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
                 if ret:
-                    logger.info(f"[Mooncake Debug] Returning updated running_batch with forward_mode={ret.forward_mode}")
+                    logger.info(f"[Mooncake Debug] Returning updated running_batch with forward_mode={ret.forward_mode}, batch_size={ret.batch_size()}")
+                else:
+                    logger.info("[Mooncake Debug] Updated running_batch is empty, returning None")
 
+        logger.info(f"[Mooncake Debug] === get_next_disagg_decode_batch_to_run returning {ret is not None} ===")
         return ret
 
     def get_new_prebuilt_batch(self: Scheduler) -> Optional[ScheduleBatch]:
         """Create a schedulebatch for fake completed prefill"""
+        logger.info("[Mooncake Debug] === get_new_prebuilt_batch called ===")
         
         if self.grammar_queue:
+            logger.info(f"[Mooncake Debug] Processing {len(self.grammar_queue)} grammar requests")
             self.move_ready_grammar_requests()
 
+        logger.info(f"[Mooncake Debug] waiting_queue size: {len(self.waiting_queue)}")
         if len(self.waiting_queue) == 0:
+            logger.info("[Mooncake Debug] Waiting queue is empty, returning None")
             return None
 
         curr_batch_size = self.running_batch.batch_size()
+        logger.info(f"[Mooncake Debug] Current batch size: {curr_batch_size}")
 
         batch_size = min(self.req_to_token_pool.size, self.max_running_requests)
+        logger.info(f"[Mooncake Debug] Max batch size: {batch_size}")
 
         num_not_used_batch = batch_size - curr_batch_size
+        logger.info(f"[Mooncake Debug] Number of unused batch slots: {num_not_used_batch}")
 
         # pop req from waiting queue
         can_run_list: List[Req] = []
         waiting_queue: List[Req] = []
 
+        logger.info(f"[Mooncake Debug] Processing {len(self.waiting_queue)} requests in waiting queue")
         for i in range(len(self.waiting_queue)):
             req = self.waiting_queue[i]
             # we can only add at least `num_not_used_batch` new batch to the running queue
             if i < num_not_used_batch:
                 can_run_list.append(req)
+                logger.info(f"[Mooncake Debug] Added request {i} to can_run_list")
                 req.init_next_round_input(self.tree_cache)
             else:
                 waiting_queue.append(req)
+                logger.info(f"[Mooncake Debug] Added request {i} to waiting_queue (no space)")
 
         self.waiting_queue = waiting_queue
         logger.info(f"[Mooncake Debug] Selected {len(can_run_list)} requests to run, {len(waiting_queue)} remaining in waiting queue")
@@ -878,6 +904,7 @@ class SchedulerDisaggregationDecodeMixin:
             return None
 
         # construct a schedule batch with those requests and mark as decode
+        logger.info(f"[Mooncake Debug] Creating ScheduleBatch with {len(can_run_list)} requests")
         new_batch = ScheduleBatch.init_new(
             can_run_list,
             self.req_to_token_pool,
@@ -888,13 +915,16 @@ class SchedulerDisaggregationDecodeMixin:
             self.spec_algorithm,
             self.server_args.enable_custom_logit_processor,
         )
-        logger.info(f"[Mooncake Debug] Created new batch with {len(can_run_list)} requests")
+        logger.info(f"[Mooncake Debug] Created new batch with {len(can_run_list)} requests, forward_mode={new_batch.forward_mode}")
 
         # construct fake completed prefill
+        logger.info("[Mooncake Debug] Preparing batch for prebuilt extend")
         new_batch.prepare_for_prebuilt_extend()
+        logger.info("[Mooncake Debug] Processing prebuilt extend")
         new_batch.process_prebuilt_extend(self.server_args, self.model_config)
-        logger.info(f"[Mooncake Debug] Prepared new batch for prebuilt extend with forward_mode={new_batch.forward_mode}")
-
+        logger.info(f"[Mooncake Debug] Prepared new batch for prebuilt extend with forward_mode={new_batch.forward_mode}, batch_size={new_batch.batch_size()}")
+        
+        logger.info(f"[Mooncake Debug] === get_new_prebuilt_batch returning batch with {len(can_run_list)} requests ===")
         return new_batch
 
     def process_decode_queue(self: Scheduler):
