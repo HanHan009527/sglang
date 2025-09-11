@@ -722,7 +722,7 @@ class SchedulerDisaggregationDecodeMixin:
             
             # Sleep for 3 seconds at the end of each loop
             logger.info("[Mooncake Debug] Sleeping for 3 seconds")
-            time.sleep(3)
+            time.sleep(10)
 
     @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
