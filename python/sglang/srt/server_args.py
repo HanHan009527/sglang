@@ -676,9 +676,6 @@ class ServerArgs:
             logger.warning(
                 f"Mooncake MoE is enabled. The expert parallel size is adjusted to be the same as the tensor parallel size[{self.tp_size}]."
             )
-            assert (
-                self.disaggregation_mode == "decode"
-            ), "Mooncake MoE only supports prefill–decode disaggregation and is limited to the decode side now."
 
         if self.enable_eplb and (self.expert_distribution_recorder_mode is None):
             self.expert_distribution_recorder_mode = "stat"
