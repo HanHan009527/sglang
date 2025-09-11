@@ -667,8 +667,14 @@ class SchedulerDisaggregationDecodeMixin:
             if recv_reqs:
                 logger.info(f"[Mooncake Debug] Received {len(recv_reqs)} requests")
             self.process_input_requests(recv_reqs)
+            if recv_reqs:
+                logger.info(f"[Mooncake Debug] done process_input_requests requests")
+
             # polling and allocating kv cache
             self.process_decode_queue()
+            if recv_reqs:
+                logger.info(f"[Mooncake Debug] done process_decode_queue requests")
+
             batch = self.get_next_disagg_decode_batch_to_run()
             if batch:
                 logger.info(f"[Mooncake Debug] Got batch with forward_mode={batch.forward_mode}, batch_size={batch.batch_size()}")
