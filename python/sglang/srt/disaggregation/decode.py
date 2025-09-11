@@ -694,6 +694,8 @@ class SchedulerDisaggregationDecodeMixin:
                     if prepare_mlp_sync_flag:
                         logger.info("[Mooncake Debug] Preparing idle batch for extend mode")
                         self._prepare_idle_batch_and_run(None)
+                        logger.info("[Mooncake Debug] done _prepare_idle_batch_and_run")
+
                 else:
                     logger.info(f"[Mooncake Debug] Processing decode batch with {len(batch.reqs)} requests")
                     if prepare_mlp_sync_flag:
