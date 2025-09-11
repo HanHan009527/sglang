@@ -702,7 +702,6 @@ class SchedulerDisaggregationDecodeMixin:
                     logger.info("[Mooncake Debug] Ran batch, processing result")
                     self.process_batch_result(batch, result)
             elif prepare_mlp_sync_flag:
-                logger.info("[Mooncake Debug] No batch, preparing idle batch with MLP sync")
                 batch, _ = self._prepare_idle_batch_and_run(None)
 
             if batch is None and (
