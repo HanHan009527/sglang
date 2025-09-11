@@ -678,7 +678,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             batch = self.get_next_disagg_decode_batch_to_run()
             if batch:
-                logger.info(f"[Mooncake Debug] Got batch with forward_mode={batch.forward_mode}, batch_size={batch.batch_size()}")
+                logger.info(f"[Mooncake Debug] Got batch with forward_mode={batch.forward_mode.name}, batch_size={batch.batch_size()}")
             self.cur_batch = batch
 
             prepare_mlp_sync_flag = require_mlp_sync(self.server_args)
