@@ -224,46 +224,22 @@ class ExpertLocationMetadata:
             logical_to_all_physical_map != -1, dim=-1
         )
 
-        # If called from the initialization stage,
-        # `_global_expert_location_metadata` can be None.
-        if _global_expert_location_metadata is None:
-            broken_nodes = torch.zeros((ep_size,), dtype=torch.int32, device="cuda")
-        else:
-            broken_nodes = _global_expert_location_metadata.broken_nodes
-        # Avoid rank will be automatically handled by `init_by_eplb`
-        avoid_rank = -1
-
         return ExpertLocationMetadata(
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
             logical_to_all_physical_map=logical_to_all_physical_map_padded,
             logical_to_all_physical_map_num_valid=logical_to_all_physical_map_num_valid,
             logical_to_rank_dispatch_physical_map=(
-                (
-                    (
-                        compute_logical_to_rank_dispatch_physical_map_avoid_rank(
-                            logical_to_all_physical_map=logical_to_all_physical_map,
-                            num_gpus=ep_size,
-                            num_physical_experts=num_physical_experts,
-                            # TODO improve when we have real EP rank
-                            ep_rank=torch.distributed.get_rank() % ep_size,
-                            avoid_rank=avoid_rank,
-                        )
-                    )
-                    if avoid_rank != -1
-                    else compute_logical_to_rank_dispatch_physical_map(
-                        logical_to_all_physical_map=logical_to_all_physical_map,
-                        num_gpus=ep_size,
-                        num_physical_experts=num_physical_experts,
-                        # TODO improve when we have real EP rank
-                        ep_rank=torch.distributed.get_rank() % ep_size,
-                    )
+                compute_logical_to_rank_dispatch_physical_map(
+                    logical_to_all_physical_map=logical_to_all_physical_map,
+                    num_gpus=ep_size,
+                    num_physical_experts=num_physical_experts,
+                    # TODO improve when we have real EP rank
+                    ep_rank=torch.distributed.get_rank() % ep_size,
                 )
                 if server_args.ep_dispatch_algorithm == "static"
                 else None
             ),
-            broken_nodes=broken_nodes,
-            last_broken_nodes=broken_nodes.clone(),
         )
 
     # -------------------------------- mutation ------------------------------------
