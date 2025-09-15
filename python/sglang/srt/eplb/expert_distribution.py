@@ -28,6 +28,10 @@ import einops
 import torch
 import torch.distributed
 
+from sglang.srt.eplb.expert_location import (
+    ExpertLocationMetadata,
+    get_global_expert_location_metadata,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import Withable, get_bool_env_var, is_npu
