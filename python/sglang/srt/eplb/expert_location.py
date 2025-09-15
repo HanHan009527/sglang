@@ -25,9 +25,9 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 
+from sglang.srt.elastic_ep.elastic_ep import ElasticEpMetadata
 from sglang.srt.eplb import eplb_algorithms
 from sglang.srt.model_loader import get_model_architecture
-from sglang.srt.elastic_ep.elastic_ep import ElasticEpMetadata
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -45,7 +45,6 @@ class ExpertLocationMetadata:
     logical_to_all_physical_map_num_valid: torch.Tensor  # (layers, num_logical_experts)
     # (layers, num_logical_experts)
     logical_to_rank_dispatch_physical_map: Optional[torch.Tensor]
-    elastic_ep_metadata: Optional[ElasticEpMetadata]
 
     # -------------------------------- properties ------------------------------------
 
@@ -158,24 +157,6 @@ class ExpertLocationMetadata:
         num_groups = model_config_for_expert_location.num_groups
         num_nodes = server_args.nnodes
 
-        # If called from `compute_initial_expert_location_metadata`,
-        # `_global_expert_location_metadata` can be None.
-        if _global_expert_location_metadata is None:
-            broken_ranks = torch.zeros(
-                (common["ep_size"],), dtype=torch.int32, device="cuda"
-            )
-        else:
-            broken_ranks = _global_expert_location_metadata.broken_nodes
-
-        # If called from `compute_initial_expert_location_metadata`,
-        # `_global_expert_location_metadata` can be None.
-        if _global_expert_location_metadata is None:
-            broken_ranks = torch.zeros(
-                (common["ep_size"],), dtype=torch.int32, device="cuda"
-            )
-        else:
-            broken_ranks = _global_expert_location_metadata.broken_ranks
-
         physical_to_logical_map, logical_to_all_physical_map, expert_count = (
             eplb_algorithms.rebalance_experts(
                 tokens_per_expert=logical_count,
@@ -190,7 +171,6 @@ class ExpertLocationMetadata:
                 ),
             )
         )
-        broken_ranks = (broken_ranks,)
 
         return ExpertLocationMetadata._init_raw(
             server_args=server_args,

@@ -1,7 +1,10 @@
 from typing import Tuple
+
 import torch
-from sglang.srt.utils import get_bool_env_var
+
 from sglang.srt.eplb.eplb_algorithms.deepseek import rebalance_experts_hierarchical
+from sglang.srt.utils import get_bool_env_var
+
 
 def rebalance_experts(
     weight: torch.Tensor,
@@ -76,4 +79,3 @@ def rebalance_experts(
                 )
         phy2log = torch.stack(phy2log_slices, dim=1).contiguous().view(num_layers, -1)
     return phy2log, log2phy, logcnt
-

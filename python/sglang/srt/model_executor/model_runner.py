@@ -47,6 +47,10 @@ from sglang.srt.distributed import (
     set_mscclpp_all_reduce,
 )
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
+from sglang.srt.elastic_ep.elastic_ep import (
+    get_global_elastic_ep_metadata,
+    set_global_elastic_ep_metadata,
+)
 from sglang.srt.eplb.eplb_manager import EPLBManager
 from sglang.srt.eplb.expert_distribution import (
     ExpertDistributionRecorder,
@@ -2046,13 +2050,12 @@ class ModelRunner:
         ):
 
             if not torch.equal(
-                get_global_expert_location_metadata().broken_nodes,
-                get_global_expert_location_metadata().last_broken_nodes,
+                get_global_elastic_ep_metadata().broken_nodes,
+                get_global_elastic_ep_metadata().last_broken_nodes,
             ):
-                get_global_expert_location_metadata().last_broken_nodes = (
-                    get_global_expert_location_metadata().broken_nodes.clone()
+                get_global_elastic_ep_metadata().last_broken_nodes = (
+                    get_global_elastic_ep_metadata().broken_nodes.clone()
                 )
-                logging.info(f"recompute _forward_raw")
                 gen = self.eplb_manager.rebalance()
                 while True:
                     try:
