@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from curses import use_env
 from dataclasses import dataclass
 from typing import Optional
 
@@ -10,6 +11,7 @@ from sglang.srt.distributed import get_expert_model_parallel_world_size
 
 @dataclass
 class ElasticEpMetadata:
+    use_elastic_ep: bool
     active_ranks: torch.Tensor
     last_active_ranks: torch.Tensor
 
@@ -27,21 +29,17 @@ def set_global_elastic_ep_metadata(value):
     _global_elastic_ep_metadata = value
 
 
-def _init_global_elastic_ep_metadata(
-    active_ranks: Optional[torch.Tensor] = None,
-    last_active_ranks: Optional[torch.Tensor] = None,
-):
+def _init_global_elastic_ep_metadata():
     global _global_elastic_ep_metadata
     if _global_elastic_ep_metadata is not None:
         return
 
-    if active_ranks is None:
-        ep_size = get_expert_model_parallel_world_size()
-        active_ranks = torch.ones(ep_size, dtype=torch.int32)
-
-    if last_active_ranks is None:
-        last_active_ranks = active_ranks.clone()
+    ep_size = get_expert_model_parallel_world_size()
+    active_ranks = torch.ones(ep_size, dtype=torch.int32)
+    last_active_ranks = active_ranks.clone()
 
     _global_elastic_ep_metadata = ElasticEpMetadata(
-        active_ranks=active_ranks, last_active_ranks=last_active_ranks
+        use_elastic_ep=False,  # TODO pr elastic_ep to add args decide whether use elastic ep
+        active_ranks=active_ranks,
+        last_active_ranks=last_active_ranks,
     )

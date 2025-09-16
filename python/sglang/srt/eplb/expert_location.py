@@ -25,7 +25,6 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 
-from sglang.srt.elastic_ep.elastic_ep import ElasticEpMetadata
 from sglang.srt.eplb import eplb_algorithms
 from sglang.srt.model_loader import get_model_architecture
 
