@@ -228,6 +228,7 @@ class ExpertLocationMetadata:
             physical_to_logical_map=physical_to_logical_map,
             physical_to_logical_map_cpu=physical_to_logical_map.cpu(),
             logical_to_all_physical_map=logical_to_all_physical_map_padded,
+            logical_to_all_physical_map_cpu=logical_to_all_physical_map_padded.cpu(),
             logical_to_all_physical_map_num_valid=logical_to_all_physical_map_num_valid,
             logical_to_rank_dispatch_physical_map=(
                 compute_logical_to_rank_dispatch_physical_map(
@@ -466,99 +467,3 @@ def compute_initial_expert_location_metadata(
         raise NotImplementedError(
             f"Unknown init_expert_location format ({list(data_dict.keys())=})"
         )
-
-
-def compute_logical_to_rank_dispatch_physical_map_avoid_rank(
-    logical_to_all_physical_map: torch.Tensor,
-    num_gpus: int,
-    num_physical_experts: int,
-    ep_rank: int,
-    avoid_rank: int,
-    seed: int = 42,
-):
-    """计算一个静态分派映射表，避免向特定rank调度任务。
-    此函数旨在创建一个分派映射，其中每个 (GPU, 逻辑专家) 对被分配一个特定的物理专家，
-    同时避免将任务分配给 `avoid_rank` 上的专家。如果过滤后没有可用专家，则会回退到使用所有可用专家。
-    1.  **避免特定Rank**: 对于每个逻辑专家，它会首先过滤掉位于 `avoid_rank` 上的所有物理专家。
-    2.  **负载均衡**: 在剩余的专家中，它使用负载计数器来确保请求在可用的候选专家中均匀分配。
-    3.  **回退机制**: 如果过滤后没有可用的专家（例如，所有专家都在 `avoid_rank` 上），
-        该算法将回退到在所有候选专家（包括在 `avoid_rank` 上的专家）中进行选择，以确保任务能够被分配。
-    4.  **确定性**: 整个过程通过固定的随机种子来保证确定性。
-    Args:
-        logical_to_all_physical_map (torch.Tensor): 一个三维张量，映射每个逻辑专家到其所有物理副本。
-            形状为 `(num_layers, num_logical_experts, num_replicas)`。
-        num_gpus (int): 专家并行组中的 GPU 总数。
-        num_physical_experts (int): 物理专家的总数。
-        ep_rank (int): 当前进程在专家并行组中的排名。
-        avoid_rank (int): 需要避免调度的 GPU rank。
-        seed (int): 用于随机数生成器的种子，以确保确定性行为。
-    Returns:
-        torch.Tensor: 一个二维张量，为当前的 `ep_rank` 映射每个逻辑专家到一个物理专家。
-                      形状为 `(num_layers, num_logical_experts)`。
-    """
-    r = random.Random(seed)
-
-    # 计算每个GPU上的物理专家数量
-    num_local_physical_experts = num_physical_experts // num_gpus
-    # 获取映射表的维度信息
-    num_layers, num_logical_experts, _ = logical_to_all_physical_map.shape
-    dtype = logical_to_all_physical_map.dtype
-
-    # 创建一个用于存储最终分派映射的张量，并用-1填充
-    logical_to_rank_dispatch_physical_map = torch.full(
-        size=(num_gpus, num_layers, num_logical_experts),
-        fill_value=-1,
-        dtype=dtype,
-    )
-
-    # 遍历每一层
-    for layer_id in range(num_layers):
-        # 遍历该层中的每一个逻辑专家
-        for logical_expert_id in range(num_logical_experts):
-            # 获取当前逻辑专家的所有物理副本ID
-            candidate_physical_expert_ids = _logical_to_all_physical_raw(
-                logical_to_all_physical_map, layer_id, logical_expert_id
-            )
-
-            # 筛选出不位于 avoid_rank 上的专家
-            experts_to_choose_from = [
-                p_id
-                for p_id in candidate_physical_expert_ids
-                if _compute_gpu_id_of_physical_expert(p_id, num_local_physical_experts)
-                != avoid_rank
-            ]
-
-            # 如果筛选后没有专家可用，则回退到使用所有候选专家
-            if not experts_to_choose_from:
-                logger.info("fallback to candidate_physical_expert_ids")
-                experts_to_choose_from = candidate_physical_expert_ids
-
-            # 获取当前逻辑专家在所有GPU上的分派映射视图
-            output_partial = logical_to_rank_dispatch_physical_map[
-                :, layer_id, logical_expert_id
-            ]
-
-            # 为每个物理专家初始化负载计数器
-            load = {p_id: 0 for p_id in experts_to_choose_from}
-
-            # 遍历所有GPU，为每个GPU分配一个专家
-            for gpu_id in range(num_gpus):
-                # 为了在负载相同时打破僵局，随机打乱候选专家列表
-                shuffled_experts = list(experts_to_choose_from)
-                r.shuffle(shuffled_experts)
-
-                # 从候选专家中选择一个当前负载最低的专家
-                chosen_expert = min(shuffled_experts, key=lambda p_id: load[p_id])
-
-                # 将选中的专家分配给当前GPU
-                output_partial[gpu_id] = chosen_expert
-                # 更新被选中专家的负载计数
-                load[chosen_expert] += 1
-
-    # 断言确保所有条目都已被成功分配
-    assert torch.all(logical_to_rank_dispatch_physical_map != -1)
-
-    # 获取原始张量的设备信息
-    device = logical_to_all_physical_map.device
-    # 返回属于当前ep_rank的分派映射表，并移动到正确的设备上
-    return logical_to_rank_dispatch_physical_map[ep_rank, :, :].to(device)

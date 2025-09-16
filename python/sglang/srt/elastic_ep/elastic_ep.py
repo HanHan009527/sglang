@@ -1,9 +1,7 @@
-
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import  Optional
+from typing import Optional
 
 import torch
 
@@ -14,6 +12,7 @@ from sglang.srt.distributed import get_expert_model_parallel_world_size
 class ElasticEpMetadata:
     active_ranks: torch.Tensor
     last_active_ranks: torch.Tensor
+
 
 _global_elastic_ep_metadata: Optional[ElasticEpMetadata] = None
 
