@@ -47,10 +47,6 @@ from sglang.srt.distributed import (
     set_mscclpp_all_reduce,
 )
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
-from sglang.srt.elastic_ep.elastic_ep import (
-    get_global_elastic_ep_metadata,
-    set_global_elastic_ep_metadata,
-)
 from sglang.srt.eplb.eplb_manager import EPLBManager
 from sglang.srt.eplb.expert_distribution import (
     ExpertDistributionRecorder,
@@ -2049,13 +2045,13 @@ class ModelRunner:
             forward_batch,
         ):
 
-                output = self._forward_raw(
-                    forward_batch,
-                    skip_attn_backend_init,
-                    pp_proxy_tensors,
-                    reinit_attn_backend,
-                    split_forward_count,
-                )
+            output = self._forward_raw(
+                forward_batch,
+                skip_attn_backend_init,
+                pp_proxy_tensors,
+                reinit_attn_backend,
+                split_forward_count,
+            )
 
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end()

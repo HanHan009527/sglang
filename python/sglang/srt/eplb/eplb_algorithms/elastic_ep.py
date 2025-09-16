@@ -3,7 +3,6 @@ from typing import Tuple
 import torch
 
 from sglang.srt.eplb.eplb_algorithms.deepseek import rebalance_experts_hierarchical
-from sglang.srt.utils import get_bool_env_var
 
 
 def rebalance_experts(
@@ -13,7 +12,7 @@ def rebalance_experts(
     num_nodes: int,
     num_gpus: int,
     enable_hierarchical: bool,
-    broken_ranks: torch.Tensor,
+    active_ranks: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
@@ -33,14 +32,18 @@ def rebalance_experts(
 
     num_layers, num_logical_experts = weight.shape
     weight = weight.float().cpu()
-    num_broken_ranks = broken_ranks.sum().item()
+    num_active_ranks = active_ranks.sum().item()
     num_local_experts = num_replicas // num_gpus
-    num_alive_gpus = num_gpus - num_broken_ranks
-    if num_broken_ranks > 0:
+    if num_active_ranks < num_gpus:
         # Must fall back to global load-balance policy
         # and fix some params
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
-            weight, num_local_experts * num_alive_gpus, 1, 1, num_alive_gpus
+            weight,
+            num_local_experts * num_active_ranks,
+            1,
+            1,
+            num_alive_gpus,
+            # weight, num_local_experts * num_alive_gpus, 1, 1, num_alive_gpus
         )
     elif enable_hierarchical:
         # use hierarchical load-balance policy
@@ -63,14 +66,18 @@ def rebalance_experts(
         -1,
         phy2log * maxlogcnt + phyrank,
         torch.arange(
-            num_local_experts * num_alive_gpus, dtype=torch.int64, device=log2phy.device
+            num_local_experts * num_active_ranks,
+            dtype=torch.int64,
+            device=log2phy.device,
         ).expand(num_layers, -1),
     )
-    if num_broken_ranks > 0:
-        phy2log_slices = list(phy2log.view(num_layers, num_alive_gpus, -1).unbind(dim=1))
-        broken_ranks_list = broken_ranks.tolist()
-        for idx, broken in enumerate(broken_ranks_list):
-            if broken:
+    if num_active_ranks < num_gpus:
+        phy2log_slices = list(
+            phy2log.view(num_layers, num_active_ranks, -1).unbind(dim=1)
+        )
+        active_ranks_list = active_ranks.tolist()
+        for idx, active_rank in enumerate(active_ranks_list):
+            if not active_rank:
                 phy2log_slices.insert(idx, torch.zeros_like(phy2log_slices[0]))
                 log2phy = torch.where(
                     log2phy >= idx * num_local_experts,
