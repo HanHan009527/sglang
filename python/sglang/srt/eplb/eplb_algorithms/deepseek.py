@@ -217,7 +217,6 @@ def rebalance_experts(
             num_layers, -1
         ),
     )
-
     return phy2log, log2phy, logcnt
 
 

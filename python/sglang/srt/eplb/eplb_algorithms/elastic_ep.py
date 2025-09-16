@@ -35,12 +35,12 @@ def rebalance_experts(
     weight = weight.float().cpu()
     num_broken_ranks = broken_ranks.sum().item()
     num_local_experts = num_replicas // num_gpus
-    num_ok_gpus = num_gpus - num_broken_ranks
+    num_alive_gpus = num_gpus - num_broken_ranks
     if num_broken_ranks > 0:
         # Must fall back to global load-balance policy
         # and fix some params
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
-            weight, num_local_experts * num_ok_gpus, 1, 1, num_ok_gpus
+            weight, num_local_experts * num_alive_gpus, 1, 1, num_alive_gpus
         )
     elif enable_hierarchical:
         # use hierarchical load-balance policy
@@ -63,11 +63,11 @@ def rebalance_experts(
         -1,
         phy2log * maxlogcnt + phyrank,
         torch.arange(
-            num_local_experts * num_ok_gpus, dtype=torch.int64, device=log2phy.device
+            num_local_experts * num_alive_gpus, dtype=torch.int64, device=log2phy.device
         ).expand(num_layers, -1),
     )
     if num_broken_ranks > 0:
-        phy2log_slices = list(phy2log.view(num_layers, num_ok_gpus, -1).unbind(dim=1))
+        phy2log_slices = list(phy2log.view(num_layers, num_alive_gpus, -1).unbind(dim=1))
         broken_ranks_list = broken_ranks.tolist()
         for idx, broken in enumerate(broken_ranks_list):
             if broken:
