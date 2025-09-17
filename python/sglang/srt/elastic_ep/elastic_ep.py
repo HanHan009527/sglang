@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 from typing import Optional
-from sglang.srt.utils import is_cuda, is_cpu
+
 import torch
+
+from sglang.srt.utils import is_cpu, is_cuda
 
 
 @dataclass
@@ -49,7 +51,7 @@ def _select_device() -> torch.device:
     # cuda or cpu for now
     if is_cuda():
         return torch.device("cuda")
-    elif is_cpu()
+    elif is_cpu():
         return torch.device("cpu")
     else:
         raise NotImplementedError("Only CUDA and CPU are supported now.")
