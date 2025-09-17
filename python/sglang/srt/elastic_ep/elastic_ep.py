@@ -42,7 +42,7 @@ def get_elastic_ep_state():
 
 
 def _build_default_state() -> ElasticEPState:
-    return _build_state(using_elastic_ep=False)
+    return _build_state(ep_size=None, device=None, using_elastic_ep=False)
 
 
 def _select_device() -> torch.device:

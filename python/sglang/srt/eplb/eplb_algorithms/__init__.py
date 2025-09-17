@@ -3,9 +3,8 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.eplb.eplb_algorithms import elasticity_aware
 from sglang.srt.elastic_ep.elastic_ep import get_elastic_ep_state
-from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec
+from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec, elasticity_aware
 
 
 class EplbAlgorithm(Enum):
