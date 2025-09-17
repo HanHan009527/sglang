@@ -1,10 +1,7 @@
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
-import sglang as sgl
 from sglang.srt.utils import kill_process_tree
 from sglang.test.run_eval import run_eval
 from sglang.test.test_utils import (
