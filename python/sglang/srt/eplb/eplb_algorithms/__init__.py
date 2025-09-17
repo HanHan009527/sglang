@@ -3,8 +3,9 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.elastic_ep.elastic_ep import get_global_elastic_ep_metadata
-from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec, elastic_ep
+from python.sglang.srt.eplb.eplb_algorithms import elasticity_aware
+from sglang.srt.elastic_ep.elastic_ep import get_elastic_ep_state
+from sglang.srt.eplb.eplb_algorithms import deepseek, deepseek_vec
 
 
 class EplbAlgorithm(Enum):
@@ -12,7 +13,7 @@ class EplbAlgorithm(Enum):
     deepseek_hierarchical = auto()
     deepseek_vec = auto()
     deepseek_vec_hierarchical = auto()
-    elastic_ep = auto()
+    elasticity_aware = auto()
     # TODO may have more algorithm later
 
 
@@ -47,15 +48,15 @@ def rebalance_experts(
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_vec_hierarchical,
         )
 
-    if algorithm == EplbAlgorithm.elastic_ep:
-        return elastic_ep.rebalance_experts(
+    if algorithm == EplbAlgorithm.elasticity_aware:
+        return elasticity_aware.rebalance_experts(
             weight=tokens_per_expert.sum(dim=0),
             num_replicas=num_physical_experts,
             num_groups=num_groups,
             num_nodes=num_nodes,
             num_gpus=num_physical_experts // num_local_physical_experts,
             enable_hierarchical=algorithm == EplbAlgorithm.deepseek_hierarchical,
-            active_ranks=get_global_elastic_ep_metadata().active_ranks,
+            active_ranks=get_elastic_ep_state().active_ranks,
         )
 
     raise NotImplementedError
