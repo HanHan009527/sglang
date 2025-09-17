@@ -230,6 +230,8 @@ class GroupCoordinator:
         use_npu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
+        active_ranks: Optional[torch.Tensor] = None,
+        active_ranks_cpu: Optional[torch.Tensor] = None,
     ):
         # Set group info
         group_name = group_name or "anonymous"
@@ -244,16 +246,19 @@ class GroupCoordinator:
         self.local_size = get_int_env_var("LOCAL_SIZE", 0)
 
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
-            )
-            # a cpu_group to allow direct coordination between processes through
-            # the CPU. The backend is chosen based on `torch_distributed_backend`
             if "mooncake" in torch_distributed_backend:
-                backend = "mooncake-cpu"
+                from mooncake.ep import MooncakeBackendOptions
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend, pg_options=MooncakeBackendOptions(active_ranks) if active_ranks is not None else None
+                )
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="mooncake-cpu", pg_options=MooncakeBackendOptions(active_ranks_cpu) if active_ranks_cpu is not None else None
+                )
             else:
-                backend = "gloo"
-            cpu_group = torch.distributed.new_group(ranks, backend=backend)
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend
+                )
+                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1219,6 +1224,8 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
     use_mscclpp_allreduce: Optional[bool] = None,
+    active_ranks: Optional[torch.Tensor] = None,
+    active_ranks_cpu: Optional[torch.Tensor] = None,
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
@@ -1228,7 +1235,7 @@ def init_model_parallel_group(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=not _is_npu,
+        use_pynccl=not _is_npu and not "mooncake" in backend,
         use_pymscclpp=use_mscclpp_allreduce,
         use_custom_allreduce=use_custom_allreduce,
         use_hpu_communicator=True,
@@ -1236,10 +1243,22 @@ def init_model_parallel_group(
         use_npu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        active_ranks=active_ranks,
+        active_ranks_cpu=active_ranks_cpu,
     )
 
 
 _TP: Optional[GroupCoordinator] = None
+_TP_ACTIVE_RANKS: Optional[torch.Tensor] = None
+_TP_ACTIVE_RANKS_CPU: Optional[torch.Tensor] = None
+
+
+def get_tp_active_ranks():
+    return _TP_ACTIVE_RANKS
+
+def get_tp_active_ranks_cpu():
+    return _TP_ACTIVE_RANKS_CPU
+
 
 # duplicate GroupCoordinator for prefill in PD-Multiplexing
 _PDMUX_PREFILL_TP_GROUP: Optional[GroupCoordinator] = None
@@ -1446,6 +1465,14 @@ def initialize_model_parallel(
         )
         group_ranks.append(ranks)
 
+    global _TP_ACTIVE_RANKS
+    _TP_ACTIVE_RANKS = torch.ones(
+        (tensor_model_parallel_size,), dtype=torch.int32, device="cuda"
+    )
+    global _TP_ACTIVE_RANKS_CPU
+    _TP_ACTIVE_RANKS_CPU = torch.ones(
+        (tensor_model_parallel_size,), dtype=torch.int32, device="cpu"
+    )
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(
         group_ranks,
@@ -1455,6 +1482,8 @@ def initialize_model_parallel(
             "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
         ),
         group_name="tp",
+        active_ranks=_TP_ACTIVE_RANKS,
+        active_ranks_cpu=_TP_ACTIVE_RANKS_CPU,
     )
 
     if duplicate_tp_group:
