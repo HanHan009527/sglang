@@ -864,7 +864,7 @@ class ModelRunner:
         self,
         model_path: str,
         load_format: str,
-        weight_name_filter: Optional[Callable[[str], bool]] = None,
+        weight_name_filter: Optional[callable[[str], bool]] = None,
     ) -> tuple[bool, str]:
         """Update engine weights in-place from the disk."""
         logger.info(
