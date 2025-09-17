@@ -24,7 +24,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import requests
@@ -864,7 +864,7 @@ class ModelRunner:
         self,
         model_path: str,
         load_format: str,
-        weight_name_filter: Optional[callable[[str], bool]] = None,
+        weight_name_filter: Optional[Callable[[str], bool]] = None,
     ) -> tuple[bool, str]:
         """Update engine weights in-place from the disk."""
         logger.info(
