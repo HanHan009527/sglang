@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 from typing import Optional
-
+from sglang.srt.utils import is_cuda, is_cpu
 import torch
 
 
@@ -47,7 +47,12 @@ def _build_default_state() -> ElasticEPState:
 
 def _select_device() -> torch.device:
     # cuda or cpu for now
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if is_cuda():
+        return torch.device("cuda")
+    elif is_cpu()
+        return torch.device("cpu")
+    else:
+        raise NotImplementedError("Only CUDA and CPU are supported now.")
 
 
 def _build_state(
