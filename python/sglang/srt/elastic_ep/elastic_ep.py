@@ -71,6 +71,7 @@ def _build_state(
         using_elastic_ep=using_elastic_ep,
         active_ranks=active,
         last_active_ranks=active.clone(),
+        active_ranks_cpu=None,
     )
     state.sync_active_to_cpu()
     return state
