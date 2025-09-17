@@ -25,6 +25,8 @@ from IPython.display import HTML, display
 from pydantic import BaseModel
 from tqdm import tqdm
 
+from sglang.srt.utils import get_bool_env_var
+
 logger = logging.getLogger(__name__)
 
 
@@ -348,9 +350,7 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
 
 def is_in_ci():
-    from sglang.test.test_utils import is_in_ci
-
-    return is_in_ci()
+    return get_bool_env_var("SGLANG_IS_IN_CI")
 
 
 def print_highlight(html_content: str):
