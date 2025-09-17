@@ -6,14 +6,12 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.distributed import get_expert_model_parallel_world_size
-
 
 @dataclass
 class ElasticEpMetadata:
-    use_elastic_ep: bool
-    active_ranks: torch.Tensor
-    last_active_ranks: torch.Tensor
+    using_elastic_ep: bool
+    active_ranks: Optional[torch.Tensor]
+    last_active_ranks: Optional[torch.Tensor]
 
 
 _global_elastic_ep_metadata: Optional[ElasticEpMetadata] = None
@@ -34,12 +32,12 @@ def _init_global_elastic_ep_metadata():
     if _global_elastic_ep_metadata is not None:
         return
 
-    ep_size = get_expert_model_parallel_world_size()
+    ep_size = torch.distributed.get_world_size()
     active_ranks = torch.ones(ep_size, dtype=torch.int32)
     last_active_ranks = active_ranks.clone()
 
     _global_elastic_ep_metadata = ElasticEpMetadata(
-        use_elastic_ep=False,  # TODO pr elastic_ep to add args decide whether use elastic ep
+        using_elastic_ep=False,  # TODO pr elastic_ep to add args decide whether use elastic ep
         active_ranks=active_ranks,
         last_active_ranks=last_active_ranks,
     )

@@ -839,7 +839,7 @@ class ModelRunner:
         new_expert_location_metadata: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
-        if get_global_elastic_ep_metadata().use_elastic_ep:
+        if get_global_elastic_ep_metadata().using_elastic_ep:
             old_expert_location_metadata = get_global_expert_location_metadata()
             assert old_expert_location_metadata is not None
             old_expert_location_metadata.update(
