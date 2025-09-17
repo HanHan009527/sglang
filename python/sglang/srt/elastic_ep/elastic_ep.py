@@ -60,11 +60,11 @@ def _select_device() -> torch.device:
 def _build_state(
     *,
     ep_size: Optional[int],
-    device: Optional[torch.device | str],
+    device: Optional[torch.device],
     using_elastic_ep: bool,
 ) -> ElasticEPState:
-    ep = ep_size if ep_size is not None else torch.distributed.is_initialized()
-    dev = _select_device()
+    ep = ep_size if ep_size is not None else torch.distributed.get_world_size()
+    dev = device if device is not None else _select_device()
 
     active = torch.ones(ep, dtype=torch.int32, device=dev)
     state = ElasticEPState(
