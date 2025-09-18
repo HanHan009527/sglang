@@ -356,7 +356,7 @@ class DataParallelController:
         if self.maybe_external_dp_rank_routing(req):
             return
 
-        print(self.status)
+        print("in scheduler: {self.status}")
         if self.server_args.disaggregation_mode == "null":
             while True:
                 if self.status[self.round_robin_counter] == 1: 
@@ -372,6 +372,7 @@ class DataParallelController:
                     self.workers[id].send_pyobj(req)
                     break
                 id = (id + 1) % len(self.workers)
+        print("OK")
 
     def shortest_queue_scheduler(self, req):
         if self.maybe_external_dp_rank_routing(req):

@@ -1939,8 +1939,9 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
-        
+        print("SENDING")
         self.send_to_dpc.send_pyobj(ActiveRanks(get_tp_active_ranks().tolist()))
+        print("END")
         return ret
 
     def process_batch_result(
