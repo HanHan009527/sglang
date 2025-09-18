@@ -356,7 +356,7 @@ class DataParallelController:
         if self.maybe_external_dp_rank_routing(req):
             return
 
-        print("in scheduler: {self.status}")
+        print(f"in scheduler: {self.status}")
         if self.server_args.disaggregation_mode == "null":
             while True:
                 if self.status[self.round_robin_counter] == 1: 
