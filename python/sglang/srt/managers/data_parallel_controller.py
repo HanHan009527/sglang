@@ -32,6 +32,7 @@ import zmq
 
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.io_struct import (
+    ActiveRanks,
     BlockReqInput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
@@ -148,6 +149,7 @@ class DataParallelController:
         # Launch data parallel workers
         self.scheduler_procs = []
         self.workers: List[zmq.Socket] = [None] * server_args.dp_size
+        self.status: List[int] = [0] * server_args.dp_size
 
         if server_args.enable_dp_attention:
             dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
@@ -181,6 +183,9 @@ class DataParallelController:
 
     def handle_load_update_req(self, obj):
         self.dp_budget.update_budget(obj)
+    
+    def update_ranks(self, ranks: ActiveRanks):
+        self.status = ranks.status
 
     def init_dispatcher(self):
         self._request_dispatcher = TypeBasedDispatcher(
@@ -189,6 +194,7 @@ class DataParallelController:
                 (TokenizedEmbeddingReqInput, self.dispatching),
                 (BlockReqInput, self.send_to_all_workers),
                 (WatchLoadUpdateReq, self.handle_load_update_req),
+                (ActiveRanks, self.update_ranks),
             ]
         )
         self._request_dispatcher.add_fallback_fn(self.send_control_message)
@@ -350,12 +356,20 @@ class DataParallelController:
             return
 
         if self.server_args.disaggregation_mode == "null":
-            self.workers[self.round_robin_counter].send_pyobj(req)
-            self.round_robin_counter = (self.round_robin_counter + 1) % len(
-                self.workers
-            )
+            while True:
+                if self.status[self.round_robin_counter] == 1: 
+                    self.workers[self.round_robin_counter].send_pyobj(req)
+                    break
+                self.round_robin_counter = (self.round_robin_counter + 1) % len(
+                    self.workers
+                )
         else:
-            self.workers[req.bootstrap_room % len(self.workers)].send_pyobj(req)
+            id = req.bootstrap_room % len(self.workers)
+            while True:
+                if self.status[id] == 1: 
+                    self.workers[id].send_pyobj(req)
+                    break
+                id = (id + 1) % len(self.workers)
 
     def shortest_queue_scheduler(self, req):
         if self.maybe_external_dp_rank_routing(req):

@@ -1154,6 +1154,13 @@ class AbortReq:
     def __post_init__(self):
         self.rids = self.rid
 
+@dataclass
+class ActiveRanks:
+    def __init__(self, status: list[int] = None):
+        if status is None:
+            self.status = []
+        else 
+            self.status = status
 
 @dataclass
 class GetInternalStateReq:

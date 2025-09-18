@@ -72,6 +72,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.managers.io_struct import (
     AbortReq,
+    ActiveRanks,
     BatchTokenizedEmbeddingReqInput,
     BatchTokenizedGenerateReqInput,
     ClearHiCacheReqInput,
@@ -287,7 +288,9 @@ class Scheduler(
             self.recv_from_rpc = get_zmq_socket(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
             )
-
+            self.send_to_dpc = get_zmq_socket(
+                context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
+            )
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
             )
@@ -1936,6 +1939,8 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
+        
+        self.send_to_dpc.send_pyobj(ActiveRanks(get_tp_active_ranks().tolist()))
         return ret
 
     def process_batch_result(
