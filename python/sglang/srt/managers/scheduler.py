@@ -98,6 +98,7 @@ from sglang.srt.managers.io_struct import (
     OpenSessionReqInput,
     OpenSessionReqOutput,
     ProfileReq,
+    Ranks,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
     RpcReqInput,
@@ -1936,6 +1937,9 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
+
+        self.send_to_tokenizer.send_pyobj(Ranks(get_tp_active_ranks().tolist()))
+
         return ret
 
     def process_batch_result(
