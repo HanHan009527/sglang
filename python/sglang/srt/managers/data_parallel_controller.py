@@ -423,7 +423,7 @@ class DataParallelController:
                     recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError as e:
                     break
-                print(recv_req)
+                print(f"recv: {recv_req}")
                 self._request_dispatcher(recv_req)
 
 
