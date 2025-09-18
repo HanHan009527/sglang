@@ -100,6 +100,7 @@ from sglang.srt.managers.io_struct import (
     OpenSessionReqInput,
     OpenSessionReqOutput,
     ProfileReq,
+    Ranks,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
     RpcReqInput,
@@ -2278,6 +2279,8 @@ class Scheduler(
             model_worker_batch = batch.get_model_worker_batch()
             embeddings = self.tp_worker.forward_batch_embedding(model_worker_batch)
             ret = EmbeddingBatchResult(embeddings=embeddings)
+
+        self.send_to_tokenizer.send_pyobj(Ranks(status=get_tp_active_ranks_cpu().tolist()))
         return ret
 
     def launch_batch_sample_if_needed(

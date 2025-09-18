@@ -1,6 +1,8 @@
 import os
 import unittest
 from types import SimpleNamespace
+import time
+
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
@@ -86,7 +88,17 @@ class TestTP(CustomTestCase):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
         print(f"{speed=:.2f}")
-        os.system("pkill -f sglang::scheduler_DP2_TP2_EP2")
+        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
         acc_length, speed = send_one_prompt(args)
         print(f"{speed=:.2f}")
 
