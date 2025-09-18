@@ -1159,7 +1159,7 @@ class ActiveRanks:
     def __init__(self, status: list[int] = None):
         if status is None:
             self.status = []
-        else 
+        else: 
             self.status = status
 
 @dataclass
