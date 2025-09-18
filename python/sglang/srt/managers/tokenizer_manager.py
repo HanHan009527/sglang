@@ -246,7 +246,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         )
         if self.server_args.tokenizer_worker_num > 1:
             # Use tokenizer_worker_ipc_name in multi-tokenizer mode
-            print("QWQ")
+            sys.exit()
             self.send_to_scheduler = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_worker_ipc_name, False
             )
