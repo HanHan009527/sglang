@@ -149,7 +149,7 @@ class DataParallelController:
         # Launch data parallel workers
         self.scheduler_procs = []
         self.workers: List[zmq.Socket] = [None] * server_args.dp_size
-        self.status: List[int] = [0] * server_args.dp_size
+        self.status: List[int] = [1] * server_args.dp_size
 
         if server_args.enable_dp_attention:
             dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
