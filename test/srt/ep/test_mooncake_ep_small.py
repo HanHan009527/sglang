@@ -6,18 +6,21 @@ from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
-    DEFAULT_MODEL_NAME_FOR_TEST_MLA,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
     popen_launch_server,
 )
+from sglang.test.test_utils import (
+    try_cached_model,
+)
+
 
 
 class TestPureDP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model('/data/models/DeepSeek-R1-0528/')
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
@@ -90,7 +93,7 @@ class TestPureDP(CustomTestCase):
 class TestHybridDPTP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model('/data/models/DeepSeek-R1-0528/')
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
@@ -141,7 +144,7 @@ class TestHybridDPTP(CustomTestCase):
 class TestTP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model('/data/models/DeepSeek-R1-0528/')
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
@@ -189,7 +192,7 @@ class TestTP(CustomTestCase):
 class TestNoGatherdBuffer(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model('/data/models/DeepSeek-R1-0528/')
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
@@ -243,7 +246,7 @@ class TestNoGatherdBuffer(CustomTestCase):
 class TestTBO(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model('/data/models/DeepSeek-R1-0528/')
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
