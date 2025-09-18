@@ -252,7 +252,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             )
         else:
             self.send_to_scheduler = get_zmq_socket(
-                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
             )
 
         # Request states

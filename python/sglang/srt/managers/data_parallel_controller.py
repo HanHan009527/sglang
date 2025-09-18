@@ -131,7 +131,7 @@ class DataParallelController:
         self.context = zmq.Context(1 + server_args.dp_size)
         if server_args.node_rank == 0:
             self.recv_from_tokenizer = get_zmq_socket(
-                self.context, zmq.PULL, port_args.scheduler_input_ipc_name, False
+                self.context, zmq.PULL, port_args.scheduler_input_ipc_name, True
             )
 
         # Dispatch method

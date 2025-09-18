@@ -289,7 +289,7 @@ class Scheduler(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
             )
             self.send_to_dpc = get_zmq_socket(
-                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                context, zmq.PUSH, port_args.scheduler_input_ipc_name, False
             )
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
