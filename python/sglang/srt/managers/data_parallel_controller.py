@@ -33,6 +33,7 @@ import zmq
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.io_struct import (
     BlockReqInput,
+    Ranks,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     WatchLoadUpdateReq,
@@ -148,6 +149,7 @@ class DataParallelController:
         # Launch data parallel workers
         self.scheduler_procs = []
         self.workers: List[zmq.Socket] = [None] * server_args.dp_size
+        self.status: List[int] = [1] * server_args.dp_size
 
         if server_args.enable_dp_attention:
             dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
@@ -182,6 +184,9 @@ class DataParallelController:
     def handle_load_update_req(self, obj):
         self.dp_budget.update_budget(obj)
 
+    def update_ranks(self, ranks: Ranks):
+        self.status Ranks.status
+
     def init_dispatcher(self):
         self._request_dispatcher = TypeBasedDispatcher(
             [
@@ -189,6 +194,7 @@ class DataParallelController:
                 (TokenizedEmbeddingReqInput, self.dispatching),
                 (BlockReqInput, self.send_to_all_workers),
                 (WatchLoadUpdateReq, self.handle_load_update_req),
+                (Ranks, self.update_ranks),
             ]
         )
         self._request_dispatcher.add_fallback_fn(self.send_control_message)
