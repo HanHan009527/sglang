@@ -2063,6 +2063,7 @@ class Scheduler(
 
         #self.send_to_tokenizer.send_pyobj(Ranks(get_tp_active_ranks().tolist()))
         self.send_to_tokenizer.send_pyobj(Ranks([0, 1, 0, 1]))
+        print(get_tp_active_ranks().tolist())
         return ret
 
     def process_batch_result(
