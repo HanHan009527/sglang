@@ -2061,6 +2061,9 @@ class Scheduler(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
 
+        print("UPDATE!!!")
+        print(get_tp_active_ranks().tolist())
+        print("END!!!!")
         self.send_to_tokenizer.send_pyobj(Ranks(get_tp_active_ranks().tolist()))
 
         return ret
