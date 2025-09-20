@@ -2062,7 +2062,7 @@ class Scheduler(
             )
 
         self.send_to_tokenizer.send_pyobj(Ranks(get_tp_active_ranks_cpu().tolist()))
-        print(get_tp_active_ranks_cpu().tolist())
+        #print(get_tp_active_ranks_cpu().tolist())
         return ret
 
     def process_batch_result(
