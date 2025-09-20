@@ -123,6 +123,7 @@ class DataParallelController:
         self.max_total_num_tokens = None
         self.server_args = server_args
         self.port_args = port_args
+        self.group_size = server_args.tp_size // server_args.dp_size
         self.load_balance_method = LoadBalanceMethod.from_str(
             server_args.load_balance_method
         )
@@ -149,7 +150,7 @@ class DataParallelController:
         # Launch data parallel workers
         self.scheduler_procs = []
         self.workers: List[zmq.Socket] = [None] * server_args.dp_size
-        self.status: List[int] = [1] * server_args.dp_size
+        self.group_status: List[int] = [1] * server_args.dp_size
 
         if server_args.enable_dp_attention:
             dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
@@ -185,7 +186,9 @@ class DataParallelController:
         self.dp_budget.update_budget(obj)
 
     def update_ranks(self, ranks: Ranks):
-        self.status = ranks.status
+        self.group_status = [1] * server_args.dp_size
+        for i in range(self.tp_size):
+            self.group_status[(i // self.group_size)] &= ranks.status[i]
 
     def init_dispatcher(self):
         self._request_dispatcher = TypeBasedDispatcher(
@@ -350,6 +353,9 @@ class DataParallelController:
             self.workers[req.data_parallel_rank].send_pyobj(req)
             return True
         return False
+
+    def check_group(self, x: int):
+        id = (x // self.group_size) * self.group_size
 
     def round_robin_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
