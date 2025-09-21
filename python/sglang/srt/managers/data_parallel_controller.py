@@ -186,7 +186,7 @@ class DataParallelController:
         self.dp_budget.update_budget(obj)
 
     def update_ranks(self, ranks: Ranks):
-        self.group_status = [1] * server_args.dp_size
+        self.group_status = [1] * self.server_args.dp_size
         for i in range(self.tp_size):
             self.group_status[(i // self.group_size)] &= ranks.status[i]
 
