@@ -190,8 +190,8 @@ class DataParallelController:
         for i in range(self.group_num):
             self.group_status[i] = 1
             for j in range(self.group_size):
-                self.group_status[i] &= ranks.status[i*group_size + j]
-                
+                self.group_status[i] &= ranks.status[i*self.group_size + j]
+
     def init_dispatcher(self):
         self._request_dispatcher = TypeBasedDispatcher(
             [
