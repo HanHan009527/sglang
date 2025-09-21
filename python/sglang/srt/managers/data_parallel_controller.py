@@ -364,7 +364,14 @@ class DataParallelController:
             while True:
                 if self.group_status[self.round_robin_counter] == 1:
                     print(f"choose worker {self.round_robin_counter}")
-                    self.workers[self.round_robin_counter].send_pyobj(req)
+                    try:
+                        self.workers[self.round_robin_counter].send_pyobj(req, flags=zmq.NOBLOCK)
+                    except zmq.ZMQError:
+                        print(f"worker {self.round_robin_counter} not responsive")
+                        self.round_robin_counter = (self.round_robin_counter + 1) % len(
+                            self.workers
+                        )
+                        continue
                     self.round_robin_counter = (self.round_robin_counter + 1) % len(
                         self.workers
                     )
