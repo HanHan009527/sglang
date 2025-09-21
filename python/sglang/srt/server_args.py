@@ -1005,7 +1005,7 @@ class ServerArgs:
                 )
 
     def _handle_other_validations(self):
-        logger.info("Handle other validations if needed.")
+        pass
 
     def __post_init__(self):
         """
