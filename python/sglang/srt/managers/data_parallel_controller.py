@@ -151,6 +151,7 @@ class DataParallelController:
         self.scheduler_procs = []
         self.workers: List[zmq.Socket] = [None] * server_args.dp_size
         self.group_status: List[int] = [1] * server_args.dp_size
+        self.group_num = server_args.dp_size
 
         if server_args.enable_dp_attention:
             dp_port_args = self.launch_dp_attention_schedulers(server_args, port_args)
@@ -186,10 +187,11 @@ class DataParallelController:
         self.dp_budget.update_budget(obj)
 
     def update_ranks(self, ranks: Ranks):
-        self.group_status = [1] * self.server_args.dp_size
-        for i in range(self.tp_size):
-            self.group_status[(i // self.group_size)] &= ranks.status[i]
-
+        for i in range(self.group_num):
+            self.group_status[i] = 1
+            for j in range(self.group_size):
+                self.group_status[i] &= ranks.status[i*group_size + j]
+                
     def init_dispatcher(self):
         self._request_dispatcher = TypeBasedDispatcher(
             [
