@@ -356,6 +356,7 @@ class DataParallelController:
 
     def check_group(self, x: int):
         id = (x // self.group_size) * self.group_size
+        return self.group_status[id] == 1
 
     def round_robin_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
@@ -363,7 +364,7 @@ class DataParallelController:
 
         if self.server_args.disaggregation_mode == "null":
             while True:
-                if self.status[self.round_robin_counter] == 1:
+                if self.check_group(self.round_robin_counter):
                     print(f"choose worker {self.round_robin_counter}")
                     self.workers[self.round_robin_counter].send_pyobj(req)
                     self.round_robin_counter = (self.round_robin_counter + 1) % len(
@@ -377,7 +378,7 @@ class DataParallelController:
         else:
             id = req.bootstrap_room % len(self.workers)
             while True:
-                if self.status[id] == 1:
+                if self.check_group(id):
                     self.workers[id].send_pyobj(req)
                     break
                 id = (id + 1) % len(self.workers)
