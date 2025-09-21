@@ -128,6 +128,13 @@ class TestHybridDPTP(CustomTestCase):
                 "128",
                 "--max-running-requests",
                 "256",
+                "--disable-custom-all-reduce",
+                "--enable-eplb",
+                "--ep-num-redundant-experts",
+                "24",
+                "--enable-dp-lm-head",
+                "--moe-dense-tp-size",
+                "1",
             ],
         )
 
