@@ -85,8 +85,7 @@ class TestPureDP(CustomTestCase):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
         print(f"{speed=:.2f}")
-        #os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
-        os.system("pkill -f sglang::scheduler_DP0_TP1_EP1")
+        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
         acc_length, speed = send_one_prompt(args)
         print(f"{speed=:.2f}")
         acc_length, speed = send_one_prompt(args)
@@ -137,7 +136,8 @@ class TestHybridDPTP(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_gsm8k(self):
-        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
+        #os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
+        os.system("pkill -f sglang::scheduler_DP1_TP2_EP2")
         args = SimpleNamespace(
             num_shots=5,
             data_path=None,
