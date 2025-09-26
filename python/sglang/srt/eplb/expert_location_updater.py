@@ -334,6 +334,7 @@ def update_expert_weights_single_layer(
                         op=torch.distributed.irecv,
                         tensor=_get_tensor(temp_buffers, i, dst_expert_location),
                         peer=src_rank,
+                        group=get_world_group_nccl().device_group,
                     )
                     for i in range(num_tensors)
                 ],
@@ -384,6 +385,7 @@ def update_expert_weights_single_layer(
                             routed_experts_weights, i, src_expert_location
                         ),
                         peer=dst_rank,
+                        group=get_world_group_nccl().device_group,
                     )
                     for dst_rank in all_dst_ranks
                     for i in range(num_tensors)
@@ -441,8 +443,7 @@ def update_expert_weights_single_layer(
         if len(p2p_ops) == 0:
             return
 
-        group = get_world_group_nccl().device_group
-        reqs = torch.distributed.batch_isend_irecv(p2p_ops, group=group)
+        reqs = torch.distributed.batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
 
