@@ -1192,11 +1192,18 @@ class GroupCoordinator:
 
 
 _WORLD: Optional[GroupCoordinator] = None
+_WORLD_NCCL: Optional[GroupCoordinator] = None
 
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
+
+
+
+def get_world_group_nccl() -> GroupCoordinator:
+    assert _WORLD_NCCL is not None, "world group is not initialized"
+    return _WORLD_NCCL
 
 
 def init_world_group(
@@ -1403,10 +1410,22 @@ def init_distributed_environment(
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         else:
             local_rank = rank
-    global _WORLD
+    global _WORLD, _WORLD_NCCL
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        _WORLD_NCCL = GroupCoordinator(
+            group_ranks=[ranks],
+            local_rank=local_rank,
+            torch_distributed_backend="nccl",
+            use_pynccl=False,
+            use_pymscclpp=False,
+            use_custom_allreduce=False,
+            use_hpu_communicator=False,
+            use_xpu_communicator=False,
+            use_npu_communicator=False,
+            group_name="world-nccl",
+        )
     else:
         assert (
             _WORLD.world_size == torch.distributed.get_world_size()

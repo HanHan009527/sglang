@@ -20,6 +20,7 @@ import torch
 import torch.distributed
 from torch.distributed import P2POp
 
+from sglang.srt.distributed import get_world_group_nccl
 from sglang.srt.eplb.expert_location import (
     ExpertLocationMetadata,
     get_global_expert_location_metadata,
@@ -440,7 +441,8 @@ def update_expert_weights_single_layer(
         if len(p2p_ops) == 0:
             return
 
-        reqs = torch.distributed.batch_isend_irecv(p2p_ops)
+        group = get_world_group_nccl().device_group
+        reqs = torch.distributed.batch_isend_irecv(p2p_ops, group=group)
         for req in reqs:
             req.wait()
 
