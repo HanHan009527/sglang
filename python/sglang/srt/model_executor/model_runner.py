@@ -2062,6 +2062,7 @@ class ModelRunner:
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
         if self.forward_pass_id == 0:
+            logger.info("Shrink from 4 to 2 @ 0")
             get_elastic_ep_state().active_ranks[self.tp_size // 2:] = 0
             gen = self.eplb_manager.rebalance()
             while True:
@@ -2071,6 +2072,17 @@ class ModelRunner:
                     break
             get_elastic_ep_state().active_ranks[self.tp_size // 2:] = 1
         self.forward_pass_id += 1
+
+        if self.forward_pass_id == 1000:
+            logger.info("Expand from 2 to 4 @ 1000")
+            get_elastic_ep_state().last_active_ranks[self.tp_size // 2:] = 0
+            gen = self.eplb_manager.rebalance()
+            while True:
+                try:
+                    next(gen)
+                except StopIteration:
+                    break
+            get_elastic_ep_state().last_active_ranks[self.tp_size // 2:] = 1
 
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
@@ -2106,8 +2118,6 @@ class ModelRunner:
                     reinit_attn_backend,
                     split_forward_count,
                 )
-            if self.eplb_manager is not None:
-                self.eplb_manager.on_forward_pass_end()
 
         return output
 

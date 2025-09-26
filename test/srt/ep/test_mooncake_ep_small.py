@@ -82,8 +82,9 @@ class TestPureDP(CustomTestCase):
 
     def test_bs_1_elastic(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
+        for i in range(10):
+            acc_length, speed = send_one_prompt(args)
+            print(f"{speed=:.2f}")
 
     def test_bs_1_fault_tolerance(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
