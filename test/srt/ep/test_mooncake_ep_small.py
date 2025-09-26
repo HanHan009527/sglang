@@ -49,7 +49,7 @@ class TestPureDP(CustomTestCase):
                 "--disable-custom-all-reduce",
                 "--enable-eplb",
                 "--ep-num-redundant-experts",
-                "24",
+                "72",
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
@@ -76,6 +76,11 @@ class TestPureDP(CustomTestCase):
         self.assertGreater(metrics["accuracy"], 0.60)
 
     def test_bs_1_speed(self):
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+
+    def test_bs_1_elastic(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
         acc_length, speed = send_one_prompt(args)
         print(f"{speed=:.2f}")

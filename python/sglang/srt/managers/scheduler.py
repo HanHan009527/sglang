@@ -1938,7 +1938,7 @@ class Scheduler(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
 
-        self.send_to_tokenizer.send_pyobj(Ranks(get_tp_active_ranks_cpu().tolist()))
+        self.send_to_tokenizer.send_pyobj([1, 1, 0, 0])
         #print(get_tp_active_ranks_cpu().tolist())
         return ret
 
