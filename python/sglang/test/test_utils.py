@@ -50,7 +50,7 @@ DEFAULT_SMALL_EMBEDDING_MODEL_NAME_FOR_TEST = "Alibaba-NLP/gte-Qwen2-1.5B-instru
 DEFAULT_SMALL_CROSS_ENCODER_MODEL_NAME_FOR_TEST = "cross-encoder/ms-marco-MiniLM-L6-v2"
 DEFAULT_MLA_MODEL_NAME_FOR_TEST = "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
 DEFAULT_MLA_FP8_MODEL_NAME_FOR_TEST = "neuralmagic/DeepSeek-Coder-V2-Lite-Instruct-FP8"
-DEFAULT_MODEL_NAME_FOR_TEST_MLA = "deepseek-ai/DeepSeek-V3-0324"
+DEFAULT_MODEL_NAME_FOR_TEST_MLA = "/root/.cache/huggingface/hub/models--lmsys--sglang-ci-dsv3-test/snapshots/fed995305b0e4f9acacb74bc0c17787a966bf42a/"
 DEFAULT_MODEL_NAME_FOR_TEST_MLA_NEXTN = "lmsys/sglang-ci-dsv3-test-NextN"
 
 # NVFP4 models
