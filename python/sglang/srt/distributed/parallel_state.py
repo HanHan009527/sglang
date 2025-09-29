@@ -260,6 +260,8 @@ class GroupCoordinator:
                 )
                 if group_name != "world-nccl":
                     cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                else:
+                    cpu_group = None
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
