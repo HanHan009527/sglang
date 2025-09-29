@@ -28,10 +28,10 @@ class TestPureDP(CustomTestCase):
             other_args=[
                 "--trust-remote-code",
                 "--tp",
-                "4",
+                "8",
                 "--enable-dp-attention",
                 "--dp",
-                "4",
+                "8",
                 "--dist-backend",
                 "mooncake",
                 "--moe-a2a-backend",
@@ -53,12 +53,6 @@ class TestPureDP(CustomTestCase):
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
-                "--dist-init-addr",
-                "10.5.55.7:5000",
-                "--nnodes",
-                "2",
-                "--node-rank",
-                "0",
             ],
         )
 
