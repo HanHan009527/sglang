@@ -45,7 +45,7 @@ class TestPureDP(CustomTestCase):
                 "--max-running-requests",
                 "512",
                 "--mem-fraction-static",
-                "0.9",
+                "0.95",
                 "--disable-cuda-graph",
                 "--disable-custom-all-reduce",
                 "--enable-eplb",
