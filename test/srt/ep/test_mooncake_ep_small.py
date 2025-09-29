@@ -51,6 +51,8 @@ class TestPureDP(CustomTestCase):
                 "--enable-eplb",
                 "--ep-num-redundant-experts",
                 "32",
+                "--eplb-rebalance-num-iterations",
+                "100",
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
