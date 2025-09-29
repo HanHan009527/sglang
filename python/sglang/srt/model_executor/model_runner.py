@@ -839,7 +839,7 @@ class ModelRunner:
         new_expert_location_metadata: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
-        if self.tp_rank >= self.tp_size // 2:
+        if False:
             # TODO: refactor the weights update when elastic ep
             old_expert_location_metadata = get_global_expert_location_metadata()
             assert old_expert_location_metadata is not None
@@ -2062,27 +2062,27 @@ class ModelRunner:
         split_forward_count: int = 1,
     ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
         if self.forward_pass_id == 0:
-            logger.info("Shrink from full to half @ 0")
-            get_elastic_ep_state().active_ranks[self.tp_size // 2:] = 0
+            logger.info("Shrink @ 0")
+            get_elastic_ep_state().active_ranks[self.tp_size * 3 // 4:] = 0
             gen = self.eplb_manager.rebalance()
             while True:
                 try:
                     next(gen)
                 except StopIteration:
                     break
-            get_elastic_ep_state().active_ranks[self.tp_size // 2:] = 1
+            get_elastic_ep_state().active_ranks[self.tp_size * 3 // 4:] = 1
         self.forward_pass_id += 1
 
         if self.forward_pass_id == 1000:
-            logger.info("Expand from half to full @ 1000")
-            get_elastic_ep_state().last_active_ranks[self.tp_size // 2:] = 0
+            logger.info("Expand @ 1000")
+            get_elastic_ep_state().last_active_ranks[self.tp_size * 3 // 4:] = 0
             gen = self.eplb_manager.rebalance()
             while True:
                 try:
                     next(gen)
                 except StopIteration:
                     break
-            get_elastic_ep_state().last_active_ranks[self.tp_size // 2:] = 1
+            get_elastic_ep_state().last_active_ranks[self.tp_size * 3 // 4:] = 1
 
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
