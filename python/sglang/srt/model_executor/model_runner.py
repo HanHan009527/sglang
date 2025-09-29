@@ -2073,8 +2073,8 @@ class ModelRunner:
             get_elastic_ep_state().active_ranks[self.tp_size * 15 // 16:] = 1
         self.forward_pass_id += 1
 
-        if self.forward_pass_id == 1000:
-            logger.info("Expand @ 1000")
+        if self.forward_pass_id == 1:
+            logger.info("Expand @ 1")
             get_elastic_ep_state().last_active_ranks[self.tp_size * 15 // 16:] = 0
             gen = self.eplb_manager.rebalance()
             while True:
