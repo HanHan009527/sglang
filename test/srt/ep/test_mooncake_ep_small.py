@@ -31,7 +31,7 @@ class TestPureDP(CustomTestCase):
                 "16",
                 "--enable-dp-attention",
                 "--dp",
-                "16",
+                "8",
                 "--dist-backend",
                 "mooncake",
                 "--moe-a2a-backend",
