@@ -45,7 +45,7 @@ class TestPureDP(CustomTestCase):
                 "--max-running-requests",
                 "512",
                 "--mem-fraction-static",
-                "0.8",
+                "0.9",
                 "--disable-custom-all-reduce",
                 "--enable-eplb",
                 "--ep-num-redundant-experts",
