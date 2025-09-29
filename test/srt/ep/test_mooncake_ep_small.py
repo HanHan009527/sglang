@@ -49,7 +49,7 @@ class TestPureDP(CustomTestCase):
                 "--disable-custom-all-reduce",
                 "--enable-eplb",
                 "--ep-num-redundant-experts",
-                "92",
+                "72",
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
