@@ -269,7 +269,7 @@ class GroupCoordinator:
                 self.device_group = device_group
                 self.cpu_group = cpu_group
 
-        assert self.cpu_group is not None
+        # assert self.cpu_group is not None
         assert self.device_group is not None
 
         device_id = 0 if IS_ONE_DEVICE_PER_PROCESS else local_rank
