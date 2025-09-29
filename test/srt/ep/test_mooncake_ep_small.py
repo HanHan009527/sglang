@@ -53,6 +53,10 @@ class TestPureDP(CustomTestCase):
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
+                "--nnodes",
+                "2",
+                "--node-rank",
+                "0",
             ],
         )
 
