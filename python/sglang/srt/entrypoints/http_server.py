@@ -514,7 +514,7 @@ async def generate_request(obj: GenerateReqInput, request: Request):
 
 @app.post("/restart_distributed_environment")
 async def restart_distributed_environment():
-    await _global_state.tokenizer_manager.restart_distributed_environment()
+    _global_state.tokenizer_manager.restart_distributed_environment()
     return {}
 
 
