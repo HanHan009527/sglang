@@ -1223,6 +1223,7 @@ class Scheduler(
                     self.send_to_tokenizer.send_pyobj(output)
                 continue
 
+            logger.info(f"processing {recv_req}")
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if isinstance(output, RpcReqOutput):
