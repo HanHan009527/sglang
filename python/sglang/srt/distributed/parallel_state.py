@@ -1170,6 +1170,7 @@ class GroupCoordinator:
         if self.device_group is not None:
             torch.distributed.destroy_process_group(self.device_group)
             self.device_group = None
+        logger.info(f"Destroyed device_group")
         if self.cpu_group is not None:
             torch.distributed.destroy_process_group(self.cpu_group)
             self.cpu_group = None
