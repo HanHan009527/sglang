@@ -2086,6 +2086,7 @@ class ModelRunner:
         destroy_model_parallel()
         logging.info("Will destroy_distributed_environment")
         destroy_distributed_environment()
+        time.sleep(5)
         self.init_torch_distributed()
 
     def compute_logprobs_only(
