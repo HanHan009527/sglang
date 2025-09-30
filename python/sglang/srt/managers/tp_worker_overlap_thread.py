@@ -30,6 +30,7 @@ from sglang.srt.managers.io_struct import (
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
     LoadLoRAAdapterReqInput,
+    RestartDistEnvReq,
     SendWeightsToRemoteInstanceReqInput,
     UnloadLoRAAdapterReqInput,
     UpdateWeightFromDiskReqInput,
@@ -251,6 +252,9 @@ class TpModelWorkerClient:
             cur_future_map_ct, bs
         )
         return None, future_next_token_ids, False
+
+    def restart_dist_env(self, recv_req: RestartDistEnvReq):
+        self.worker.restart_dist_env(recv_req)
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         success, message = self.worker.update_weights_from_disk(recv_req)

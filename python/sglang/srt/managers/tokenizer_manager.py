@@ -69,6 +69,7 @@ from sglang.srt.managers.io_struct import (
     MultiTokenizerWrapper,
     OpenSessionReqInput,
     OpenSessionReqOutput,
+    RestartDistEnvReq,
     SessionParams,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
@@ -423,6 +424,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     obj, request, created_time
                 ):
                     yield response
+
+    def restart_distributed_environment(self):
+        self.send_to_scheduler.send_pyobj(RestartDistEnvReq())
 
     def _detect_input_format(
         self, texts: Union[str, List[str]], is_cross_encoder: bool

@@ -512,6 +512,12 @@ async def generate_request(obj: GenerateReqInput, request: Request):
             return _create_error_response(e)
 
 
+@app.get("/restart_distributed_environment", methods=["POST"])
+async def restart_distributed_environment():
+    await _global_state.tokenizer_manager.restart_distributed_environment()
+    return {}
+
+
 @app.api_route("/generate_from_file", methods=["POST"])
 async def generate_from_file_request(file: UploadFile, request: Request):
     """Handle a generate request, this is purely to work with input_embeds."""

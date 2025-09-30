@@ -5,6 +5,7 @@ import requests
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST_MLA,
     DEFAULT_MODEL_NAME_FOR_TEST_MLA_NEXTN,
@@ -60,6 +61,17 @@ class TestPureDP(CustomTestCase):
         print(metrics)
 
         self.assertGreater(metrics["accuracy"], 0.60)
+
+    def test_bs_1_speed(self):
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        requests.post(
+            f"http://{args.host}:{args.port}/restart_distributed_environment"
+        )
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
 
 
 class TestHybridDPTP(CustomTestCase):

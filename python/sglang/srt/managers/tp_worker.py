@@ -34,6 +34,7 @@ from sglang.srt.managers.io_struct import (
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
     LoadLoRAAdapterReqInput,
+    RestartDistEnvReq,
     SendWeightsToRemoteInstanceReqInput,
     UnloadLoRAAdapterReqInput,
     UpdateWeightFromDiskReqInput,
@@ -284,6 +285,9 @@ class TpModelWorker:
         logits_output, _ = self.model_runner.forward(forward_batch)
         embeddings = logits_output.embeddings
         return embeddings
+
+    def restart_dist_env(self, recv_req: RestartDistEnvReq):
+        self.model_runner.restart_dist_env()
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         success, message = self.model_runner.update_weights_from_disk(

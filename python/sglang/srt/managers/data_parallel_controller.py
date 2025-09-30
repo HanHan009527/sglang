@@ -33,6 +33,7 @@ import zmq
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.io_struct import (
     BlockReqInput,
+    RestartDistEnvReq,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     WatchLoadUpdateReq,
@@ -188,6 +189,7 @@ class DataParallelController:
                 (TokenizedGenerateReqInput, self.dispatching),
                 (TokenizedEmbeddingReqInput, self.dispatching),
                 (BlockReqInput, self.send_to_all_workers),
+                (RestartDistEnvReq, self.send_to_all_workers),
                 (WatchLoadUpdateReq, self.handle_load_update_req),
             ]
         )

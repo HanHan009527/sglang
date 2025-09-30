@@ -98,6 +98,7 @@ from sglang.srt.managers.io_struct import (
     OpenSessionReqOutput,
     ProfileReq,
     ReleaseMemoryOccupationReqInput,
+    RestartDistEnvReq,
     ResumeMemoryOccupationReqInput,
     RpcReqInput,
     RpcReqOutput,
@@ -609,6 +610,7 @@ class Scheduler(
                 (FreezeGCReq, self.handle_freeze_gc),
                 (GetInternalStateReq, self.get_internal_state),
                 (SetInternalStateReq, self.set_internal_state),
+                (RestartDistEnvReq, self.restart_dist_env),
                 (RpcReqInput, self.handle_rpc_request),
                 (ExpertDistributionReq, self.expert_distribution_handle),
                 (LoadLoRAAdapterReqInput, self.load_lora_adapter),
@@ -1148,6 +1150,7 @@ class Scheduler(
                             TokenizedEmbeddingReqInput,
                             BatchTokenizedGenerateReqInput,
                             BatchTokenizedEmbeddingReqInput,
+                            RestartDistEnvReq,
                         ),
                     )
                 ]
@@ -1161,6 +1164,7 @@ class Scheduler(
                             TokenizedEmbeddingReqInput,
                             BatchTokenizedGenerateReqInput,
                             BatchTokenizedEmbeddingReqInput,
+                            RestartDistEnvReq,
                         ),
                     )
                 ]
@@ -2534,6 +2538,9 @@ class Scheduler(
             server_args=global_server_args_dict,
         )
 
+    def restart_dist_env(self, recv_req: RestartDistEnvReq):
+        self.tp_worker.restart_dist_env(recv_req)
+
     def handle_rpc_request(self, recv_req: RpcReqInput):
         # Handle RPC requests
         logger.info(
@@ -2779,6 +2786,7 @@ def is_work_request(recv_req):
             TokenizedEmbeddingReqInput,
             BatchTokenizedGenerateReqInput,
             BatchTokenizedEmbeddingReqInput,
+            RestartDistEnvReq,
         ),
     )
 

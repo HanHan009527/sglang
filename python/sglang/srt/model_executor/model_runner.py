@@ -38,6 +38,8 @@ from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.connector import ConnectorType
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 from sglang.srt.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -2078,6 +2080,11 @@ class ModelRunner:
             ),
         )
         return next_token_ids
+
+    def restart_dist_env(self):
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        self.init_torch_distributed()
 
     def compute_logprobs_only(
         self,
