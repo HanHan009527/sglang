@@ -2082,6 +2082,7 @@ class ModelRunner:
         return next_token_ids
 
     def restart_dist_env(self):
+        logging.info("Restarting dist env")
         destroy_model_parallel()
         destroy_distributed_environment()
         self.init_torch_distributed()
