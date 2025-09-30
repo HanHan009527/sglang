@@ -1646,14 +1646,20 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    logging.info("Destroyed _TP")
+    global _MOE_TP
+    if _MOE_TP:
+        _MOE_TP.destroy()
+    _MOE_TP = None
+
+    global _MOE_EP
+    if _MOE_EP:
+        _MOE_EP.destroy()
+    _MOE_EP = None
 
     global _PP
     if _PP:
         _PP.destroy()
     _PP = None
-
-    logging.info("Destroyed _PP")
 
 
 def destroy_distributed_environment():
