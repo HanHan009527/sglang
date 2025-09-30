@@ -40,6 +40,7 @@ class TestPureDP(CustomTestCase):
                 "512",
                 "--mem-fraction-static",
                 "0.5",
+                "--disable-cuda-graph",
             ],
         )
 
