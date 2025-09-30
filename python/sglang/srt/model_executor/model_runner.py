@@ -2084,6 +2084,7 @@ class ModelRunner:
     def restart_dist_env(self):
         logging.info("Restarting dist env")
         destroy_model_parallel()
+        logging.info("Will destroy_distributed_environment")
         destroy_distributed_environment()
         self.init_torch_distributed()
 
