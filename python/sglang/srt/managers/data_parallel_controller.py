@@ -173,6 +173,7 @@ class DataParallelController:
 
     def send_to_all_workers(self, obj):
         for worker in self.workers:
+            logger.info(f"Sending {obj} to {worker}")
             worker.send_pyobj(obj)
 
     def send_control_message(self, obj):
