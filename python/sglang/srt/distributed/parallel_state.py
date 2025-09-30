@@ -1360,6 +1360,8 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        torch.distributed.barrier()
+        logger.info("after init_process_group")
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
