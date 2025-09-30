@@ -1350,6 +1350,7 @@ def init_distributed_environment(
             assert isinstance(timeout, (int)), "timeout must be a number"
             assert timeout > 0, "timeout must be positive"
             timeout = timedelta(seconds=timeout)
+        logger.info("will init_process_group")
 
         # this backend is used for WORLD
         torch.distributed.init_process_group(
@@ -1370,6 +1371,7 @@ def init_distributed_environment(
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         else:
             local_rank = rank
+    logger.info("Will init _WORLD")
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
