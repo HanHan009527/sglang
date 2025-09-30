@@ -1460,6 +1460,8 @@ def initialize_model_parallel(
         _TP.pynccl_comm.disabled = False
         _PDMUX_PREFILL_TP_GROUP.pynccl_comm.disabled = False
 
+    logger.info("after _TP")
+
     moe_ep_size = expert_model_parallel_size
     moe_tp_size = tensor_model_parallel_size // moe_ep_size
 
@@ -1484,6 +1486,8 @@ def initialize_model_parallel(
             group_name="moe_ep",
         )
 
+    logger.info("after _MOE_EP")
+
     global _MOE_TP
     assert _MOE_TP is None, "expert model parallel group is already initialized"
 
@@ -1504,6 +1508,8 @@ def initialize_model_parallel(
             backend,
             group_name="moe_tp",
         )
+
+    logger.info("after _MOE_TP")
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
