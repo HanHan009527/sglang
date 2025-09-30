@@ -669,6 +669,7 @@ class ModelRunner:
                     )
 
             # Only initialize the distributed environment on the target model worker.
+            logger.info("init_distributed_environment")
             init_distributed_environment(
                 backend=backend,
                 world_size=self.tp_size * self.pp_size,
@@ -677,12 +678,14 @@ class ModelRunner:
                 distributed_init_method=dist_init_method,
                 timeout=self.server_args.dist_timeout,
             )
+            logger.info("initialize_model_parallel")
             initialize_model_parallel(
                 tensor_model_parallel_size=self.tp_size,
                 pipeline_model_parallel_size=self.pp_size,
                 expert_model_parallel_size=self.moe_ep_size,
                 duplicate_tp_group=self.server_args.enable_pdmux,
             )
+            logger.info("initialize_dp_attention")
             initialize_dp_attention(
                 server_args=self.server_args,
                 model_config=self.model_config,
