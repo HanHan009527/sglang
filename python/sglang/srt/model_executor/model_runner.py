@@ -278,6 +278,7 @@ class ModelRunner:
 
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
+        self.restart_dist_env()
 
         # CPU offload
         set_offloader(create_offloader_from_server_args(server_args, dp_rank=dp_rank))
