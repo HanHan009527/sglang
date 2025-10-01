@@ -1341,6 +1341,7 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
+    logger.info(f"initialized: {torch.distributed.is_initialized()}")
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
