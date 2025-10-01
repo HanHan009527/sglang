@@ -68,6 +68,7 @@ from sglang.srt.layers.attention.attention_registry import (
 )
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 from sglang.srt.layers.dp_attention import (
+    destroy_dp_attention,
     get_attention_tp_group,
     get_attention_tp_size,
     initialize_dp_attention,
@@ -2084,6 +2085,7 @@ class ModelRunner:
 
     def restart_dist_env(self):
         logging.info("Restarting dist env")
+        destroy_dp_attention()
         destroy_model_parallel()
         logging.info("Will destroy_distributed_environment")
         destroy_distributed_environment()
