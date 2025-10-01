@@ -1360,6 +1360,7 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        logger.info("before barrier")
         torch.distributed.barrier()
 
     # set the local rank
