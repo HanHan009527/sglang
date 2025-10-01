@@ -681,6 +681,7 @@ class ModelRunner:
                 timeout=self.server_args.dist_timeout,
             )
             logger.info("initialize_model_parallel")
+            time.sleep(2)
             initialize_model_parallel(
                 tensor_model_parallel_size=self.tp_size,
                 pipeline_model_parallel_size=self.pp_size,
