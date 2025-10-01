@@ -26,6 +26,7 @@ import gc
 import logging
 import os
 import pickle
+import time
 import weakref
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
@@ -1361,6 +1362,7 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        time.sleep(3)
         logger.info("before barrier")
         torch.distributed.barrier()
 
