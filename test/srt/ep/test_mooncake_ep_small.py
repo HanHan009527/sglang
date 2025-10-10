@@ -36,7 +36,7 @@ class TestPureDP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_1,mlx5_2,mlx5_3,mlx5_4",
                 "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
