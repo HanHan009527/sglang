@@ -2034,8 +2034,7 @@ class ModelRunner:
             if get_elastic_ep_state() is not None and get_elastic_ep_state().is_active_rank_change():
                 get_elastic_ep_state().snapshot_active_to_last()
                 get_elastic_ep_state().sync_active_to_cpu()
-
-                logging.info(f"recompute _forward_raw")
+                logging.info(f"Elastic EP state: {get_elastic_ep_state()}")
                 gen = self.eplb_manager.rebalance()
                 while True:
                     try:
