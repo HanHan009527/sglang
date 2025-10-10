@@ -40,7 +40,8 @@ def init_elastic_ep_state(server_args: ServerArgs):
     global _elastic_ep_state
     assert _elastic_ep_state is None
     if server_args.elastic_ep_backend is not None:
-        return _build_state(ep_size=None, device=None)
+        _elastic_ep_state = _build_state(ep_size=None, device=None)
+    return _elastic_ep_state
 
 
 def _select_device() -> torch.device:
