@@ -18,7 +18,7 @@ class ElasticEPState:
     def is_active_rank_change(self) -> bool:
         if self.active_ranks is None or self.last_active_ranks is None:
             return False
-        return torch.equal(self.active_ranks, self.last_active_ranks)
+        return not torch.equal(self.active_ranks, self.last_active_ranks)
 
     def sync_active_to_cpu(self):
         if self.active_ranks is not None:
