@@ -115,7 +115,7 @@ class TestHybridDPTP(CustomTestCase):
             other_args=[
                 "--trust-remote-code",
                 "--tp",
-                "4",
+                "8",
                 "--enable-dp-attention",
                 "--dp",
                 "2",
