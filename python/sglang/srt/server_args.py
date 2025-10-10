@@ -1039,7 +1039,7 @@ class ServerArgs:
     def _handle_elastic_ep(self):
         if self.elastic_ep_backend is not None:
             if self.enable_eplb:
-                logger.info(
+                logger.warning(
                     "eplb algorithm is {self.eplb_algorithm}."
                 )
                 if self.eplb_algorithm == "auto" :
