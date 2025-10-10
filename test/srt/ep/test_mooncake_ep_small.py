@@ -131,6 +131,8 @@ class TestHybridDPTP(CustomTestCase):
                 "512",
                 "--cuda-graph-max-bs",
                 "128",
+                "--mem-fraction-static",
+                "0.5",
                 "--max-running-requests",
                 "256",
                 "--disable-custom-all-reduce",
