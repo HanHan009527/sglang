@@ -876,7 +876,7 @@ class ModelRunner:
         new_expert_location_metadata: ExpertLocationMetadata,
         update_layer_ids: List[int],
     ):
-        if get_elastic_ep_state().using_elastic_ep:
+        if get_elastic_ep_state() is not None:
             # TODO: refactor the weights update when elastic ep
             old_expert_location_metadata = get_global_expert_location_metadata()
             assert old_expert_location_metadata is not None
@@ -2030,14 +2030,11 @@ class ModelRunner:
                 reinit_attn_backend,
                 split_forward_count,
             )
+            
+            if get_elastic_ep_state() is not None and get_elastic_ep_state().is_active_rank_change():
+                get_elastic_ep_state().snapshot_active_to_last()
+                get_elastic_ep_state().sync_active_to_cpu()
 
-            if not torch.equal(
-                get_elastic_ep_state().active_ranks,
-                get_elastic_ep_state().last_active_ranks,
-            ):
-                get_elastic_ep_state().last_active_ranks = (
-                    get_elastic_ep_state().active_ranks.clone()
-                )
                 logging.info(f"recompute _forward_raw")
                 gen = self.eplb_manager.rebalance()
                 while True:

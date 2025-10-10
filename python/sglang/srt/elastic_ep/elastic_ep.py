@@ -15,7 +15,7 @@ class ElasticEPState:
     last_active_ranks: Optional[torch.Tensor]
     active_ranks_cpu: Optional[torch.Tensor]
 
-    def is_active_equal_last(self) -> bool:
+    def is_active_rank_change(self) -> bool:
         if self.active_ranks is None or self.last_active_ranks is None:
             return False
         return torch.equal(self.active_ranks, self.last_active_ranks)
