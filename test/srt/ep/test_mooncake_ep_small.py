@@ -11,7 +11,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-DEFAULT_MODEL_NAME_FOR_TEST_MLA=/data/models/sglang-ci-dsv3-test
+DEFAULT_MODEL_NAME_FOR_TEST_MLA="/data/models/sglang-ci-dsv3-test"
 ib_devices = "mlx5_1,mlx5_2,mlx5_3,mlx5_4"
 class TestPureDP(CustomTestCase):
     @classmethod
