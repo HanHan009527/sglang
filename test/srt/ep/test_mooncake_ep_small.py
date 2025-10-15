@@ -11,7 +11,8 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-
+DEFAULT_MODEL_NAME_FOR_TEST_MLA=/data/models/sglang-ci-dsv3-test
+ib_devices = "mlx5_1,mlx5_2,mlx5_3,mlx5_4"
 class TestPureDP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
@@ -31,7 +32,7 @@ class TestPureDP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                ib_devices,
                 "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
@@ -86,7 +87,7 @@ class TestHybridDPTP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                ib_devices,
                 "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
@@ -136,8 +137,7 @@ class TestTP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
-                "--moe-a2a-backend",
+                ib_devices,                "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
                 "low_latency",
@@ -192,8 +192,7 @@ class TestNoGatherdBuffer(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
-                "--moe-a2a-backend",
+ib_devices,                "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
                 "low_latency",
@@ -247,8 +246,7 @@ class TestTBO(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
-                "--moe-a2a-backend",
+ib_devices,                "--moe-a2a-backend",
                 "deepep",
                 "--deepep-mode",
                 "low_latency",
