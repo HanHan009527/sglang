@@ -452,8 +452,8 @@ class DataParallelController:
                     )
                     break
                 self.round_robin_counter = (self.round_robin_counter + 1) % len(
-                        self.workers
-                    )
+                    self.workers
+                )
         else:
             id = req.bootstrap_room % len(self.workers)
             while True:

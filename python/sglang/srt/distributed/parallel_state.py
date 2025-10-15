@@ -1317,6 +1317,7 @@ _TP_ACTIVE_RANKS_CPU: Optional[torch.Tensor] = None
 def get_tp_active_ranks():
     return _TP_ACTIVE_RANKS
 
+
 def get_tp_active_ranks_cpu():
     return _TP_ACTIVE_RANKS_CPU
 
