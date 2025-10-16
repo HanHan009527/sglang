@@ -1,13 +1,10 @@
 import os
 import unittest
 from types import SimpleNamespace
-import time
-
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.test_disaggregation_utils import get_rdma_devices_args
-from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST_MLA,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
@@ -39,7 +36,7 @@ class TestTP(CustomTestCase):
                 "--mooncake-ib-device",
                 ib_devices,
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
                 "--chunked-prefill-size",
@@ -57,6 +54,7 @@ class TestTP(CustomTestCase):
                 "--enable-dp-lm-head",
                 "--moe-dense-tp-size",
                 "1",
+                *cls.extra_args,
             ],
         )
 
@@ -79,29 +77,6 @@ class TestTP(CustomTestCase):
 
         self.assertGreater(metrics["accuracy"], 0.60)
 
-    def test_bs_1_speed(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-
-    def test_bs_1_fault_tolerance(self):
-        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-        acc_length, speed = send_one_prompt(args)
-        print(f"{speed=:.2f}")
-
 
 class TestPureDP(TestTP):
     extra_args = [
@@ -112,6 +87,10 @@ class TestPureDP(TestTP):
         "4",
     ]
 
+    def test_gsm8k(self):
+        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
+        super().test_gsm8k()
+
 
 class TestHybridDPTP(TestTP):
     extra_args = [
@@ -121,6 +100,10 @@ class TestHybridDPTP(TestTP):
         "--dp",
         "2",
     ]
+
+    def test_gsm8k(self):
+        os.system("pkill -f sglang::scheduler_DP0_TP0_EP0")
+        super().test_gsm8k()
 
 
 class TestNoGatherdBuffer(TestTP):
