@@ -23,6 +23,7 @@ from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
+    ExtendWorldReqInput,
     GetWeightsByNameReqInput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
@@ -160,13 +161,15 @@ class TpModelWorker:
         ), "Memory pool size is too small"
 
         # Sync random seed across TP workers
-        self.random_seed = broadcast_pyobj(
-            [server_args.random_seed],
-            self.tp_size * self.pp_rank + tp_rank,
-            self.world_group.cpu_group,
-            src=self.world_group.ranks[0],
-        )[0]
-        set_random_seed(self.random_seed)
+        # self.random_seed = broadcast_pyobj(
+        #     [server_args.random_seed],
+        #     self.tp_size * self.pp_rank + tp_rank,
+        #     self.world_group.cpu_group,
+        #     src=self.world_group.ranks[0],
+        # )[0]
+        # set_random_seed(self.random_seed)
+        self.random_seed = server_args.random_seed
+        set_random_seed(server_args.random_seed)
 
         self.enable_overlap = not server_args.disable_overlap_schedule
         self.hicache_layer_transfer_counter = None
@@ -319,6 +322,9 @@ class TpModelWorker:
         logits_output, _ = self.model_runner.forward(forward_batch)
         embeddings = logits_output.embeddings
         return embeddings
+
+    def extend_world(self, recv_req: ExtendWorldReqInput):
+        self.model_runner.extend_world(recv_req.new_size)
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         success, message = self.model_runner.update_weights_from_disk(

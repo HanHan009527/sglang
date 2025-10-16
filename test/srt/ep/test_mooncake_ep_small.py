@@ -1,8 +1,13 @@
+import os
+import time
 import unittest
 from types import SimpleNamespace
 
+import requests
+
 from sglang.srt.utils import kill_process_tree
 from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
+from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST_MLA,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
@@ -15,6 +20,7 @@ from sglang.test.test_utils import (
 class TestPureDP(CustomTestCase):
     @classmethod
     def setUpClass(cls):
+        os.environ["SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK"] = "1"
         cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
@@ -31,11 +37,14 @@ class TestPureDP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11",
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
+                "--moe-dense-tp-size",
+                "1",
+                "--enable-dp-lm-head",
                 "--chunked-prefill-size",
                 "512",
                 "--cuda-graph-max-bs",
@@ -66,6 +75,18 @@ class TestPureDP(CustomTestCase):
 
         self.assertGreater(metrics["accuracy"], 0.60)
 
+    def test_bs_1_speed(self):
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+        requests.post(
+            f"http://{args.host}:{args.port}/extend_world", json={"new_size": 8}
+        )
+        time.sleep(30)
+        args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
+        acc_length, speed = send_one_prompt(args)
+        print(f"{speed=:.2f}")
+
 
 class TestHybridDPTP(CustomTestCase):
     @classmethod
@@ -86,9 +107,9 @@ class TestHybridDPTP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11",
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
                 "--chunked-prefill-size",
@@ -136,9 +157,9 @@ class TestTP(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11",
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
                 "--chunked-prefill-size",
@@ -192,9 +213,9 @@ class TestNoGatherdBuffer(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11",
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
                 "--chunked-prefill-size",
@@ -247,9 +268,9 @@ class TestTBO(CustomTestCase):
                 "--elastic-ep-backend",
                 "mooncake",
                 "--mooncake-ib-device",
-                "mlx5_roce0,mlx5_roce1,mlx5_roce2,mlx5_roce3,mlx5_roce4,mlx5_roce5,mlx5_roce6,mlx5_roce7",
+                "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11",
                 "--moe-a2a-backend",
-                "deepep",
+                "mooncake",
                 "--deepep-mode",
                 "low_latency",
                 "--chunked-prefill-size",

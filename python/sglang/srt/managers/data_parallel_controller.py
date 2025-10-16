@@ -30,6 +30,7 @@ import zmq
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.io_struct import (
     BlockReqInput,
+    ExtendWorldReqInput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     WatchLoadUpdateReq,
@@ -141,7 +142,8 @@ class DataParallelController:
 
         # Launch data parallel workers
         self.scheduler_procs = []
-        self.workers: List[zmq.Socket] = [None] * server_args.dp_size
+        self.workers: List[zmq.Socket] = []
+        self.worker_ports = []
 
         if server_args.enable_dp_attention:
             self.launch_dp_attention_schedulers(server_args, port_args)
@@ -163,6 +165,23 @@ class DataParallelController:
         for worker in self.workers[:: self.control_message_step]:
             worker.send_pyobj(obj)
 
+    def handle_extend_world_req(self, obj: ExtendWorldReqInput):
+        self.send_to_all_workers(obj)
+        assert self.server_args.enable_dp_attention
+        assert self.server_args.pp_size == 1
+        old_tp_size = self.server_args.tp_size
+        old_dp_size = self.server_args.dp_size
+        tp_attn_size = self.server_args.tp_size // self.server_args.dp_size
+        assert obj.new_size % self.server_args.pp_size == 0
+        self.server_args.tp_size = obj.new_size // self.server_args.pp_size
+        self.server_args.ep_size = self.server_args.tp_size
+        assert self.server_args.tp_size % tp_attn_size == 0
+        self.server_args.dp_size = self.server_args.tp_size // tp_attn_size
+        logger.info(f"New dp_size = {self.server_args.dp_size}")
+        self.server_args.ep_num_redundant_experts = 72
+
+        self.launch_dp_attention_schedulers(self.server_args, self.port_args, skip_tp_rank=old_tp_size)
+
     def handle_load_update_req(self, obj):
         self.dp_budget.update_budget(obj)
 
@@ -172,6 +191,7 @@ class DataParallelController:
                 (TokenizedGenerateReqInput, self.dispatching),
                 (TokenizedEmbeddingReqInput, self.dispatching),
                 (BlockReqInput, self.send_to_all_workers),
+                (ExtendWorldReqInput, self.handle_extend_world_req),
                 (WatchLoadUpdateReq, self.handle_load_update_req),
             ]
         )
@@ -323,22 +343,21 @@ class DataParallelController:
             req_socket.close()
 
     def launch_dp_attention_schedulers(
-        self, server_args: ServerArgs, port_args: PortArgs
+        self, server_args: ServerArgs, port_args: PortArgs, skip_tp_rank: int = 0
     ):
         # Pre-allocate worker ports on node 0 to avoid conflicts
-        worker_ports = []
         if server_args.node_rank == 0:
-            for dp_rank in range(server_args.dp_size):
+            for dp_rank in range(skip_tp_rank, server_args.dp_size):
                 port_and_socket = get_zmq_socket(self.context, zmq.PUSH)
-                worker_ports.append(port_and_socket[0])
-                self.workers[dp_rank] = port_and_socket[1]
+                self.worker_ports.append(port_and_socket[0])
+                self.workers.append(port_and_socket[1])
                 logger.debug(f"Assigned port {port_and_socket[0]} to worker {dp_rank}")
 
         broadcasted_ports = self._broadcast_worker_ports(
-            server_args, worker_ports if worker_ports else None
+            server_args, self.worker_ports if self.worker_ports else None
         )
         self.launch_tensor_parallel_group(
-            server_args, port_args, 0, None, broadcasted_ports
+            server_args, port_args, 0, None, broadcasted_ports, skip_tp_rank
         )
 
     def launch_tensor_parallel_group(
@@ -348,6 +367,7 @@ class DataParallelController:
         base_gpu_id: int,
         dp_rank: Optional[int],
         worker_ports: Optional[List[int]] = None,
+        skip_tp_rank: int = 0,
     ):
         if not server_args.enable_dp_attention:
             logger.info(f"Launch DP{dp_rank} starting at GPU #{base_gpu_id}.")
@@ -373,6 +393,8 @@ class DataParallelController:
 
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
+                if tp_rank < skip_tp_rank:
+                    continue
                 rank_port_args = port_args
 
                 if server_args.enable_dp_attention:

@@ -41,6 +41,8 @@ from sglang.srt.configs.model_config import (
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 from sglang.srt.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
     get_pp_group,
     get_tp_group,
     get_world_group,
@@ -70,6 +72,7 @@ from sglang.srt.layers.attention.attention_registry import (
 )
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 from sglang.srt.layers.dp_attention import (
+    destroy_dp_attention,
     get_attention_tp_group,
     get_attention_tp_size,
     initialize_dp_attention,
@@ -160,6 +163,8 @@ from sglang.srt.weight_sync.tensor_bucket import (
     FlattenedTensorBucket,
     FlattenedTensorMetadata,
 )
+from sglang.srt.layers.moe.token_dispatcher.mooncake import EPBuffer
+from sglang.srt.utils import broadcast_pyobj
 
 MLA_ATTENTION_BACKENDS = [
     "aiter",
@@ -672,7 +677,7 @@ class ModelRunner:
                         f"You can fix this by using arguments such as `--tp-size 8 --ep-size 8`"
                     )
 
-    def init_torch_distributed(self):
+    def init_torch_distributed(self, is_extend = False):
         logger.info("Init torch distributed begin.")
 
         try:
@@ -769,7 +774,7 @@ class ModelRunner:
 
         # Check memory for tensor parallelism
         local_gpu_memory = get_available_gpu_memory(self.device, self.gpu_id)
-        if self.tp_size > 1 and not self.is_draft_worker:
+        if self.tp_size > 1 and not self.is_draft_worker and not is_extend:
             if min_per_gpu_memory < local_gpu_memory * 0.9:
                 if get_bool_env_var("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK"):
                     logger.warning(
@@ -1326,7 +1331,7 @@ class ModelRunner:
         available_gpu_memory = get_available_gpu_memory(
             self.device,
             self.gpu_id,
-            distributed=get_world_group().world_size > 1,
+            distributed=False,
             cpu_group=get_world_group().cpu_group,
         )
         if self.is_draft_worker:
@@ -2268,6 +2273,45 @@ class ModelRunner:
             ),
         )
         return next_token_ids
+
+    def extend_world(self, new_size: int):
+        logger.info(f"Extending world to {new_size}")
+        assert self.server_args.elastic_ep_backend == "mooncake"
+        destroy_dp_attention()
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+        assert self.server_args.enable_dp_attention
+        assert self.server_args.pp_size == 1
+        old_tp_size = self.server_args.tp_size
+        old_dp_size = self.server_args.dp_size
+        tp_attn_size = self.server_args.tp_size // self.server_args.dp_size
+        assert new_size % self.server_args.pp_size == 0
+        self.tp_size = self.server_args.tp_size = new_size // self.server_args.pp_size
+        self.moe_ep_size = self.server_args.ep_size = self.server_args.tp_size
+        assert self.server_args.tp_size % tp_attn_size == 0
+        self.dp_size = self.server_args.dp_size = self.server_args.tp_size // tp_attn_size
+
+        time.sleep(1)
+        self.init_torch_distributed(is_extend=True)
+
+        # To sync with the new ranks' load_weight barrier
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        EPBuffer.clear_ep_buffer()
+        self.init_device_graphs()
+        self.forward_pass_id = 0
+        self.tp_group = get_tp_group()
+
+        # Broadcast ctrl reqs to make the new schedulers happy
+        control_reqs = []
+        broadcast_pyobj(
+            control_reqs,
+            self.tp_group.rank,
+            self.tp_group.cpu_group,
+            src=self.tp_group.ranks[0],
+        )
+        logger.info("extend world done")
 
     def compute_logprobs_only(
         self,

@@ -14,6 +14,7 @@ from sglang.srt.layers.moe.token_dispatcher.base import (
 )
 from sglang.srt.layers.moe.utils import DeepEPMode
 from sglang.srt.utils import get_int_env_var
+from sglang.srt.distributed import parallel_state
 
 try:
     from mooncake.mooncake_ep_buffer import Buffer
@@ -89,6 +90,7 @@ class EPBuffer:
         if cls._buffer is not None:
             return cls._buffer
 
+        logger.info(f"get_ep_buffer {num_experts} {group.size()}")
         cls._hidden_size = hidden_size
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
@@ -110,6 +112,10 @@ class EPBuffer:
 
         cls._buffer = Buffer(group, num_ep_buffer_bytes)
         return cls._buffer
+
+    @classmethod
+    def clear_ep_buffer(cls):
+        cls._buffer = None
 
 
 class _MooncakeEPDispatcherImpl:
@@ -155,7 +161,7 @@ class _MooncakeEPDispatcherImpl:
         global _ACTIVE_RANKS
         if _ACTIVE_RANKS is None:
             _ACTIVE_RANKS = torch.ones(
-                (self.num_experts,), dtype=torch.int32, device="cuda"
+                (18 * parallel_state.get_tp_group().world_size,), dtype=torch.int32, device="cuda"
             )
         self.active_ranks = _ACTIVE_RANKS
 
@@ -171,8 +177,8 @@ class _MooncakeEPDispatcherImpl:
         topk_idx = topk_idx.to(torch.int64)
         expected_m = (
             hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1]
-            + self.num_experts
-        ) // self.num_experts
+            + (18 * parallel_state.get_tp_group().world_size)
+        ) // (18 * parallel_state.get_tp_group().world_size)
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_idx,
@@ -225,8 +231,8 @@ class _MooncakeEPDispatcherImpl:
                 topk_idx,
                 self.active_ranks,
                 self.num_max_dispatch_tokens_per_rank,
-                self.num_experts,
-                -1 if self.first_execution else self.timeout_us,
+                18 * parallel_state.get_tp_group().world_size,
+                -1,
                 use_fp8=use_fp8,
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
@@ -274,12 +280,12 @@ class _MooncakeEPDispatcherImpl:
 
     def _get_buffer(self):
         return EPBuffer.get_ep_buffer(
-            self.group,
+            parallel_state.get_tp_group().device_group,
             self.hidden_size,
             self.params_bytes,
             self.deepep_mode,
             self.num_max_dispatch_tokens_per_rank,
-            self.num_experts,
+            18 * parallel_state.get_tp_group().world_size,
         )
 
 
