@@ -13,7 +13,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-ib_devices = get_rdma_devices_args()
+ib_devices = "mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11"
 
 
 class TestTP(CustomTestCase):
