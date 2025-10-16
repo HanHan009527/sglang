@@ -258,13 +258,16 @@ class GroupCoordinator:
         self.local_size = get_int_env_var("LOCAL_SIZE", 0)
 
         for ranks in group_ranks:
+            from mooncake.ep import MooncakeBackendOptions
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
+                ranks, backend=torch_distributed_backend, pg_options=MooncakeBackendOptions(active_ranks) if active_ranks is not None else None
             )
             # a cpu_group to allow direct coordination between processes through
             # the CPU. The backend is chosen based on `torch_distributed_backend`
             if "mooncake" in torch_distributed_backend:
-                cpu_group = torch.distributed.new_group(ranks, backend="mooncake-cpu")
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="mooncake-cpu", pg_options=MooncakeBackendOptions(active_ranks_cpu) if active_ranks_cpu is not None else None
+                )
             else:
                 cpu_group = torch.distributed.new_group(
                     ranks, backend="gloo", timeout=gloo_timeout

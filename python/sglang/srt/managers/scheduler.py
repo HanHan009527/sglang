@@ -2274,6 +2274,7 @@ class Scheduler(
             batch_result.extend_logprob_start_len_per_req = (
                 extend_logprob_start_len_per_req
             )
+            self.send_to_tokenizer.send_pyobj(Ranks(status=get_tp_active_ranks_cpu().tolist()))
             return batch_result
         else:  # embedding or reward model
             model_worker_batch = batch.get_model_worker_batch()
