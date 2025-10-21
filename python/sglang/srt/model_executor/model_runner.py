@@ -862,70 +862,9 @@ class ModelRunner:
                 nnodes=self.server_args.nnodes,
                 rank=self.tp_rank,
             )
-    def update_weights_from_disk(
-        self,
-        model_path: str,
-        load_format: str,
-        weight_name_filter: Optional[Callable[[str], bool]] = None,
-    ) -> tuple[bool, str]:
-        #Update engine weights in-place from the disk.
-        logger.info(
-            f"Update engine weights online from disk begin. "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-        )
-
-        target_device = torch.device(self.device)
-        self.model_config.model_path = model_path
-        load_config = LoadConfig(load_format=load_format)
-
-        # Only support DefaultModelLoader for now
-        loader = get_model_loader(load_config)
-        if not isinstance(loader, DefaultModelLoader):
-            message = f"Failed to get model loader: {loader}."
-            return False, message
-
-        def get_weight_iter(config):
-            iter = loader._get_weights_iterator(
-                DefaultModelLoader.Source.init_new(config, self.model)
-            )
-            if weight_name_filter is not None:
-                iter = (
-                    (name, weight) for name, weight in iter if weight_name_filter(name)
-                )
-
-            return iter
-
-        def model_load_weights(model, iter):
-            DefaultModelLoader.load_weights_and_postprocess(model, iter, target_device)
-            return model
-
-        with set_default_torch_dtype(self.model_config.dtype):
-            try:
-                iter = get_weight_iter(self.model_config)
-            except Exception as e:
-                message = f"Failed to get weights iterator: {e}."
-                return False, message
-            try:
-                model = model_load_weights(self.model, iter)
-            except Exception as e:
-                message = (
-                    f"Failed to update weights: {e}.\nRolling back to original weights."
-                )
-                del iter
-                gc.collect()
-                iter = get_weight_iter(self.model_config)
-                self.model = model_load_weights(self.model, iter)
-                return False, message
-
-        self.model = model
-        self.server_args.model_path = model_path
-        self.server_args.load_format = load_format
-        self.load_config = load_config
-
-        logger.info("Update weights end.")
-        return True, "Succeeded to update model weights."
-'''        
-    def pre_cache_weights(
+            
+        
+'''    def pre_cache_weights(
         self,
         model_path: str,
         model_config = None,
