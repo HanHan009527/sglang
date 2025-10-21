@@ -862,8 +862,6 @@ class ModelRunner:
                 nnodes=self.server_args.nnodes,
                 rank=self.tp_rank,
             )
-
-            class ModelRunner: 
         
     def pre_cache_weights(
         self,
