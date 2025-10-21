@@ -849,7 +849,7 @@ class ModelRunner:
                 new_expert_location_metadata,
                 update_layer_ids=update_layer_ids,
             )
-            self.update_weights_from_disk(
+            self.update_weights_from_dram(
                 self.server_args.model_path,
                 self.server_args.load_format,
                 lambda name: "mlp.experts" in name and "mlp.shared_experts" not in name,
@@ -862,46 +862,6 @@ class ModelRunner:
                 nnodes=self.server_args.nnodes,
                 rank=self.tp_rank,
             )
-            
-        
-    '''def pre_cache_weights(
-        self,
-        model_path: str,
-        model_config = None,
-        load_format: str = "auto"
-    ) -> tuple[bool, str]:
-        logger.info(f"Pre-caching weights for {model_path} in DRAM")
-        
-        if model_config is None:
-            model_config = self.model_config
-        
-        if model_path in self.weight_cache:
-            logger.info(f"Weights for {model_path} already cached")
-            return True, "Weights already cached"
-        
-        load_config = LoadConfig(load_format=load_format)
-        loader = get_model_loader(load_config)
-        
-        if not isinstance(loader, DefaultModelLoader):
-            message = f"Unsupported loader type: {type(loader)}"
-            return False, message
-        
-        try:
-            source = DefaultModelLoader.Source.init_new(model_config, None)
-            weight_iter = loader._get_weights_iterator(source)
-            
-            cached_weights = []
-            for name, weight in weight_iter:
-                cached_weights.append((name, weight.cpu()))
-            
-            self.weight_cache[model_path] = cached_weights
-            
-            logger.info(f"Cached {len(cached_weights)} weights for {model_path}")
-            return True, f"Successfully cached {len(cached_weights)} weights in DRAM"
-            
-        except Exception as e:
-            message = f"Failed to cache weights: {e}"
-            return False, message
 
     def update_weights_from_dram(
         self,
@@ -909,20 +869,34 @@ class ModelRunner:
         load_format: str,
         weight_name_filter: Optional[Callable[[str], bool]] = None,
     ) -> tuple[bool, str]:
+        #Update engine weights in-place from the disk.
         logger.info(
-            f"Update engine weights online from DRAM begin. "
+            f"Update engine weights online from disk begin. "
             f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
         target_device = torch.device(self.device)
-        cached_weights = self.weight_cache.get(model_path)
-        if cached_weights is None:
-            message = f"Weights for {model_path} not found in DRAM cache. Please pre-cache first using pre_cache_weights()."
+        self.model_config.model_path = model_path
+        load_config = LoadConfig(load_format=load_format)
+
+        # Only support DefaultModelLoader for now
+        loader = get_model_loader(load_config)
+        if not isinstance(loader, DefaultModelLoader):
+            message = f"Failed to get model loader: {loader}."
             return False, message
 
-        self.model_config.model_path = model_path
+        def get_weight_iter(config):
+            if model_path not in self.weight_cache: 
+                iter = loader._get_weights_iterator(
+                    DefaultModelLoader.Source.init_new(config, self.model)
+                )
+                cached_weights = []
+                for name, weight in iter:
+                    cached_weights.append((name, weight))
+                self.weight_cache[model_path] = cached_weights
+            
+            cached_weights = self.weight_cache[model_path]
 
-        def get_weight_iter():
             if weight_name_filter is not None:
                 for name, weight in cached_weights:
                     if weight_name_filter(name):
@@ -937,64 +911,30 @@ class ModelRunner:
 
         with set_default_torch_dtype(self.model_config.dtype):
             try:
-                weight_iter = get_weight_iter()
+                iter = get_weight_iter(self.model_config)
             except Exception as e:
-                message = f"Failed to get weights iterator from cache: {e}."
+                message = f"Failed to get weights iterator: {e}."
                 return False, message
-            
             try:
-                model = model_load_weights(self.model, weight_iter)
+                model = model_load_weights(self.model, iter)
             except Exception as e:
-                message = f"Failed to update weights from DRAM: {e}."
+                message = (
+                    f"Failed to update weights: {e}.\nRolling back to original weights."
+                )
+                del iter
+                gc.collect()
+                iter = get_weight_iter(self.model_config)
+                self.model = model_load_weights(self.model, iter)
                 return False, message
 
         self.model = model
         self.server_args.model_path = model_path
         self.server_args.load_format = load_format
+        self.load_config = load_config
 
-        logger.info("Update weights from DRAM completed successfully.")
-        return True, "Succeeded to update model weights from DRAM."
+        logger.info("Update weights end.")
+        return True, "Succeeded to update model weights."
 
-    def update_weights_from_disk(
-        self,
-        model_path: str,
-        load_format: str,
-        weight_name_filter: Optional[Callable[[str], bool]] = None,
-    ) -> tuple[bool, str]:
-        logger.info(
-            f"Update engine weights online begin. "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-        )
-
-        if model_path in self.weight_cache:
-            logger.info(f"Using cached weights for {model_path}")
-            return self.update_weights_from_dram(model_path, load_format, weight_name_filter)
-        
-        logger.info(f"No cache found for {model_path}, caching weights first then using cache")
-        cache_success, cache_msg = self.pre_cache_weights(model_path, self.model_config, load_format)
-        
-        if cache_success:
-            logger.info("Weights cached successfully, updating from DRAM")
-            return self.update_weights_from_dram(model_path, load_format, weight_name_filter)
-        else:
-            error_msg = f"Failed to cache weights and cannot load from disk: {cache_msg}"
-            logger.error(error_msg)
-            return False, error_msg
-
-    def clear_weight_cache(self, model_path: str = None):
-        if model_path:
-            if model_path in self.weight_cache:
-                del self.weight_cache[model_path]
-            logger.info(f"Cleared cache for {model_path}")
-        else:
-            self.weight_cache.clear()
-            logger.info("Cleared all weight caches")
-
-    def get_cached_models(self) -> List[str]:
-        return list(self.weight_cache.keys())
-
-    def is_model_cached(self, model_path: str) -> bool:
-        return model_path in self.weight_cache'''
 
     def init_weights_send_group_for_remote_instance(
         self,
