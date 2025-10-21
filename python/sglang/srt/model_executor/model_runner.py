@@ -864,7 +864,7 @@ class ModelRunner:
             )
             
         
-'''    def pre_cache_weights(
+    '''def pre_cache_weights(
         self,
         model_path: str,
         model_config = None,
@@ -994,8 +994,7 @@ class ModelRunner:
         return list(self.weight_cache.keys())
 
     def is_model_cached(self, model_path: str) -> bool:
-        return model_path in self.weight_cache
-'''
+        return model_path in self.weight_cache'''
 
     def init_weights_send_group_for_remote_instance(
         self,
