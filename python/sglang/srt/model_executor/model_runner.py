@@ -984,12 +984,9 @@ class ModelRunner:
         if model_path:
             if model_path in self.weight_cache:
                 del self.weight_cache[model_path]
-            if model_path in self._cached_model_configs:
-                del self._cached_model_configs[model_path]
             logger.info(f"Cleared cache for {model_path}")
         else:
             self.weight_cache.clear()
-            self._cached_model_configs.clear()
             logger.info("Cleared all weight caches")
 
     def get_cached_models(self) -> List[str]:
