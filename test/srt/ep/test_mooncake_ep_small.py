@@ -11,17 +11,18 @@ from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
     popen_launch_server,
+    try_cached_model,
 )
 
 ib_devices = get_rdma_devices_args()
-
+DEFAULT_MODEL_NAME_FOR_TEST_MLA="/data/models/sglang-ci-dsv3-test"
 
 class TestTP(CustomTestCase):
     extra_args = []
 
     @classmethod
     def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_MLA
+        cls.model = try_cached_model(DEFAULT_MODEL_NAME_FOR_TEST_MLA)
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
             cls.model,
