@@ -2152,7 +2152,7 @@ class ModelRunner:
                 split_forward_count,
             )
 
-            elastic_ep_state = ElasticEPStateManager.instzance()
+            elastic_ep_state = ElasticEPStateManager.instance()
             if (
                 elastic_ep_state is not None
                 and not elastic_ep_state.is_active_equal_last()
