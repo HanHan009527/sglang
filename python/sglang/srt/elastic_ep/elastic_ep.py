@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Optional
 
 import torch
 
 from sglang.srt.managers.schedule_batch import ServerArgs
 from sglang.srt.utils import is_cpu, is_cuda
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -16,6 +18,7 @@ class ElasticEPState:
     active_ranks_cpu: Optional[torch.Tensor]
 
     def is_active_equal_last(self) -> bool:
+        logger.info("is_active_equal_last: active_ranks=%s, last_active_ranks=%s", self.active_ranks, self.last_active_ranks)
         return torch.equal(self.active_ranks, self.last_active_ranks)
 
     def sync_active_to_cpu(self):
