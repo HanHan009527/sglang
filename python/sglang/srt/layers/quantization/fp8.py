@@ -981,6 +981,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             ):
                 moe_runner_backend = MoeRunnerBackend.DEEP_GEMM
             else:
+                logger.info("Using Triton runner backend , deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM=%s, get_moe_a2a_backend().is_deepep()=%s, get_moe_a2a_backend().is_mooncake()=%s", deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM, get_moe_a2a_backend().is_deepep(), get_moe_a2a_backend().is_mooncake())
                 moe_runner_backend = MoeRunnerBackend.TRITON
         if moe_runner_backend.is_deep_gemm() or moe_runner_backend.is_triton():
             self.runner = MoeRunner(moe_runner_backend, moe_runner_config)
