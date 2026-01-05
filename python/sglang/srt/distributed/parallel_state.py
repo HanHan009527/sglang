@@ -61,6 +61,8 @@ _is_cpu = is_cpu()
 _is_xpu = is_xpu()
 _is_musa = is_musa()
 
+logger = logging.getLogger(__name__)
+
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 # use int value instead of ReduceOp.SUM to support torch compile
@@ -256,30 +258,38 @@ class GroupCoordinator:
         self.device_module = torch.get_device_module(self.device)
 
         for ranks in group_ranks:
+            logger.info(f"Rank {self.rank}: creating process group for ranks {ranks}")
             active_ranks = torch.ones(len(ranks), dtype=torch.int32, device=self.device)
             active_ranks_cpu = torch.ones(len(ranks), dtype=torch.int32)
             if "mooncake" in torch_distributed_backend:
                 from mooncake.ep import MooncakeBackendOptions
 
+                logger.info(f"Rank {self.rank}: creating mooncake device group")
                 device_group = torch.distributed.new_group(
                     ranks,
                     backend="mooncake",
                     pg_options=MooncakeBackendOptions(active_ranks),
                 )
+                logger.info(f"Rank {self.rank}: creating mooncake cpu group")
                 cpu_group = torch.distributed.new_group(
                     ranks,
                     backend="mooncake-cpu",
                     pg_options=MooncakeBackendOptions(active_ranks_cpu),
                 )
             else:
+                logger.info(
+                    f"Rank {self.rank}: creating device group with backend {torch_distributed_backend}"
+                )
                 device_group = torch.distributed.new_group(
                     ranks, backend=torch_distributed_backend
                 )
                 # a group with `gloo` backend, to allow direct coordination
                 # between processes through the CPU.
+                logger.info(f"Rank {self.rank}: creating cpu group with backend gloo")
                 cpu_group = torch.distributed.new_group(
                     ranks, backend="gloo", timeout=gloo_timeout
                 )
+            logger.info(f"Rank {self.rank}: process groups created for ranks {ranks}")
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
