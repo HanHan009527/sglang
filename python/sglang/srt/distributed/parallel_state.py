@@ -256,6 +256,8 @@ class GroupCoordinator:
         else:
             self.device = torch.device("cpu")
         self.device_module = torch.get_device_module(self.device)
+        logger.info(f"Rank {self.rank}: group_ranks is {group_ranks}")
+
 
         for ranks in group_ranks:
             logger.info(f"Rank {self.rank}: creating process group for ranks {ranks}")
