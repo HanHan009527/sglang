@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Union
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.dp_attention import get_is_extend_in_batch
+from sglang.srt.layers.moe.deepxtrace.diagnose import Diagnose
 from sglang.srt.layers.moe.token_dispatcher.base import (
     BaseDispatcher,
     BaseDispatcherConfig,
@@ -157,6 +158,9 @@ class DeepEPBuffer:
         cls._hidden_size = hidden_size
         cls._num_max_dispatch_tokens_per_rank = num_max_dispatch_tokens_per_rank
         cls._num_experts = num_experts
+
+        cls._diagnose = Diagnose(group=group, enable_async=True)
+        cls._diagnose.start_async_diagnose()
 
         num_nvl_bytes, num_rdma_bytes = 0, 0
         if deepep_mode.enable_normal():
@@ -619,6 +623,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
             use_fp8 = True
 
         buffer = self._get_buffer()
+        dispatch_wait_recv_cost_stats = DeepEPBuffer._diagnose.get_stats_ll_stats_tensor()[0]
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
             buffer.low_latency_dispatch(
                 hidden_states,
@@ -640,6 +645,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
                 use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
                 and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                dispatch_wait_recv_cost_stats=dispatch_wait_recv_cost_stats,
             )
         )
         return packed_recv_hidden, self.packed_recv_count, event, hook
@@ -678,6 +684,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         overlap_args = self.overlap_args
         meta_overlap_args = self.meta_overlap_args
+        combine_wait_recv_cost_stats = DeepEPBuffer._diagnose.get_stats_ll_stats_tensor()[1]
 
         ctx = nullcontext()
         if overlap_args is not None:
@@ -711,6 +718,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 async_finish=not self.return_recv_hook,
                 return_recv_hook=self.return_recv_hook,
                 **overlap_args_dict,
+                combine_wait_recv_cost_stats=combine_wait_recv_cost_stats,
             )
 
         self.packed_recv_count = self.handle = None
