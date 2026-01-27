@@ -1,6 +1,7 @@
 FROM lmsysorg/sglang:v0.5.8 AS base
 
 WORKDIR /sgl-workspace/
+# NOTE: Triton-distributed installation steps are adapted from https://github.com/ByteDance-Seed/Triton-distributed/blob/main/docs/build.md.
 RUN git clone https://github.com/ByteDance-Seed/Triton-distributed.git
 WORKDIR /sgl-workspace/Triton-distributed
 RUN git submodule deinit --all -f \
@@ -24,5 +25,6 @@ RUN pip uninstall triton -y && pip uninstall triton_dist -y \
     && USE_TRITON_DISTRIBUTED_AOT=0 pip3 install -e python --verbose --no-build-isolation --use-pep517
 
 WORKDIR /sgl-workspace/sglang
+
 # Default command
 CMD ["/bin/bash"]
