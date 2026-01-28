@@ -27,7 +27,7 @@ if not (_is_npu or _is_xpu):
         transfer_kv_all_layer_direct_lf_pf,
         #transfer_kv_all_layer_lf_pf,
         #transfer_kv_all_layer_lf_ph,
-        transfer_kv_all_layer_lf_pf as transfer_kv_all_layer_lf_ph
+        transfer_kv_all_layer_lf_pf as transfer_kv_all_layer_lf_ph,
         transfer_kv_all_layer_mla,
         transfer_kv_all_layer_mla_lf_pf,
         transfer_kv_direct,
