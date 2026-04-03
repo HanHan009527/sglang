@@ -535,6 +535,13 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     decode_prealloc_queue_entry_time: float = 0.0
     decode_transfer_queue_entry_time: float = 0.0
     decode_prebuilt_finish_time: float = 0.0
+    decode_prealloc_start_time: float = 0.0
+    decode_prealloc_finish_time: float = 0.0
+    decode_send_metadata_start_time: float = 0.0
+    decode_send_metadata_finish_time: float = 0.0
+    decode_transfer_waiting_for_input_time: float = 0.0
+    decode_transfer_start_time: float = 0.0
+    decode_transfer_finish_time: float = 0.0
 
     # bootstrap sub-phase tracking (PD disagg)
     bootstrap_done_time: float = 0.0
@@ -891,6 +898,48 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         if self.bootstrap_done_time == 0.0:
             self.bootstrap_done_time = ts
 
+    def set_decode_prealloc_start_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_prealloc_start_time == 0.0:
+            self.decode_prealloc_start_time = ts
+
+    def set_decode_prealloc_finish_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_prealloc_finish_time == 0.0:
+            self.decode_prealloc_finish_time = ts
+
+    def set_decode_send_metadata_start_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_send_metadata_start_time == 0.0:
+            self.decode_send_metadata_start_time = ts
+
+    def set_decode_send_metadata_finish_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_send_metadata_finish_time == 0.0:
+            self.decode_send_metadata_finish_time = ts
+
+    def set_decode_transfer_waiting_for_input_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_transfer_waiting_for_input_time == 0.0:
+            self.decode_transfer_waiting_for_input_time = ts
+
+    def set_decode_transfer_start_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_transfer_start_time == 0.0:
+            self.decode_transfer_start_time = ts
+
+    def set_decode_transfer_finish_time(self, ts=None):
+        if ts is None:
+            ts = time.perf_counter()
+        if self.decode_transfer_finish_time == 0.0:
+            self.decode_transfer_finish_time = ts
+
     def set_decode_prebuilt_finish_time(self, ts=None):
         if ts is None:
             ts = time.perf_counter()
@@ -1010,10 +1059,81 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             else:
                 prealloc_breakdown = ""
 
+            local_prealloc_breakdown = ""
+            if (
+                self.decode_prealloc_start_time > 0
+                and self.decode_prealloc_finish_time > 0
+                and self.decode_send_metadata_start_time > 0
+                and self.decode_send_metadata_finish_time > 0
+            ):
+                pre_alloc_duration = (
+                    self.decode_prealloc_finish_time - self.decode_prealloc_start_time
+                )
+                send_metadata_duration = (
+                    self.decode_send_metadata_finish_time
+                    - self.decode_send_metadata_start_time
+                )
+                local_prealloc_start = (
+                    self.bootstrap_done_time
+                    if self.bootstrap_done_time > 0
+                    else self.decode_prealloc_start_time
+                )
+                local_prealloc_duration = (
+                    self.decode_transfer_queue_entry_time - local_prealloc_start
+                )
+                local_prealloc_other_duration = (
+                    local_prealloc_duration
+                    - pre_alloc_duration
+                    - send_metadata_duration
+                )
+                local_prealloc_breakdown = (
+                    "local_prealloc("
+                    f"pre_alloc={self.format_duration(pre_alloc_duration)}, "
+                    f"send_metadata={self.format_duration(send_metadata_duration)}, "
+                    f"other={self.format_duration(local_prealloc_other_duration)}"
+                    "); "
+                )
+
+            transfer_breakdown = ""
+            if self.decode_transfer_waiting_for_input_time > 0:
+                waiting_for_input_duration = (
+                    self.decode_transfer_waiting_for_input_time
+                    - self.decode_transfer_queue_entry_time
+                )
+                transfer_breakdown_parts = [
+                    f"waiting_for_input={self.format_duration(waiting_for_input_duration)}"
+                ]
+                if self.decode_transfer_start_time > 0:
+                    ready_to_transfer_duration = (
+                        self.decode_transfer_start_time
+                        - self.decode_transfer_waiting_for_input_time
+                    )
+                    transfer_breakdown_parts.append(
+                        f"ready_to_transfer={self.format_duration(ready_to_transfer_duration)}"
+                    )
+                    transfer_end_time = (
+                        self.decode_transfer_finish_time
+                        if self.decode_transfer_finish_time > 0
+                        else self.wait_queue_entry_time
+                    )
+                    transfer_only_duration = (
+                        transfer_end_time - self.decode_transfer_start_time
+                    )
+                    transfer_breakdown_parts.append(
+                        f"transferring={self.format_duration(transfer_only_duration)}"
+                    )
+                transfer_breakdown = (
+                    "transfer_breakdown("
+                    + ", ".join(transfer_breakdown_parts)
+                    + "); "
+                )
+
             return (
                 f"prealloc_queue_duration({self.format_duration(prealloc_duration)}) "
                 f"{prealloc_breakdown}"
+                f"{local_prealloc_breakdown}"
                 f"transfer_duration={self.format_duration(transfer_duration)}; "
+                f"{transfer_breakdown}"
                 f"queue_duration={self.format_duration(queue_duration)}, "
                 f"forward_duration={self.format_duration(forward_duration)}, "
                 f"start={self.decode_prealloc_queue_entry_time:.3f}"

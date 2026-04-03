@@ -35,6 +35,7 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
 )
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_bool_env_var
 from sglang.srt.utils.network import (
     NetworkAddress,
     get_local_ip_auto,
@@ -42,6 +43,9 @@ from sglang.srt.utils.network import (
 )
 
 logger = logging.getLogger(__name__)
+SGLANG_DISAGGREGATION_DEBUG_TIMELINE = get_bool_env_var(
+    "SGLANG_DISAGGREGATION_DEBUG_TIMELINE"
+)
 
 
 @dataclasses.dataclass
@@ -178,6 +182,7 @@ class CommonKVManager(BaseKVManager):
         return self.request_status[bootstrap_room]
 
     def update_status(self, bootstrap_room: int, status: KVPoll):
+        prev_status = self.request_status.get(bootstrap_room)
         if bootstrap_room not in self.request_status:
             self.request_status[bootstrap_room] = status
         else:
@@ -186,6 +191,17 @@ class CommonKVManager(BaseKVManager):
             else:
                 self.request_status[bootstrap_room] = max(
                     self.request_status[bootstrap_room], status
+                )
+        if SGLANG_DISAGGREGATION_DEBUG_TIMELINE:
+            new_status = self.request_status[bootstrap_room]
+            if prev_status != new_status:
+                logger.info(
+                    "PD timeline status transition room=%s mode=%s from=%s to=%s bootstrap_addr=%s",
+                    bootstrap_room,
+                    self.disaggregation_mode.value,
+                    prev_status.name if prev_status is not None else "None",
+                    new_status.name,
+                    self.bootstrap_host,
                 )
 
     def record_failure(self, bootstrap_room: int, failure_reason: str):

@@ -670,7 +670,9 @@ class DecodePreallocQueue:
                 break
 
             allocatable_tokens -= required_tokens_for_request
+            decode_req.req.time_stats.set_decode_prealloc_start_time()
             self._pre_alloc(decode_req.req)
+            decode_req.req.time_stats.set_decode_prealloc_finish_time()
 
             kv_indices = (
                 self.req_to_token_pool.req_to_token[decode_req.req.req_pool_idx][
@@ -725,9 +727,11 @@ class DecodePreallocQueue:
             )
             assert decode_req.metadata_buffer_index is not None
             page_indices = kv_to_page_indices(kv_indices, page_size)
+            decode_req.req.time_stats.set_decode_send_metadata_start_time()
             decode_req.kv_receiver.send_metadata(
                 page_indices, decode_req.metadata_buffer_index, state_indices
             )
+            decode_req.req.time_stats.set_decode_send_metadata_finish_time()
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
             decode_req.req.time_stats.set_decode_transfer_queue_entry_time()
@@ -939,6 +943,7 @@ class DecodeTransferQueue:
 
         decode_req.kv_receiver.clear()
         decode_req.kv_receiver = None
+        decode_req.req.time_stats.set_decode_transfer_finish_time()
         decode_req.req.time_stats.set_wait_queue_entry_time()
         return True
 
@@ -996,7 +1001,10 @@ class DecodeTransferQueue:
                 KVPoll.WaitingForInput,
                 KVPoll.Transferring,
             ]:
-                pass
+                if poll == KVPoll.WaitingForInput:
+                    decode_req.req.time_stats.set_decode_transfer_waiting_for_input_time()
+                elif poll == KVPoll.Transferring:
+                    decode_req.req.time_stats.set_decode_transfer_start_time()
             else:
                 raise ValueError(f"Unexpected poll case: {poll}")
 

@@ -20,6 +20,7 @@ from sglang.srt.disaggregation.common.conn import (
     CommonKVManager,
     CommonKVReceiver,
     CommonKVSender,
+    SGLANG_DISAGGREGATION_DEBUG_TIMELINE,
 )
 from sglang.srt.disaggregation.common.utils import (
     FastQueue,
@@ -1335,6 +1336,16 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         str(self.required_dst_info_num).encode("ascii"),
                     ]
                 )
+        if SGLANG_DISAGGREGATION_DEBUG_TIMELINE:
+            logger.info(
+                "PD timeline send_metadata room=%s session=%s kv_pages=%s aux_index=%s state_indices=%s required_dst_info_num=%s",
+                self.bootstrap_room,
+                self.session_id,
+                len(kv_indices),
+                aux_index,
+                0 if state_indices is None else len(state_indices),
+                self.required_dst_info_num,
+            )
         self.init_time = time.time()
 
     def poll(self) -> KVPoll:
