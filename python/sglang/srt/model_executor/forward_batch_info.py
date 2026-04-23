@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import triton
@@ -438,7 +438,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
     # For dumper: request IDs for cross-step sequence tracking
     rids: Optional[List[str]] = None
-    layer_ready_callback: Optional[Callable[[int], None]] = None
+    async_kv_split_driver: Any = None
     async_kv_batch_started: bool = False
 
     @classmethod
@@ -490,7 +490,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             return_pooled_hidden_states=batch.return_pooled_hidden_states,
             rids=[req.rid for req in batch.reqs],
-            layer_ready_callback=batch.layer_ready_callback,
+            async_kv_split_driver=batch.async_kv_split_driver,
         )
         device = model_runner.device
 

@@ -42,7 +42,6 @@ from sglang.srt.disaggregation.utils import (
     poll_and_all_reduce_attn_cp_tp_group,
     prepare_abort,
 )
-from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
     FINISH_LENGTH,

@@ -175,8 +175,8 @@ class CommonKVManager(BaseKVManager):
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
             )
 
-    def maybe_prepare_async_kv(self, sch, batch):
-        """Optional hook for layerwise async KV transfers.
+    def maybe_prepare_async_kv_split(self, sch, batch):
+        """Optional split-prefill driver hook for async KV transfers.
 
         Default implementation returns None (feature unsupported).
         """

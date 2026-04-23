@@ -77,7 +77,16 @@ def get_mamba_pool_state_tensor_counts(mamba_pool: Any) -> tuple[int, int]:
 
     This helper centralizes the reflection logic used by both:
     - `HybridLinearAttnBackend` (mamba state count for index/layout decisions)
-    - `MooncakeAsyncKVManager` (debug bookkeeping for state tensors)
+    - `MooncakeKVAsyncMixin` (state transfer bookkeeping)
+
+    Contract:
+    - `mamba_pool.num_mamba_layers` defines the layer count.
+    - `mamba_pool.mamba_cache` is expected to be a `MambaPool.State` or
+      `MambaPool.SpeculativeState` dataclass instance.
+    - Persistent per-layer state lives in tensor-valued dataclass fields such as
+      `conv` and `temporal`.
+    - Speculative scratch buffers (`intermediate_ssm`,
+      `intermediate_conv_window`) are intentionally excluded.
 
     Returns:
         (num_mamba_layers, state_tensors_per_layer)
@@ -95,17 +104,19 @@ def get_mamba_pool_state_tensor_counts(mamba_pool: Any) -> tuple[int, int]:
         return num_layers, 0
 
     state_tensors: list[Any] = []
-    try:
-        fields_dict = vars(mamba_cache)
-    except TypeError:
-        fields_dict = {}
+    if dataclasses.is_dataclass(mamba_cache):
+        field_names = [field.name for field in dataclasses.fields(mamba_cache)]
+    else:
+        field_names = list(vars(mamba_cache))
 
-    for field in fields_dict:
-        # Skip ephemeral fields that do not represent persistent per-layer states.
-        if field in ("intermediate_ssm", "intermediate_conv_window"):
+    for field_name in field_names:
+        # Skip speculative scratch buffers that do not participate in persistent state layout.
+        if field_name in ("intermediate_ssm", "intermediate_conv_window"):
             continue
-        value = getattr(mamba_cache, field)
-        if isinstance(value, list):
+        value = getattr(mamba_cache, field_name)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
             state_tensors.extend(value)
         else:
             state_tensors.append(value)

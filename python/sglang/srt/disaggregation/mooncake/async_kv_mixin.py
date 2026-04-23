@@ -4,21 +4,22 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from sglang.srt.disaggregation.base.conn import KVPoll
 from sglang.srt.disaggregation.mooncake.async_kv_utils import (
     AsyncInfo,
+    AsyncTransferItem,
     StreamAsyncSubmitter,
     TransferKVChunkSet,
     cached_group_concurrent_contiguous,
     env_int,
 )
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, kv_to_page_indices
-from sglang.srt.mem_cache.memory_pool import get_mamba_pool_state_tensor_counts
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class MooncakeKVAsyncMixin:
 
     Required methods:
     - `_transfer_data(session_id, blocks)`
+    - `_execute_async_transfer_item(...)`
     """
 
     # -------------------------
@@ -50,7 +52,7 @@ class MooncakeKVAsyncMixin:
         self._current_kv_chunk_infos: Optional[TransferKVChunkSet] = None
         self._req_begin_count: Dict[int, deque[int]] = {}
         self._req_bids: Dict[int, deque[int]] = {}
-        self._req_tensor_seen: Dict[int, set[int]] = {}
+        self._req_tensor_seen: Dict[int, set[AsyncTransferItem]] = {}
         self._room_to_kv_chunk_info: Dict[int, tuple[TransferKVChunkSet, int]] = {}
         self._lock: Optional[threading.Lock] = None
         self._bids_cond: Optional[threading.Condition] = None
@@ -60,9 +62,7 @@ class MooncakeKVAsyncMixin:
         self._tensor_ntensors_total: int = 0
         self._kv_cache_nlayers: int = 0
         self._async_kv_missing_wait_ms: int = 0
-        self._layer_ready_events: Dict[Tuple[int, int], Any] = {}
-        self._mamba_num_layers_debug: int = 0
-        self._mamba_state_tensors_per_layer_debug: int = 0
+        self._layer_ready_events: Dict[Tuple[int, AsyncTransferItem], Any] = {}
 
     @property
     def async_kv_enabled(self) -> bool:
@@ -103,8 +103,6 @@ class MooncakeKVAsyncMixin:
             "SGLANG_ASYNC_KV_MISSING_WAIT_MS", "20"
         )
         self._layer_ready_events = {}
-        self._mamba_num_layers_debug = 0
-        self._mamba_state_tensors_per_layer_debug = 0
 
         self._async_submitter = StreamAsyncSubmitter(self._async_put_kvcache_func)
 
@@ -112,14 +110,9 @@ class MooncakeKVAsyncMixin:
     # Scheduler hook
     # -------------------------
 
-    def maybe_prepare_async_kv(self, sch: Any, batch: Any) -> Optional[Callable[[int], None]]:
-        """Optionally prepare async KV transfer for a scheduler batch.
-
-        Returns a `layer_ready_callback` if async is enabled and the batch is eligible.
-        """
-
+    def _async_prepare_batch_if_eligible(self, sch: Any, batch: Any) -> bool:
         if not self._async_kv_enabled:
-            return None
+            return False
 
         eligible_reqs = [
             req
@@ -127,7 +120,7 @@ class MooncakeKVAsyncMixin:
             if getattr(req, "bootstrap_host", None) != FAKE_BOOTSTRAP_HOST
         ]
         if not eligible_reqs:
-            return None
+            return False
 
         # Current async path only supports non-chunked, full-send (start_send_idx=0) requests.
         if not all(
@@ -135,73 +128,63 @@ class MooncakeKVAsyncMixin:
             and getattr(req, "is_chunked", 0) <= 0
             for req in eligible_reqs
         ):
-            return None
+            return False
 
         self._async_prepare_batch(sch, batch)
-        setattr(batch, "async_kv_prepared", True)
-        return self._async_mark_layer_ready
+        return True
+
+    def maybe_prepare_async_kv_split(self, sch: Any, batch: Any) -> Optional[Any]:
+        """Prepare a split-prefill async driver for a scheduler batch.
+
+        The driver reuses the existing async transfer machinery, but lets the
+        split-prefill outer loop explicitly notify completed layer ranges instead
+        of relying on the attention backend to emit per-layer callbacks.
+        """
+
+        if not self._async_prepare_batch_if_eligible(sch, batch):
+            return None
+        return self
 
     # -------------------------
     # Internal helpers
     # -------------------------
 
     def _async_put_kvcache_func(self) -> None:
-        try:
-            if self._notify_queue is None or self._queue_lock is None:
+        if self._notify_queue is None or self._queue_lock is None:
+            return
+        with self._queue_lock:
+            if not self._notify_queue:
                 return
-            with self._queue_lock:
-                if not self._notify_queue:
-                    return
-                info = self._notify_queue.pop()
-            self._async_put_kv_cache_internal(info)
-        except Exception:
-            logger.exception("Unhandled exception in async KV submitter.")
+            info = self._notify_queue.pop()
+        self._async_put_kv_cache_internal(info)
 
-    def _async_try_sync_ready_event(self, *, room_id: int, tensor_id: int, reason: str) -> None:
+    def _async_try_sync_ready_event(
+        self, *, room_id: int, transfer_item: AsyncTransferItem
+    ) -> None:
         if not self._async_kv_enabled or self._lock is None:
             return
-        event_key = (int(room_id), int(tensor_id))
+        event_key = (int(room_id), transfer_item)
         with self._lock:
             event = self._layer_ready_events.pop(event_key, None)
         if event is None:
             return
 
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                event.synchronize()
-        except Exception:
-            logger.warning(
-                "Failed to synchronize CUDA event (%s): room=%s tensor=%s",
-                reason,
-                room_id,
-                tensor_id,
-                exc_info=True,
-            )
+        if not torch.cuda.is_available():
+            return
+        event.synchronize()
 
     def _async_try_record_ready_event_for_rooms(
-        self, *, rooms: Tuple[int, ...], tensor_id: int, reason: str
+        self, *, rooms: Tuple[int, ...], transfer_item: AsyncTransferItem
     ) -> None:
         if not self._async_kv_enabled or self._lock is None:
             return
-        try:
-            import torch
-
-            if not torch.cuda.is_available():
-                return
-            event = torch.cuda.Event(enable_timing=False, blocking=False, interprocess=False)
-            event.record()
-            with self._lock:
-                for rid in rooms:
-                    self._layer_ready_events[(int(rid), int(tensor_id))] = event
-        except Exception:
-            logger.debug(
-                "Failed to record CUDA event (%s): tensor=%s",
-                reason,
-                tensor_id,
-                exc_info=True,
-            )
+        if not torch.cuda.is_available():
+            return
+        event = torch.cuda.Event(enable_timing=False, blocking=False, interprocess=False)
+        event.record()
+        with self._lock:
+            for rid in rooms:
+                self._layer_ready_events[(int(rid), transfer_item)] = event
 
     def _async_maybe_start_next_kv_chunk(self) -> None:
         if not self._async_kv_enabled or self._queue_lock is None or self._lock is None:
@@ -296,7 +279,7 @@ class MooncakeKVAsyncMixin:
         if not kv_chunk_info.rooms:
             return
         infos = [self._async_get_info_with_risk(room) for room in kv_chunk_info.rooms]
-        for layer_id in async_info.layer_ids:
+        for transfer_item in async_info.transfer_items:
             for room_id, transfer_info_dict, kv_indice, index_slice, prefill_state_idx in zip(
                 kv_chunk_info.rooms,
                 infos,
@@ -313,72 +296,34 @@ class MooncakeKVAsyncMixin:
                     registration = self.decode_kv_args_table.get(session_id)
                     if registration is None:
                         logger.warning(
-                            "async kv skip: missing registration room=%s session=%s layer=%s",
+                            "async kv skip: missing registration room=%s session=%s item=%s:%s",
                             room_id,
                             session_id,
-                            layer_id,
+                            transfer_item.pool,
+                            transfer_item.tensor_idx,
                         )
                         continue
 
-                    is_state_tensor = layer_id >= self._kv_tensor_ntensors
-                    if not is_state_tensor:
-                        self._async_try_sync_ready_event(
-                            room_id=int(room_id), tensor_id=int(layer_id), reason="kv"
-                        )
-                        dst = transfer_info.dst_kv_indices[index_slice]
-                        if len(dst) < len(kv_indice):
-                            kv_indice = kv_indice[: len(dst)]
-                        item_len = int(registration.dst_kv_item_len)
-                        src_ptr = int(self.kv_args.kv_data_ptrs[int(layer_id)])
-                        dst_ptr = int(registration.dst_kv_ptrs[int(layer_id)])
-                        status = self._async_submit_layer(
-                            session_id, src_ptr, dst_ptr, kv_indice, dst, item_len
-                        )
-                    else:
-                        # State tensors (mamba only).
-                        state_tensor_id = int(layer_id) - self._kv_tensor_ntensors
-                        if self.kv_args.state_type != "mamba" or not transfer_info.dst_state_indices:
-                            status = 0
-                        else:
-                            self._async_try_sync_ready_event(
-                                room_id=int(room_id),
-                                tensor_id=int(layer_id),
-                                reason="mamba_state",
-                            )
-                            dst_state_idx = int(transfer_info.dst_state_indices[0])
-                            src_state_ptrs = self.kv_args.state_data_ptrs
-                            src_state_item_lens = self.kv_args.state_item_lens
-                            dst_state_ptrs = getattr(registration, "dst_state_data_ptrs", [])
-                            if (
-                                state_tensor_id >= len(src_state_ptrs)
-                                or state_tensor_id >= len(dst_state_ptrs)
-                                or state_tensor_id >= len(src_state_item_lens)
-                            ):
-                                status = 0
-                            else:
-                                item_len = int(src_state_item_lens[state_tensor_id])
-                                src_addr = int(src_state_ptrs[state_tensor_id]) + item_len * int(
-                                    prefill_state_idx
-                                )
-                                dst_addr = int(dst_state_ptrs[state_tensor_id]) + item_len * int(
-                                    dst_state_idx
-                                )
-                                status = int(
-                                    self._transfer_data(session_id, [(src_addr, dst_addr, item_len)])
-                                )
+                    self._async_try_sync_ready_event(
+                        room_id=int(room_id), transfer_item=transfer_item
+                    )
+                    status = self._execute_async_transfer_item(
+                        transfer_item=transfer_item,
+                        transfer_info=transfer_info,
+                        registration=registration,
+                        prefill_kv_indices=kv_indice,
+                        index_slice=index_slice,
+                        prefill_state_idx=int(prefill_state_idx),
+                    )
 
                     assert self._bids_cond is not None
                     with self._bids_cond:
-                        self._req_tensor_seen.setdefault(room_id, set()).add(int(layer_id))
+                        self._req_tensor_seen.setdefault(room_id, set()).add(transfer_item)
                         self._req_bids.setdefault(room_id, deque()).appendleft(int(status))
                         self._bids_cond.notify_all()
 
-    def _async_mark_layer_ready(self, layer_id: int) -> None:
+    def _async_mark_transfer_item_ready(self, transfer_item: AsyncTransferItem) -> None:
         if not self._async_kv_enabled:
-            return
-        tensor_id = int(layer_id)
-        if tensor_id == -1:
-            self._async_maybe_start_next_kv_chunk()
             return
 
         assert self._queue_lock is not None
@@ -390,11 +335,18 @@ class MooncakeKVAsyncMixin:
             with self._queue_lock:
                 current = self._current_kv_chunk_infos
 
-        if tensor_id < 0 or tensor_id >= self._tensor_ntensors_total:
+        if transfer_item.pool == "kv":
+            is_valid = 0 <= transfer_item.tensor_idx < self._kv_tensor_ntensors
+        elif transfer_item.pool == "state":
+            is_valid = 0 <= transfer_item.tensor_idx < self._state_tensor_ntensors
+        else:
+            is_valid = False
+
+        if not is_valid:
             logger.warning(
-                "async kv layer ready skipped: tensor=%s total=%s",
-                tensor_id,
-                self._tensor_ntensors_total,
+                "async kv layer ready skipped: item=%s:%s",
+                transfer_item.pool,
+                transfer_item.tensor_idx,
             )
             return
 
@@ -406,22 +358,120 @@ class MooncakeKVAsyncMixin:
         if not current or not current.rooms:
             return
 
-        if tensor_id < self._kv_tensor_ntensors:
+        if transfer_item.pool == "kv":
             self._async_try_record_ready_event_for_rooms(
-                rooms=current.rooms, tensor_id=int(tensor_id), reason="kv"
+                rooms=current.rooms, transfer_item=transfer_item
             )
-        elif self.kv_args.state_type == "mamba":
+        elif transfer_item.pool == "state" and self.kv_args.state_type == "mamba":
             self._async_try_record_ready_event_for_rooms(
-                rooms=current.rooms, tensor_id=int(tensor_id), reason="mamba_state"
+                rooms=current.rooms, transfer_item=transfer_item
             )
 
         with self._queue_lock:
             assert self._notify_queue is not None
             self._notify_queue.appendleft(
-                AsyncInfo(layer_ids=(int(tensor_id),), kv_chunk_info=current)
+                AsyncInfo(transfer_items=(transfer_item,), kv_chunk_info=current)
             )
         assert self._async_submitter is not None
         self._async_submitter.step_async()
+
+    def _async_collect_split_ready_transfer_items(
+        self,
+        forward_batch: Any,
+        start_layer: int,
+        end_layer: int,
+    ) -> Tuple[AsyncTransferItem, ...]:
+        attn_backend = getattr(forward_batch, "attn_backend", None)
+        token_to_kv_pool = getattr(forward_batch, "token_to_kv_pool", None)
+        req_to_token_pool = getattr(forward_batch, "req_to_token_pool", None)
+
+        if attn_backend is None or token_to_kv_pool is None or req_to_token_pool is None:
+            logger.warning(
+                "async kv split notify skipped: missing forward batch metadata for range [%s, %s)",
+                start_layer,
+                end_layer,
+            )
+            return ()
+
+        full_attn_layers = set(getattr(attn_backend, "full_attn_layers", ()))
+        full_layer_nums = getattr(token_to_kv_pool, "full_layer_nums", len(full_attn_layers))
+        use_mla = bool(getattr(token_to_kv_pool, "use_mla", False))
+        kv_ntensors = full_layer_nums if use_mla else full_layer_nums * 2
+        full_layer_mapping = getattr(
+            token_to_kv_pool, "full_attention_layer_id_mapping", {}
+        )
+        mamba_map = getattr(req_to_token_pool, "mamba_map", {})
+        mamba_state_tensors_per_layer = int(
+            getattr(attn_backend, "_mamba_state_tensors_per_layer", 0)
+        )
+        mamba_num_layers = int(
+            getattr(attn_backend, "_mamba_num_layers", len(mamba_map) if mamba_map else 0)
+        )
+
+        transfer_items = []
+        for layer_id in range(start_layer, end_layer):
+            if layer_id in full_attn_layers:
+                packed_id = full_layer_mapping.get(layer_id)
+                if packed_id is None:
+                    logger.warning(
+                        "async kv split notify missing full-attn mapping: model_layer=%s",
+                        layer_id,
+                    )
+                    continue
+                transfer_items.append(
+                    AsyncTransferItem(
+                        pool="kv", tensor_idx=int(packed_id), model_layer_id=int(layer_id)
+                    )
+                )
+                if not use_mla:
+                    transfer_items.append(
+                        AsyncTransferItem(
+                            pool="kv",
+                            tensor_idx=int(packed_id + full_layer_nums),
+                            model_layer_id=int(layer_id),
+                        )
+                    )
+                continue
+
+            mamba_layer_idx = mamba_map.get(layer_id)
+            if mamba_layer_idx is None or mamba_state_tensors_per_layer <= 0:
+                logger.warning(
+                    "async kv split notify missing linear-state mapping: model_layer=%s",
+                    layer_id,
+                )
+                continue
+
+            for tensor_idx in range(mamba_state_tensors_per_layer):
+                transfer_items.append(
+                    AsyncTransferItem(
+                        pool="state",
+                        tensor_idx=int(tensor_idx * mamba_num_layers + mamba_layer_idx),
+                        model_layer_id=int(layer_id),
+                    )
+                )
+
+        return tuple(transfer_items)
+
+    def notify_split_range_ready(
+        self,
+        forward_batch: Any,
+        start_layer: int,
+        end_layer: int,
+    ) -> None:
+        """Notify async KV driver that a split-prefill layer range has completed."""
+
+        if not self._async_kv_enabled or end_layer <= start_layer:
+            return
+
+        if not getattr(forward_batch, "async_kv_batch_started", False):
+            forward_batch.async_kv_batch_started = True
+            self._async_maybe_start_next_kv_chunk()
+
+        transfer_items = self._async_collect_split_ready_transfer_items(
+            forward_batch, start_layer, end_layer
+        )
+        for transfer_item in transfer_items:
+            self._async_mark_transfer_item_ready(transfer_item)
 
     def _async_wait_for_bids(self, rid: int, *, timeout_s: Optional[float] = None) -> bool:
         if self._bids_cond is None:
@@ -440,8 +490,10 @@ class MooncakeKVAsyncMixin:
                 else:
                     self._bids_cond.wait()
 
-    def _async_resend_missing_state_tensors(self, room: int, missing_state_tensor_ids: list[int]) -> None:
-        if not missing_state_tensor_ids:
+    def _async_resend_missing_state_tensors(
+        self, room: int, missing_state_items: list[AsyncTransferItem]
+    ) -> None:
+        if not missing_state_items:
             return
         info = self._room_to_kv_chunk_info.get(room)
         if info is None:
@@ -455,31 +507,21 @@ class MooncakeKVAsyncMixin:
         transfer_info_dict = self.transfer_infos.get(room)
         if not transfer_info_dict:
             return
-        src_state_ptrs = self.kv_args.state_data_ptrs
-        src_state_item_lens = self.kv_args.state_item_lens
         for transfer_info in transfer_info_dict.values():
             if transfer_info.is_dummy:
                 continue
-            session_id = transfer_info.mooncake_session_id
-            registration = self.decode_kv_args_table.get(session_id)
+            registration = self.decode_kv_args_table.get(transfer_info.mooncake_session_id)
             if registration is None or not transfer_info.dst_state_indices:
                 continue
-            dst_state_ptrs = getattr(registration, "dst_state_data_ptrs", [])
-            dst_state_idx = int(transfer_info.dst_state_indices[0])
-            transfer_blocks = []
-            for state_tensor_id in missing_state_tensor_ids:
-                if (
-                    state_tensor_id >= len(src_state_ptrs)
-                    or state_tensor_id >= len(dst_state_ptrs)
-                    or state_tensor_id >= len(src_state_item_lens)
-                ):
-                    continue
-                item_len = int(src_state_item_lens[state_tensor_id])
-                src_addr = int(src_state_ptrs[state_tensor_id]) + item_len * int(prefill_state_idx)
-                dst_addr = int(dst_state_ptrs[state_tensor_id]) + item_len * int(dst_state_idx)
-                transfer_blocks.append((src_addr, dst_addr, item_len))
-            if transfer_blocks:
-                self._transfer_data(session_id, transfer_blocks)
+            for transfer_item in missing_state_items:
+                self._execute_async_transfer_item(
+                    transfer_item=transfer_item,
+                    transfer_info=transfer_info,
+                    registration=registration,
+                    prefill_kv_indices=np.empty(0, dtype=np.int64),
+                    index_slice=slice(0, 0),
+                    prefill_state_idx=int(prefill_state_idx),
+                )
 
     def _async_pop_req_bids(self, rid: int, is_remove: bool):
         assert self._bids_cond is not None
@@ -511,16 +553,18 @@ class MooncakeKVAsyncMixin:
             if current_last:
                 with self._lock:
                     seen = set(self._req_tensor_seen.get(rid, set()))
-                missing_kv = [i for i in range(self._kv_tensor_ntensors) if i not in seen]
+                missing_kv = [
+                    AsyncTransferItem(pool="kv", tensor_idx=i)
+                    for i in range(self._kv_tensor_ntensors)
+                    if AsyncTransferItem(pool="kv", tensor_idx=i) not in seen
+                ]
                 missing_state = [
-                    i
-                    for i in range(self._kv_tensor_ntensors, self._tensor_ntensors_total)
-                    if i not in seen
+                    AsyncTransferItem(pool="state", tensor_idx=i)
+                    for i in range(self._state_tensor_ntensors)
+                    if AsyncTransferItem(pool="state", tensor_idx=i) not in seen
                 ]
                 if missing_state:
-                    self._async_resend_missing_state_tensors(
-                        rid, [i - self._kv_tensor_ntensors for i in missing_state]
-                    )
+                    self._async_resend_missing_state_tensors(rid, missing_state)
                 if any(s != 0 for s in statuses) or missing_kv or missing_state:
                     logger.warning(
                         "async kv flush: room=%s nonzero=%s missing=%s",
@@ -549,13 +593,6 @@ class MooncakeKVAsyncMixin:
         prefill_kv_indices = []
         index_slices = []
         prefill_state_indices = []
-
-        if self.kv_args.state_type == "mamba" and self._mamba_num_layers_debug == 0:
-            mamba_pool = getattr(getattr(sch, "req_to_token_pool", None), "mamba_pool", None)
-            (
-                self._mamba_num_layers_debug,
-                self._mamba_state_tensors_per_layer_debug,
-            ) = get_mamba_pool_state_tensor_counts(mamba_pool)
 
         for req in batch.reqs:
             if getattr(req, "is_chunked", 0) > 0:
@@ -587,12 +624,16 @@ class MooncakeKVAsyncMixin:
             index_slices.append(index_slice)
             state_idx = -1
             if self.kv_args.state_type == "mamba":
-                try:
+                mapping = getattr(
+                    sch.req_to_token_pool, "req_index_to_mamba_index_mapping", None
+                )
+                if mapping is not None:
+                    mapped_state_idx = mapping[req.req_pool_idx]
                     state_idx = int(
-                        sch.req_to_token_pool.req_index_to_mamba_index_mapping[req.req_pool_idx].item()
+                        mapped_state_idx.item()
+                        if hasattr(mapped_state_idx, "item")
+                        else mapped_state_idx
                     )
-                except Exception:
-                    state_idx = -1
             prefill_state_indices.append(state_idx)
 
         kv_chunk_info_set = (
@@ -630,4 +671,3 @@ class MooncakeKVAsyncMixin:
             return False
         with self._lock:
             return room in self._req_begin_count
-

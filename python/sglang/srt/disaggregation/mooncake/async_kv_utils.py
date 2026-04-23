@@ -26,9 +26,18 @@ class TransferKVChunkSet:
     prefill_state_indices: Tuple[int, ...] = dataclasses.field(default_factory=tuple)
 
 
+@dataclasses.dataclass(frozen=True)
+class AsyncTransferItem:
+    pool: str
+    tensor_idx: int
+    model_layer_id: int = dataclasses.field(default=-1, compare=False)
+
+
 @dataclasses.dataclass
 class AsyncInfo:
-    layer_ids: Tuple[int, ...] = dataclasses.field(default_factory=tuple)
+    transfer_items: Tuple[AsyncTransferItem, ...] = dataclasses.field(
+        default_factory=tuple
+    )
     kv_chunk_info: TransferKVChunkSet = dataclasses.field(
         default_factory=TransferKVChunkSet
     )
@@ -56,7 +65,7 @@ class StreamAsyncSubmitter:
             self._queue.get()
             try:
                 self._submit_func()
-            except BaseException as e:
+            except Exception as e:
                 # Persist the exception so waiters can fail fast.
                 with self._cond:
                     self._exc = e
@@ -102,5 +111,5 @@ def cached_group_concurrent_contiguous(
 def env_int(name: str, default: str) -> int:
     try:
         return int(os.getenv(name, default))
-    except Exception:
+    except (TypeError, ValueError):
         return int(default)

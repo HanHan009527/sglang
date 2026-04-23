@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.common.utils import (
     FastQueue,
     group_concurrent_contiguous,
 )
+from sglang.srt.disaggregation.mooncake.async_kv_utils import AsyncTransferItem
 from sglang.srt.disaggregation.mooncake.async_kv_mixin import MooncakeKVAsyncMixin
 from sglang.srt.disaggregation.mooncake.utils import (
     check_mooncake_custom_mem_pool_enabled,
@@ -587,6 +588,67 @@ class MooncakeKVManager(MooncakeKVAsyncMixin, CommonKVManager):
         src_addrs, dst_addrs, lengths = zip(*transfer_blocks)
         return self.engine.batch_transfer_sync(
             mooncake_session_id, list(src_addrs), list(dst_addrs), list(lengths)
+        )
+
+    def _execute_async_transfer_item(
+        self,
+        *,
+        transfer_item: AsyncTransferItem,
+        transfer_info: TransferInfo,
+        registration: KVArgsRegisterInfo,
+        prefill_kv_indices: npt.NDArray[np.int64],
+        index_slice: slice,
+        prefill_state_idx: int,
+    ) -> int:
+        if transfer_item.pool == "kv":
+            dst_indices = transfer_info.dst_kv_indices[index_slice]
+            if len(dst_indices) < len(prefill_kv_indices):
+                src_indices = prefill_kv_indices[: len(dst_indices)]
+            else:
+                src_indices = prefill_kv_indices
+            item_len = int(registration.dst_kv_item_len)
+            src_ptr = int(self.kv_args.kv_data_ptrs[transfer_item.tensor_idx])
+            dst_ptr = int(registration.dst_kv_ptrs[transfer_item.tensor_idx])
+            return self._async_submit_layer(
+                transfer_info.mooncake_session_id,
+                src_ptr,
+                dst_ptr,
+                src_indices,
+                dst_indices,
+                item_len,
+            )
+
+        if transfer_item.pool != "state":
+            logger.warning(
+                "async kv skip: unknown transfer item pool=%s idx=%s",
+                transfer_item.pool,
+                transfer_item.tensor_idx,
+            )
+            return 0
+
+        if self.kv_args.state_type != "mamba" or not transfer_info.dst_state_indices:
+            return 0
+
+        src_state_ptrs = self.kv_args.state_data_ptrs
+        src_state_item_lens = self.kv_args.state_item_lens
+        dst_state_ptrs = getattr(registration, "dst_state_data_ptrs", [])
+        state_tensor_id = int(transfer_item.tensor_idx)
+        if (
+            prefill_state_idx < 0
+            or state_tensor_id >= len(src_state_ptrs)
+            or state_tensor_id >= len(dst_state_ptrs)
+            or state_tensor_id >= len(src_state_item_lens)
+        ):
+            return 0
+
+        dst_state_idx = int(transfer_info.dst_state_indices[0])
+        item_len = int(src_state_item_lens[state_tensor_id])
+        src_addr = int(src_state_ptrs[state_tensor_id]) + item_len * int(prefill_state_idx)
+        dst_addr = int(dst_state_ptrs[state_tensor_id]) + item_len * int(dst_state_idx)
+        return int(
+            self._transfer_data(
+                transfer_info.mooncake_session_id, [(src_addr, dst_addr, item_len)]
+            )
         )
 
     def _send_kvcache_generic(
