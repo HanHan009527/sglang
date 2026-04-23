@@ -398,6 +398,9 @@ class Envs:
     SGLANG_DEEPEP_BF16_DISPATCH = EnvBool(False)
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(128)
     SGLANG_DEEPEP_LL_COMBINE_SEND_NUM_SMS = EnvInt(32)
+    # Enable chunked combine path (Phase 2): sends combine back per-rank as soon
+    # as that rank's expert outputs are ready, instead of waiting for all ranks.
+    SGLANG_DEEPEP_CHUNKED_COMBINE = EnvBool(False)
     SGLANG_BLACKWELL_OVERLAP_SHARED_EXPERTS_OUTSIDE_SBO = EnvBool(False)
 
     # NIXL-EP

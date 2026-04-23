@@ -746,6 +746,157 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         )
 
 
+class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
+    """Phase 2 chunked combine path.
+
+    Dispatch uses ``low_latency_dispatch_launch_send`` + polling all
+    (local_expert, src_rank) slices to fill the packed recv tensors.
+    Combine uses the fine-grained per-rank APIs introduced in Phase 1b/1c:
+      - ``low_latency_combine_launch_send_to_rank`` is called once per src_rank
+        immediately after the GEMM output is ready (currently whole-tensor, so
+        all ranks are sent in one burst — future work will interleave with GEMM).
+      - ``low_latency_combine_finish_recv`` blocks until our own combine recv
+        completes and returns the final ``combined_x``.
+
+    Controlled by ``SGLANG_DEEPEP_CHUNKED_COMBINE=1``.
+    """
+
+    def dispatch_b(
+        self,
+        hidden_states,
+        topk_ids,
+        topk_weights,
+        masked_m,
+        expected_m,
+        event,
+        hook,
+    ):
+        # Polling in _dispatch_core already ensured all slices are ready;
+        # skip the event/hook wait that the legacy path uses.
+        get_global_expert_distribution_recorder().on_deepep_dispatch_low_latency(
+            masked_m
+        )
+
+        if isinstance(hidden_states, tuple):
+            hidden_states, hidden_states_scale = hidden_states
+        else:
+            hidden_states_scale = None
+
+        return DeepEPLLDispatchOutput(
+            hidden_states,
+            hidden_states_scale,
+            topk_ids,
+            topk_weights,
+            masked_m,
+            expected_m,
+        )
+
+    def _dispatch_core(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ):
+        use_fp8 = False
+        input_global_scale = self.quant_config.get("input_global_scale", None)
+        if input_global_scale is not None:
+            raise NotImplementedError(
+                "SGLANG_DEEPEP_CHUNKED_COMBINE does not yet support NVFP4 dispatch"
+            )
+        elif not get_moe_runner_backend().is_flashinfer_cutedsl():
+            use_fp8 = True
+
+        fp8_deepgemm_scale_opts = (
+            dict(
+                round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+            )
+            if use_fp8
+            else dict()
+        )
+
+        buffer = self._get_buffer()
+        _deepep_precompile_tp_barrier()
+
+        # Phase 1b: launch send only, get a LowLatencyDispatchHandle.
+        handle = buffer.low_latency_dispatch_launch_send(
+            hidden_states,
+            topk_ids,
+            self.num_max_dispatch_tokens_per_rank,
+            self.num_experts,
+            use_fp8=use_fp8,
+            **fp8_deepgemm_scale_opts,
+        )
+
+        # Poll all (local_expert, src_rank) slices until every one is ready.
+        # This is equivalent to the blocking recv in low_latency_dispatch.
+        num_local_experts = self.num_experts // buffer.group_size
+        group_size = buffer.group_size
+        remaining = set(
+            (e, r) for e in range(num_local_experts) for r in range(group_size)
+        )
+        while remaining:
+            done = set()
+            for (e, r) in remaining:
+                if buffer.low_latency_dispatch_peek_ready(handle, e, r) is not None:
+                    done.add((e, r))
+            remaining -= done
+
+        # After all slices are ready, handle.packed_recv_x and
+        # handle.packed_recv_count are fully populated — same layout as
+        # low_latency_dispatch would return.
+        packed_recv_hidden = (
+            (handle.packed_recv_x, handle.packed_recv_x_scales)
+            if use_fp8
+            else handle.packed_recv_x
+        )
+        self.packed_recv_count = handle.packed_recv_count
+        self.handle = handle  # LowLatencyDispatchHandle (not the legacy tuple)
+
+        return packed_recv_hidden, self.packed_recv_count, None, None
+
+    def combine_b(self, hidden_states, event, hook):
+        # The chunked _combine_core already called combine_finish_recv
+        # synchronously, so hidden_states is the final combined tensor.
+        # event is None; just call the hook (also a no-op).
+        hook()
+        return hidden_states
+
+    def _combine_core(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        buffer = self._get_buffer()
+        group_size = buffer.group_size
+
+        _deepep_precompile_tp_barrier()
+
+        # Send combine output back to each src_rank individually.
+        # `hidden_states` is in the packed layout
+        # [num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden]
+        # that low_latency_combine_launch_send_to_rank expects.
+        for dst_rank in range(group_size):
+            buffer.low_latency_combine_launch_send_to_rank(
+                x=hidden_states,
+                dst_rank=dst_rank,
+                handle=self.handle,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+            )
+
+        # Finish recv — blocks until our own combine tokens have arrived.
+        combined_x = buffer.low_latency_combine_finish_recv(self.handle)
+
+        self.packed_recv_count = self.handle = None
+
+        # Return a no-op hook; combine_b will call it.
+        noop_hook = lambda: None  # noqa: E731
+        return combined_x, None, noop_hook
+
+
 @dataclass
 class _Stage(Enum):
     INITIAL = auto()
@@ -784,7 +935,12 @@ class DeepEPDispatcher(BaseDispatcher):
         )
 
         if self.deepep_mode.enable_low_latency():
-            self._low_latency_dispatcher = _DeepEPDispatcherImplLowLatency(
+            ll_impl_cls = (
+                _DeepEPDispatcherImplLowLatencyChunked
+                if envs.SGLANG_DEEPEP_CHUNKED_COMBINE.get()
+                else _DeepEPDispatcherImplLowLatency
+            )
+            self._low_latency_dispatcher = ll_impl_cls(
                 return_recv_hook=return_recv_hook,
                 **common_kwargs,
             )
