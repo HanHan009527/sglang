@@ -191,6 +191,21 @@ class DeepEPMoE(FusedMoE):
                 topk_output,
             )
 
+        # Phase 3: per-rank pipelined GEMM + combine send.
+        # Only active when SGLANG_DEEPEP_CHUNKED_COMBINE=1 and LL mode.
+        if (
+            envs.SGLANG_DEEPEP_CHUNKED_COMBINE.get()
+            and hasattr(self.dispatcher, "_low_latency_dispatcher")
+            and self.dispatcher._low_latency_dispatcher is not None
+        ):
+            from sglang.srt.layers.moe.token_dispatcher.deepep import (
+                _DeepEPDispatcherImplLowLatencyChunked,
+            )
+
+            ll_disp = self.dispatcher._low_latency_dispatcher
+            if isinstance(ll_disp, _DeepEPDispatcherImplLowLatencyChunked):
+                return self._forward_pipelined(hidden_states, topk_output, ll_disp)
+
         # TODO: can we call super().forward here?
         dispatch_output = self.dispatcher.dispatch(
             hidden_states=hidden_states, topk_output=topk_output
@@ -201,6 +216,46 @@ class DeepEPMoE(FusedMoE):
         )
 
         return hidden_states
+
+    def _forward_pipelined(
+        self,
+        hidden_states: torch.Tensor,
+        topk_output: TopKOutput,
+        ll_disp,
+    ):
+        """Phase 3: per-dst-rank GEMM interleaved with combine sends.
+
+        For each dst_rank r (in order of arrival):
+          1. Poll until all (local_expert, r) dispatch slices are ready.
+          2. Run GEMM on x[:, r*T:(r+1)*T, :] only.
+          3. Immediately launch_send_to_rank(r) with the result.
+        Then finish_recv and return the combined tensor.
+        """
+        from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPLLDispatchOutput
+
+        topk_weights = topk_output.topk_weights
+        topk_ids = topk_output.topk_ids.to(torch.int64)
+
+        def gemm_fn(dst_rank, x_r, x_r_scale, masked_m_r):
+            # x_r: [E, T, H_in] (FP8 or BF16)
+            # x_r_scale: [E, T, H_in/128] or None
+            # masked_m_r: [E] int32 — valid token count per expert from this rank
+            expected_m_r = int(masked_m_r.max().item()) if masked_m_r.numel() > 0 else 0
+            dispatch_out = DeepEPLLDispatchOutput(
+                hidden_states=x_r,
+                hidden_states_scale=x_r_scale,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                masked_m=masked_m_r,
+                expected_m=expected_m_r,
+            )
+            combine_input = self.run_moe_core(dispatch_out)
+            return combine_input.hidden_states  # [E, T, H_out]
+            hidden_states=hidden_states,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            gemm_fn=gemm_fn,
+        )
 
     def dispatch(
         self,

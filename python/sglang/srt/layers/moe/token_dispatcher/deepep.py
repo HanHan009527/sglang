@@ -896,6 +896,122 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
         noop_hook = lambda: None  # noqa: E731
         return combined_x, None, noop_hook
 
+    def dispatch_pipelined(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        gemm_fn,
+    ) -> torch.Tensor:
+        """Phase 3 pipelined dispatch+combine.
+
+        For each dst_rank r (in order of arrival):
+          1. Poll until all (local_expert, r) slices are ready.
+          2. Call gemm_fn(r, x_r, x_r_scale, masked_m_r) → out_r [E, T, H_out].
+          3. Write out_r into the output buffer and launch_send_to_rank(r).
+        Then finish_recv and return the combined tensor.
+
+        gemm_fn signature:
+            (dst_rank: int,
+             x_r: Tensor[E, T, H_in],
+             x_r_scale: Optional[Tensor[E, T, H_in/128]],
+             masked_m_r: Tensor[E]) -> Tensor[E, T, H_out]
+        """
+        use_fp8 = False
+        input_global_scale = self.quant_config.get("input_global_scale", None)
+        if input_global_scale is not None:
+            raise NotImplementedError(
+                "dispatch_pipelined does not yet support NVFP4 dispatch"
+            )
+        elif not get_moe_runner_backend().is_flashinfer_cutedsl():
+            use_fp8 = True
+
+        fp8_deepgemm_scale_opts = (
+            dict(
+                round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+            )
+            if use_fp8
+            else dict()
+        )
+
+        buffer = self._get_buffer()
+        _deepep_precompile_tp_barrier()
+
+        handle = buffer.low_latency_dispatch_launch_send(
+            hidden_states,
+            topk_ids,
+            self.num_max_dispatch_tokens_per_rank,
+            self.num_experts,
+            use_fp8=use_fp8,
+            **fp8_deepgemm_scale_opts,
+        )
+
+        num_local_experts = self.num_experts // buffer.group_size
+        group_size = buffer.group_size
+        T = self.num_max_dispatch_tokens_per_rank
+
+        # Track which (expert, src_rank) slices are ready per dst_rank.
+        ready_per_rank = [set() for _ in range(group_size)]
+        pending_ranks = set(range(group_size))
+
+        # Pre-allocate the full output buffer [E, num_ranks*T, H_out].
+        # We don't know H_out until the first gemm_fn call, so we defer
+        # allocation to after the first call and use a list of slices.
+        out = None  # allocated on first gemm_fn return
+
+        while pending_ranks:
+            for r in list(pending_ranks):
+                for e in range(num_local_experts):
+                    if e not in ready_per_rank[r]:
+                        if buffer.low_latency_dispatch_peek_ready(handle, e, r) is not None:
+                            ready_per_rank[r].add(e)
+                if len(ready_per_rank[r]) == num_local_experts:
+                    # All expert slices from rank r are ready — run GEMM + send.
+                    x_r = handle.packed_recv_x[:, r * T : (r + 1) * T, :]
+                    x_r_scale = (
+                        handle.packed_recv_x_scales[:, r * T : (r + 1) * T, :]
+                        if use_fp8 and handle.packed_recv_x_scales is not None
+                        else None
+                    )
+
+                    # masked_m_r: valid token count per expert from rank r.
+                    # packed_recv_layout_range[:,r] is the cumulative end offset
+                    # within the packed buffer; diff gives per-rank count.
+                    layout = handle.packed_recv_layout_range  # [E, num_ranks], int64
+                    if r == 0:
+                        masked_m_r = layout[:, 0].to(torch.int32)
+                    else:
+                        masked_m_r = (layout[:, r] - layout[:, r - 1]).to(torch.int32)
+
+                    out_r = gemm_fn(r, x_r, x_r_scale, masked_m_r)  # [E, T, H_out]
+
+                    if out is None:
+                        H_out = out_r.size(2)
+                        out = torch.empty(
+                            (num_local_experts, group_size * T, H_out),
+                            dtype=out_r.dtype,
+                            device=out_r.device,
+                        )
+
+                    out[:, r * T : (r + 1) * T, :].copy_(out_r)
+
+                    buffer.low_latency_combine_launch_send_to_rank(
+                        x=out,
+                        dst_rank=r,
+                        handle=handle,
+                        topk_idx=topk_ids,
+                        topk_weights=topk_weights,
+                    )
+                    pending_ranks.discard(r)
+
+        combined_x = buffer.low_latency_combine_finish_recv(handle)
+        self.handle = None
+        return combined_x
+
+
 
 @dataclass
 class _Stage(Enum):
