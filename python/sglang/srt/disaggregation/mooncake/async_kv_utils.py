@@ -11,6 +11,7 @@ import numpy as np
 import numpy.typing as npt
 
 from sglang.srt.disaggregation.common.utils import group_concurrent_contiguous
+from sglang.srt.disaggregation.transfer_plan import AsyncTransferItem
 
 
 logger = logging.getLogger(__name__)
@@ -24,13 +25,6 @@ class TransferKVChunkSet:
     )
     index_slices: Tuple[slice, ...] = dataclasses.field(default_factory=tuple)
     prefill_state_indices: Tuple[int, ...] = dataclasses.field(default_factory=tuple)
-
-
-@dataclasses.dataclass(frozen=True)
-class AsyncTransferItem:
-    pool: str
-    tensor_idx: int
-    model_layer_id: int = dataclasses.field(default=-1, compare=False)
 
 
 @dataclasses.dataclass

@@ -2771,8 +2771,9 @@ class Scheduler(
             return self._run_batch_prebuilt(batch)
 
         # Run forward
-        async_kv_split_driver = None
-        use_split_prefill = self.enable_pdmux and batch.forward_mode.is_split_prefill()
+        async_kv_split_enabled = False
+        use_split_prefill = batch.forward_mode.is_split_prefill()
+        kv_mgr = None
         if (
             self.disaggregation_mode == DisaggregationMode.PREFILL
             and (
@@ -2784,7 +2785,7 @@ class Scheduler(
             kv_mgr = self.disagg_prefill_bootstrap_queue.kv_manager
             if kv_mgr is not None:
                 if use_split_prefill:
-                    async_kv_split_driver = kv_mgr.maybe_prepare_async_kv_split(
+                    async_kv_split_enabled = kv_mgr.maybe_prepare_async_kv_split(
                         self, batch
                     )
 
@@ -2792,12 +2793,10 @@ class Scheduler(
             if self.spec_algorithm.is_none() or self.enable_overlap:
                 # In most cases, we use the model worker batch to run the forward.
                 worker_batch_or_batch = batch.get_model_worker_batch()
-                worker_batch_or_batch.async_kv_split_driver = async_kv_split_driver
             else:
                 # In speculative decoding v1 (non-overlap) case, we use the batch directly.
                 # TODO(lsyin): delete this branch after unifying the abstraction.
                 worker_batch_or_batch = batch
-                worker_batch_or_batch.async_kv_split_driver = async_kv_split_driver
 
             if self.enable_overlap:
                 model_worker_batch = worker_batch_or_batch
@@ -2845,11 +2844,16 @@ class Scheduler(
                     # The future value, usually for next batch preparation
                     # Current implementation strictly synchronizes the seq_lens
                     batch.seq_lens = batch_result.next_draft_input.new_seq_lens
-            elif self.enable_pdmux and batch.forward_mode.is_split_prefill():
-                batch_result = self.tp_worker.forward_batch_split_prefill(
-                    batch,
-                    async_kv_split_driver=async_kv_split_driver,
-                )
+            elif batch.forward_mode.is_split_prefill():
+                batch_result = self.tp_worker.forward_batch_split_prefill(batch)
+                if kv_mgr is not None and async_kv_split_enabled and (
+                    batch_result.ready_transfer_items is not None
+                    or batch_result.split_progress_started
+                ):
+                    kv_mgr.submit_split_transfer_items(
+                        batch_result.ready_transfer_items or (),
+                        batch_started=batch_result.split_progress_started,
+                    )
                 future_indices_or_next_token_ids = batch_result.next_token_ids
             else:
                 kwargs = (

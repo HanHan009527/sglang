@@ -63,6 +63,72 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _should_use_split_prefill_for_disagg_batch(
+    scheduler: "Scheduler", batch: Optional[ScheduleBatch]
+) -> bool:
+    if batch is None or batch.is_empty() or batch.forward_mode.is_split_prefill():
+        return False
+
+    bootstrap_queue = getattr(scheduler, "disagg_prefill_bootstrap_queue", None)
+    kv_mgr = getattr(bootstrap_queue, "kv_manager", None)
+    if kv_mgr is None or not getattr(kv_mgr, "async_kv_enabled", False):
+        return False
+
+    # Split-prefill requires the model to implement forward_split_prefill.
+    tp_worker = getattr(scheduler, "tp_worker", None)
+    model_runner = getattr(tp_worker, "model_runner", None)
+    model = getattr(model_runner, "model", None)
+    if model is None or not callable(getattr(model, "forward_split_prefill", None)):
+        return False
+
+    # Multimodal inputs currently require the full forward path
+    # (general_mm_embed_routine / deepstack merge), which split-prefill bypasses.
+    if batch.multimodal_inputs is not None and any(
+        im is not None
+        for im in batch.multimodal_inputs
+    ):
+        return False
+
+    eligible_reqs = [
+        req
+        for req in batch.reqs
+        if getattr(req, "bootstrap_host", None) != FAKE_BOOTSTRAP_HOST
+    ]
+    if not eligible_reqs:
+        return False
+
+    return all(
+        getattr(req, "start_send_idx", None) == 0
+        and getattr(req, "is_chunked", 0) <= 0
+        for req in eligible_reqs
+    )
+
+
+def _run_split_prefill_batch(
+    scheduler: "Scheduler", batch: ScheduleBatch
+) -> "GenerationBatchResult":
+    total_layers = scheduler.model_config.num_hidden_layers
+    final_result = None
+
+    while not batch.split_prefill_finished:
+        prev_split_index = batch.split_index
+        remaining_layers = max(total_layers - prev_split_index, 0)
+        batch.split_forward_count = 1 if remaining_layers > 0 else 0
+        final_result = scheduler.run_batch(batch)
+        current_split_index = prev_split_index
+        if batch.split_forward_batch is not None:
+            current_split_index = batch.split_forward_batch.split_index
+        batch.split_index = current_split_index
+        if current_split_index >= total_layers:
+            batch.split_prefill_finished = True
+        elif current_split_index <= prev_split_index:
+            raise RuntimeError(
+                f"Split prefill made no progress: prev={prev_split_index}, current={current_split_index}"
+            )
+
+    return final_result
+
+
 def release_req_to_metadata_buffer(
     req: Req, allocator: ReqToMetadataIdxAllocator
 ) -> None:
@@ -381,6 +447,8 @@ class SchedulerDisaggregationPrefillMixin:
         batch = self.maybe_prepare_mlp_sync_batch(batch)
 
         if batch:
+            if _should_use_split_prefill_for_disagg_batch(self, batch):
+                batch.prepare_for_split_prefill()
             set_schedule_time_batch(batch)
 
         return batch
@@ -409,7 +477,11 @@ class SchedulerDisaggregationPrefillMixin:
             if batch:
                 if self.enable_staging:
                     self.maybe_prefetch_staging_for_batch(batch)
-                result = self.run_batch(batch)
+                result = (
+                    _run_split_prefill_batch(self, batch)
+                    if batch.forward_mode.is_split_prefill()
+                    else self.run_batch(batch)
+                )
                 self.process_batch_result(batch, result)
             else:
                 self.on_idle()
@@ -443,7 +515,11 @@ class SchedulerDisaggregationPrefillMixin:
             if batch:
                 if self.enable_staging:
                     self.maybe_prefetch_staging_for_batch(batch)
-                batch_result = self.run_batch(batch)
+                batch_result = (
+                    _run_split_prefill_batch(self, batch)
+                    if batch.forward_mode.is_split_prefill()
+                    else self.run_batch(batch)
+                )
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None

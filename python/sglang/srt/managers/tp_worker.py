@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import torch
 
 from sglang.srt.distributed import get_pp_group, get_world_group
+from sglang.srt.disaggregation.transfer_plan import collect_split_ready_transfer_items
 from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
     GetWeightsByNameReqInput,
@@ -535,11 +536,9 @@ class TpModelWorker(BaseTpWorker):
     def forward_batch_split_prefill(
         self,
         batch: ScheduleBatch,
-        async_kv_split_driver: Optional[Any] = None,
     ):
         if batch.split_index == 0:
             model_worker_batch = batch.get_model_worker_batch()
-            model_worker_batch.async_kv_split_driver = async_kv_split_driver
             forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
             batch.split_forward_batch = forward_batch
             batch.seq_lens_cpu_cache = model_worker_batch.seq_lens_cpu
@@ -551,13 +550,15 @@ class TpModelWorker(BaseTpWorker):
             batch.split_forward_batch, split_forward_count=batch.split_forward_count
         )
         new_split_index = batch.split_forward_batch.split_index
-        split_driver = async_kv_split_driver or batch.split_forward_batch.async_kv_split_driver
-        if split_driver is not None and new_split_index > prev_split_index:
-            split_driver.notify_split_range_ready(
+        ready_transfer_items = None
+        split_progress_started = False
+        if new_split_index > prev_split_index:
+            ready_transfer_items = collect_split_ready_transfer_items(
                 batch.split_forward_batch,
                 prev_split_index,
                 new_split_index,
             )
+            split_progress_started = prev_split_index == 0
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
         if logits_output:
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
@@ -567,6 +568,8 @@ class TpModelWorker(BaseTpWorker):
             logits_output=logits_output,
             can_run_cuda_graph=can_run_cuda_graph,
             expert_distribution_metrics=out.expert_distribution_metrics,
+            ready_transfer_items=ready_transfer_items,
+            split_progress_started=split_progress_started,
         )
         batch_result.next_token_ids = next_token_ids
         return batch_result

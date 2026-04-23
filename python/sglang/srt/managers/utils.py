@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
@@ -14,6 +14,7 @@ from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
+    from sglang.srt.disaggregation.transfer_plan import AsyncTransferItem
     from sglang.srt.managers.scheduler import GenerationBatchResult
     from sglang.srt.speculative.eagle_info import EagleDraftInput
 
@@ -48,6 +49,8 @@ class GenerationBatchResult:
 
     # metrics
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
+    ready_transfer_items: Optional[Tuple["AsyncTransferItem", ...]] = None
+    split_progress_started: bool = False
 
     def copy_to_cpu(self, return_logprob: bool):
         """Copy tensors to CPU in overlap scheduling.

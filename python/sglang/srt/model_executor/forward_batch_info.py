@@ -438,8 +438,6 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
     # For dumper: request IDs for cross-step sequence tracking
     rids: Optional[List[str]] = None
-    async_kv_split_driver: Any = None
-    async_kv_batch_started: bool = False
 
     @classmethod
     def init_new(
@@ -490,7 +488,6 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             return_pooled_hidden_states=batch.return_pooled_hidden_states,
             rids=[req.rid for req in batch.reqs],
-            async_kv_split_driver=batch.async_kv_split_driver,
         )
         device = model_runner.device
 

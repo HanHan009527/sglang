@@ -1438,9 +1438,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Whether to return captured experts
     return_routed_experts: bool = False
 
-    # Explicit async split-prefill driver for async disaggregation transfers.
-    async_kv_split_driver: Any = None
-
     # Whether this batch is prefill-only (no token generation needed)
     is_prefill_only: bool = False
 
@@ -2478,7 +2475,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             mamba_track_indices=self.mamba_track_indices,
             mamba_track_mask=self.mamba_track_mask,
             mamba_track_seqlens=self.mamba_track_seqlens,
-            async_kv_split_driver=self.async_kv_split_driver,
         )
 
     def copy(self):
@@ -2508,7 +2504,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             mamba_track_seqlens=self.mamba_track_seqlens,
             dp_cooperation_info=self.dp_cooperation_info,
             prefill_stats=self.prefill_stats,
-            async_kv_split_driver=self.async_kv_split_driver,
         )
 
     def maybe_evict_swa(self):
@@ -2688,4 +2683,3 @@ class ModelWorkerBatch:
     mamba_track_indices: Optional[torch.Tensor] = None  # shape: [b], int64
     mamba_track_mask: Optional[torch.Tensor] = None  # shape: [b], bool
     mamba_track_seqlens: Optional[torch.Tensor] = None  # shape: [b], int64
-    async_kv_split_driver: Any = None

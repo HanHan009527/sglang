@@ -25,8 +25,8 @@ from sglang.srt.disaggregation.common.utils import (
     FastQueue,
     group_concurrent_contiguous,
 )
-from sglang.srt.disaggregation.mooncake.async_kv_utils import AsyncTransferItem
 from sglang.srt.disaggregation.mooncake.async_kv_mixin import MooncakeKVAsyncMixin
+from sglang.srt.disaggregation.transfer_plan import AsyncTransferItem
 from sglang.srt.disaggregation.mooncake.utils import (
     check_mooncake_custom_mem_pool_enabled,
 )
@@ -287,8 +287,57 @@ class MooncakeKVManager(MooncakeKVAsyncMixin, CommonKVManager):
     def _use_async_for_room(self, room: int) -> bool:
         return self._async_use_for_room(room)
 
+    def _finalize_async_transfer(self, rid: int) -> None:
+        return self._async_finalize_room(rid)
+
     def _flush_all_layers(self, rid: int) -> None:
-        return self._async_flush_all_layers(rid)
+        return self._finalize_async_transfer(rid)
+
+    def _finalize_last_chunk_transfer(
+        self,
+        req: TransferInfo,
+        kv_chunk: TransferKVChunk,
+        target_rank_registration_info: KVArgsRegisterInfo,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        *,
+        use_async: bool,
+        polls: list[bool],
+        dst_ranks_infos: list[tuple[str, int, int]],
+        prefill_unique_rank: int,
+    ) -> None:
+        if kv_chunk.state_indices is not None and not use_async:
+            self.maybe_send_extra(
+                req,
+                kv_chunk.state_indices,
+                target_rank_registration_info.dst_state_data_ptrs,
+                executor,
+                target_rank_registration_info,
+            )
+
+        ret = self.send_aux(
+            req,
+            kv_chunk.prefill_aux_index,
+            target_rank_registration_info.dst_aux_ptrs,
+        )
+        polls.append(ret == 0)
+        dst_ranks_infos.append((req.endpoint, req.dst_port, req.room))
+
+        if len(polls) == req.required_dst_info_num:
+            status = KVPoll.Success if all(polls) else KVPoll.Failed
+            self.update_status(req.room, status)
+            for endpoint, dst_port, room in dst_ranks_infos:
+                self.sync_status_to_decode_endpoint(
+                    endpoint,
+                    dst_port,
+                    room,
+                    status,
+                    prefill_unique_rank,
+                )
+
+    def _cleanup_transfer_state_if_done(self, room: int) -> None:
+        if room not in self.request_status or self.check_status(room) == KVPoll.Success:
+            if room in self.transfer_infos:
+                self.transfer_infos.pop(room)
 
     # ------------------------------------------------------------------
     # Staging buffer methods (all delegate to staging_handler.py)
@@ -1251,8 +1300,7 @@ class MooncakeKVManager(MooncakeKVAsyncMixin, CommonKVManager):
 
                 use_async = self._use_async_for_room(kv_chunk.room)
                 if use_async and kv_chunk.is_last_chunk:
-                    # Wait for any in-flight per-layer submits before finalizing the request.
-                    self._flush_all_layers(kv_chunk.room)
+                    self._finalize_async_transfer(kv_chunk.room)
                 # When staging transfer is not yet ready (watermark/allocation pending),
                 # the chunk is re-enqueued and we break out of the req loop to retry later.
                 staging_deferred = False
@@ -1367,39 +1415,16 @@ class MooncakeKVManager(MooncakeKVAsyncMixin, CommonKVManager):
                                 break
 
                         if kv_chunk.is_last_chunk:
-                            if kv_chunk.state_indices is not None:
-                                if not use_async:
-                                    self.maybe_send_extra(
-                                        req,
-                                        kv_chunk.state_indices,
-                                        target_rank_registration_info.dst_state_data_ptrs,
-                                        executor,
-                                        target_rank_registration_info,
-                                    )
-
-                            # Only the last chunk we need to send the aux data
-                            ret = self.send_aux(
+                            self._finalize_last_chunk_transfer(
                                 req,
-                                kv_chunk.prefill_aux_index,
-                                target_rank_registration_info.dst_aux_ptrs,
+                                kv_chunk,
+                                target_rank_registration_info,
+                                executor,
+                                use_async=use_async,
+                                polls=polls,
+                                dst_ranks_infos=dst_ranks_infos,
+                                prefill_unique_rank=prefill_unique_rank,
                             )
-                            polls.append(True if ret == 0 else False)
-                            dst_ranks_infos.append(
-                                (req.endpoint, req.dst_port, req.room)
-                            )
-
-                            # Only sync status when all the dst ranks have received the kvcache
-                            if len(polls) == req.required_dst_info_num:
-                                status = KVPoll.Success if all(polls) else KVPoll.Failed
-                                self.update_status(req.room, status)
-                                for endpoint, dst_port, room in dst_ranks_infos:
-                                    self.sync_status_to_decode_endpoint(
-                                        endpoint,
-                                        dst_port,
-                                        room,
-                                        status,
-                                        prefill_unique_rank,
-                                    )
                     else:
                         # Dummy request means the decode instance is not used, so its status can be marked as success directly
                         # Dummy request does not need to sync status to decode endpoint
@@ -1409,12 +1434,7 @@ class MooncakeKVManager(MooncakeKVAsyncMixin, CommonKVManager):
                 if staging_deferred:
                     continue
 
-                if (
-                    kv_chunk.room not in self.request_status
-                    or self.check_status(kv_chunk.room) == KVPoll.Success
-                ):
-                    if kv_chunk.room in self.transfer_infos:
-                        self.transfer_infos.pop(kv_chunk.room)
+                self._cleanup_transfer_state_if_done(kv_chunk.room)
 
             except Exception as e:
                 # NOTE(shangming): Remove this when we make sure the transfer thread is bug-free

@@ -1393,6 +1393,71 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+    @torch.no_grad()
+    def forward_split_prefill(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        split_interval: Tuple[int, int],  # [start, end) 0-based
+        input_embeds: torch.Tensor = None,
+    ):
+        start, end = split_interval
+
+        if self.is_mrope_enabled:
+            positions = forward_batch.mrope_positions
+
+        if start == 0:
+            forward_batch.residual = None
+            if input_embeds is None:
+                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
+            else:
+                forward_batch.hidden_states = input_embeds
+
+        aux_hidden_states = getattr(
+            forward_batch, "_split_prefill_aux_hidden_states", None
+        )
+        if self.capture_aux_hidden_states and aux_hidden_states is None:
+            aux_hidden_states = []
+            setattr(forward_batch, "_split_prefill_aux_hidden_states", aux_hidden_states)
+
+        for i in range(start, end):
+            with get_global_expert_distribution_recorder().with_current_layer(i):
+                layer = self.model.layers[i]
+                forward_batch.hidden_states, forward_batch.residual = layer(
+                    positions=positions,
+                    hidden_states=forward_batch.hidden_states,
+                    residual=forward_batch.residual,
+                    forward_batch=forward_batch,
+                    captured_last_layer_outputs=(
+                        aux_hidden_states
+                        if getattr(layer, "_is_layer_to_capture", False)
+                        else None
+                    ),
+                )
+
+        if end == self.model.config.num_hidden_layers:
+            if forward_batch.hidden_states.shape[0] != 0:
+                if forward_batch.residual is None:
+                    hidden_states = self.model.norm(forward_batch.hidden_states)
+                else:
+                    hidden_states, _ = self.model.norm(
+                        forward_batch.hidden_states, forward_batch.residual
+                    )
+                forward_batch.hidden_states = hidden_states
+
+            result = self.logits_processor(
+                input_ids,
+                forward_batch.hidden_states,
+                self.lm_head,
+                forward_batch,
+                aux_hidden_states,
+            )
+        else:
+            result = None
+
+        return result
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1529,6 +1594,71 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             self.lm_head.weight = head
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+    @torch.no_grad()
+    def forward_split_prefill(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        split_interval: Tuple[int, int],  # [start, end) 0-based
+        input_embeds: torch.Tensor = None,
+    ):
+        start, end = split_interval
+
+        if self.is_mrope_enabled:
+            positions = forward_batch.mrope_positions
+
+        if start == 0:
+            forward_batch.residual = None
+            if input_embeds is None:
+                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
+            else:
+                forward_batch.hidden_states = input_embeds
+
+        aux_hidden_states = getattr(
+            forward_batch, "_split_prefill_aux_hidden_states", None
+        )
+        if self.capture_aux_hidden_states and aux_hidden_states is None:
+            aux_hidden_states = []
+            setattr(forward_batch, "_split_prefill_aux_hidden_states", aux_hidden_states)
+
+        for i in range(start, end):
+            with get_global_expert_distribution_recorder().with_current_layer(i):
+                layer = self.model.layers[i]
+                forward_batch.hidden_states, forward_batch.residual = layer(
+                    positions=positions,
+                    hidden_states=forward_batch.hidden_states,
+                    residual=forward_batch.residual,
+                    forward_batch=forward_batch,
+                    captured_last_layer_outputs=(
+                        aux_hidden_states
+                        if getattr(layer, "_is_layer_to_capture", False)
+                        else None
+                    ),
+                )
+
+        if end == self.model.config.num_hidden_layers:
+            if forward_batch.hidden_states.shape[0] != 0:
+                if forward_batch.residual is None:
+                    hidden_states = self.model.norm(forward_batch.hidden_states)
+                else:
+                    hidden_states, _ = self.model.norm(
+                        forward_batch.hidden_states, forward_batch.residual
+                    )
+                forward_batch.hidden_states = hidden_states
+
+            result = self.logits_processor(
+                input_ids,
+                forward_batch.hidden_states,
+                self.lm_head,
+                forward_batch,
+                aux_hidden_states,
+            )
+        else:
+            result = None
+
+        return result
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

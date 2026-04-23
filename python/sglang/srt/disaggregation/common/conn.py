@@ -176,11 +176,14 @@ class CommonKVManager(BaseKVManager):
             )
 
     def maybe_prepare_async_kv_split(self, sch, batch):
-        """Optional split-prefill driver hook for async KV transfers.
+        """Optional split-prefill preparation hook for async KV transfers.
 
-        Default implementation returns None (feature unsupported).
+        Default implementation returns False (feature unsupported).
         """
 
+        return False
+
+    def submit_split_transfer_items(self, transfer_items, *, batch_started: bool = False):
         return None
 
     def check_status(self, bootstrap_room: int) -> KVPoll:
