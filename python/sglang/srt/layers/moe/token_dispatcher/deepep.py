@@ -953,50 +953,62 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
         group_size = buffer.group_size
         T = self.num_max_dispatch_tokens_per_rank
 
-        # Track which (expert, src_rank) slices are ready per dst_rank.
-        ready_per_rank = [set() for _ in range(group_size)]
         pending_ranks = set(range(group_size))
-
-        # Pre-allocate the full output buffer [E, num_ranks*T, H_out].
-        # We don't know H_out until the first gemm_fn call, so we defer
-        # allocation to after the first call and use a list of slices.
         out = None  # allocated on first gemm_fn return
+
+        # Cache peek_ready results: slices_per_rank[r][e] = (count, begin, x_slice, scales)
+        slices_per_rank = [{} for _ in range(group_size)]
 
         while pending_ranks:
             for r in list(pending_ranks):
                 for e in range(num_local_experts):
-                    if e not in ready_per_rank[r]:
-                        if buffer.low_latency_dispatch_peek_ready(handle, e, r) is not None:
-                            ready_per_rank[r].add(e)
-                if len(ready_per_rank[r]) == num_local_experts:
+                    if e not in slices_per_rank[r]:
+                        result = buffer.low_latency_dispatch_peek_ready(handle, e, r)
+                        if result is not None:
+                            slices_per_rank[r][e] = result
+                if len(slices_per_rank[r]) == num_local_experts:
                     # All expert slices from rank r are ready — run GEMM + send.
-                    x_r = handle.packed_recv_x[:, r * T : (r + 1) * T, :]
-                    x_r_scale = (
-                        handle.packed_recv_x_scales[:, r * T : (r + 1) * T, :]
-                        if use_fp8 and handle.packed_recv_x_scales is not None
-                        else None
-                    )
-
-                    # masked_m_r: valid token count per expert from rank r.
-                    # packed_recv_layout_range[:,r] is the cumulative end offset
-                    # within the packed buffer; diff gives per-rank count.
+                    # packed_recv_layout_range[e, r] = (begin << 32) | count
+                    # Use count directly from the packed field; x_slice from peek_ready
+                    # already points to the correct rows in packed_recv_x.
                     layout = handle.packed_recv_layout_range  # [E, num_ranks], int64
-                    if r == 0:
-                        masked_m_r = layout[:, 0].to(torch.int32)
-                    else:
-                        masked_m_r = (layout[:, r] - layout[:, r - 1]).to(torch.int32)
+                    masked_m_r = (layout[:, r] & 0xFFFFFFFF).to(torch.int32)
+
+                    # Build x_r [E, T, H] by stacking the per-expert slices.
+                    # Each slice has shape [count_e, H]; pad to T rows.
+                    x_slices = []
+                    s_slices = []
+                    for e in range(num_local_experts):
+                        count_e, begin_e, x_slice, scales_e = slices_per_rank[r][e]
+                        pad = T - count_e
+                        if pad > 0:
+                            x_slice = torch.nn.functional.pad(x_slice, (0, 0, 0, pad))
+                        x_slices.append(x_slice)
+                        if use_fp8 and scales_e is not None:
+                            if pad > 0:
+                                scales_e = torch.nn.functional.pad(scales_e, (0, 0, 0, pad))
+                            s_slices.append(scales_e)
+                    x_r = torch.stack(x_slices, dim=0)  # [E, T, H]
+                    x_r_scale = torch.stack(s_slices, dim=0) if s_slices else None
 
                     out_r = gemm_fn(r, x_r, x_r_scale, masked_m_r)  # [E, T, H_out]
 
                     if out is None:
                         H_out = out_r.size(2)
-                        out = torch.empty(
+                        out = torch.zeros(
                             (num_local_experts, group_size * T, H_out),
                             dtype=out_r.dtype,
                             device=out_r.device,
                         )
 
-                    out[:, r * T : (r + 1) * T, :].copy_(out_r)
+                    # Write out_r back at the same positions (begin_e) that the
+                    # combine kernel will read via combine_partial_layout_range.
+                    for e in range(num_local_experts):
+                        count_e, begin_e, _, _ = slices_per_rank[r][e]
+                        if count_e > 0:
+                            out[e, begin_e : begin_e + count_e, :].copy_(
+                                out_r[e, :count_e, :]
+                            )
 
                     buffer.low_latency_combine_launch_send_to_rank(
                         x=out,

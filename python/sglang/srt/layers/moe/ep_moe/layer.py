@@ -251,6 +251,8 @@ class DeepEPMoE(FusedMoE):
             )
             combine_input = self.run_moe_core(dispatch_out)
             return combine_input.hidden_states  # [E, T, H_out]
+
+        return ll_disp.dispatch_pipelined(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
