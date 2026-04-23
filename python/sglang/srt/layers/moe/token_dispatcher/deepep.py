@@ -953,11 +953,16 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
         group_size = buffer.group_size
         T = self.num_max_dispatch_tokens_per_rank
 
-        pending_ranks = set(range(group_size))
+        # Phase A: poll dispatch + run GEMM per rank as data arrives.
+        # IMPORTANT: launch_send_to_rank must NOT be called here because its
+        # init_clean_state zeroes dispatch_rdma_recv_count_buffer (same memory as
+        # combine_rdma_recv_flag_buffer), which would destroy counts for ranks not
+        # yet polled.  All sends are deferred to Phase B.
         out = None  # allocated on first gemm_fn return
 
         # Cache peek_ready results: slices_per_rank[r][e] = (count, begin, x_slice, scales)
         slices_per_rank = [{} for _ in range(group_size)]
+        pending_ranks = set(range(group_size))
 
         while pending_ranks:
             for r in list(pending_ranks):
@@ -967,15 +972,12 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
                         if result is not None:
                             slices_per_rank[r][e] = result
                 if len(slices_per_rank[r]) == num_local_experts:
-                    # All expert slices from rank r are ready — run GEMM + send.
+                    # All expert slices from rank r are ready — run GEMM now.
                     # packed_recv_layout_range[e, r] = (begin << 32) | count
-                    # Use count directly from the packed field; x_slice from peek_ready
-                    # already points to the correct rows in packed_recv_x.
                     layout = handle.packed_recv_layout_range  # [E, num_ranks], int64
                     masked_m_r = (layout[:, r] & 0xFFFFFFFF).to(torch.int32)
 
                     # Build x_r [E, T, H] by stacking the per-expert slices.
-                    # Each slice has shape [count_e, H]; pad to T rows.
                     x_slices = []
                     s_slices = []
                     for e in range(num_local_experts):
@@ -1001,8 +1003,8 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
                             device=out_r.device,
                         )
 
-                    # Write out_r back at the same positions (begin_e) that the
-                    # combine kernel will read via combine_partial_layout_range.
+                    # Write out_r at the same positions (begin_e) the combine
+                    # kernel will read via combine_partial_layout_range.
                     for e in range(num_local_experts):
                         count_e, begin_e, _, _ = slices_per_rank[r][e]
                         if count_e > 0:
@@ -1010,14 +1012,19 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
                                 out_r[e, :count_e, :]
                             )
 
-                    buffer.low_latency_combine_launch_send_to_rank(
-                        x=out,
-                        dst_rank=r,
-                        handle=handle,
-                        topk_idx=topk_ids,
-                        topk_weights=topk_weights,
-                    )
                     pending_ranks.discard(r)
+
+        # Phase B: all dispatch polling is done; now safe to call launch_send_to_rank.
+        # init_clean_state (first call) will zero dispatch_rdma_recv_count_buffer, but
+        # we no longer need those counts.
+        for r in range(group_size):
+            buffer.low_latency_combine_launch_send_to_rank(
+                x=out,
+                dst_rank=r,
+                handle=handle,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+            )
 
         combined_x = buffer.low_latency_combine_finish_recv(handle)
         self.handle = None
