@@ -908,8 +908,11 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
         For each dst_rank r (in order of arrival):
           1. Poll until all (local_expert, r) slices are ready.
           2. Call gemm_fn(r, x_r, x_r_scale, masked_m_r) → out_r [E, T, H_out].
-          3. Write out_r into the output buffer and launch_send_to_rank(r).
+          3. Write out_r into the output buffer and launch_send_to_rank(r) immediately.
         Then finish_recv and return the combined tensor.
+
+        Phase 4 buffer separation makes step 3 safe mid-polling: dispatch_rdma_recv_count_buffer
+        and combine_rdma_recv_flag_buffer are now independent memory regions.
 
         gemm_fn signature:
             (dst_rank: int,
@@ -953,11 +956,10 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
         group_size = buffer.group_size
         T = self.num_max_dispatch_tokens_per_rank
 
-        # Phase A: poll dispatch + run GEMM per rank as data arrives.
-        # IMPORTANT: launch_send_to_rank must NOT be called here because its
-        # init_clean_state zeroes dispatch_rdma_recv_count_buffer (same memory as
-        # combine_rdma_recv_flag_buffer), which would destroy counts for ranks not
-        # yet polled.  All sends are deferred to Phase B.
+        # Poll dispatch + run GEMM + send combine per rank as data arrives.
+        # With Phase 4 buffer separation, dispatch_rdma_recv_count_buffer and
+        # combine_rdma_recv_flag_buffer are independent, so launch_send_to_rank
+        # can be called immediately after GEMM without corrupting dispatch counts.
         out = None  # allocated on first gemm_fn return
 
         # Cache peek_ready results: slices_per_rank[r][e] = (count, begin, x_slice, scales)
@@ -1012,19 +1014,16 @@ class _DeepEPDispatcherImplLowLatencyChunked(_DeepEPDispatcherImplLowLatency):
                                 out_r[e, :count_e, :]
                             )
 
-                    pending_ranks.discard(r)
+                    # Send combine data to rank r immediately after GEMM.
+                    buffer.low_latency_combine_launch_send_to_rank(
+                        x=out,
+                        dst_rank=r,
+                        handle=handle,
+                        topk_idx=topk_ids,
+                        topk_weights=topk_weights,
+                    )
 
-        # Phase B: all dispatch polling is done; now safe to call launch_send_to_rank.
-        # init_clean_state (first call) will zero dispatch_rdma_recv_count_buffer, but
-        # we no longer need those counts.
-        for r in range(group_size):
-            buffer.low_latency_combine_launch_send_to_rank(
-                x=out,
-                dst_rank=r,
-                handle=handle,
-                topk_idx=topk_ids,
-                topk_weights=topk_weights,
-            )
+                    pending_ranks.discard(r)
 
         combined_x = buffer.low_latency_combine_finish_recv(handle)
         self.handle = None
