@@ -42,6 +42,7 @@ from sglang.srt.distributed.parallel_state import (
     get_moe_expert_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
+from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
     get_attention_cp_size,
@@ -51,6 +52,7 @@ from sglang.srt.layers.dp_attention import (
     set_dp_buffer_len,
     set_is_extend_in_batch,
 )
+from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.layers.utils.cp_utils import ContextParallelMetadata
 from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
     ForwardBatchDeepSeekMHAMixin,
@@ -856,6 +858,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
             self.is_extend_in_batch, global_num_tokens
         )
+        # When fuse-dp-gather is active, force MAX_LEN padding because we
+        # don't have exact per-rank token counts (only conservative estimates).
+        # MAX_LEN is safe with over-allocated buffers; SUM_LEN is not.
+        if (
+            envs.SGLANG_DEEPEP_FUSE_DP_GATHER.get()
+            and not get_moe_a2a_backend().is_none()
+        ):
+            dp_padding_mode = DpPaddingMode.MAX_LEN
         self.dp_padding_mode = dp_padding_mode
 
         if dp_padding_mode.is_max_len():

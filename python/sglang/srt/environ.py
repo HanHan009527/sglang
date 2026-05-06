@@ -401,6 +401,10 @@ class Envs:
     # Enable chunked combine path (Phase 2): sends combine back per-rank as soon
     # as that rank's expert outputs are ready, instead of waiting for all ranks.
     SGLANG_DEEPEP_CHUNKED_COMBINE = EnvBool(False)
+    # When DeepEP is enabled, skip the scheduler's NCCL AllGather for
+    # batch metadata and use conservative buffer allocation instead.
+    # This eliminates the synchronization barrier that causes DP imbalance.
+    SGLANG_DEEPEP_FUSE_DP_GATHER = EnvBool(False)
     SGLANG_BLACKWELL_OVERLAP_SHARED_EXPERTS_OUTSIDE_SBO = EnvBool(False)
 
     # NIXL-EP
