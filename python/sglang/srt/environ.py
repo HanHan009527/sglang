@@ -407,6 +407,10 @@ class Envs:
     SGLANG_DEEPEP_BF16_DISPATCH = EnvBool(False)
     SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(128)
     SGLANG_DEEPEP_LL_COMBINE_SEND_NUM_SMS = EnvInt(32)
+    # When DeepEP is enabled, skip the scheduler's NCCL AllGather for
+    # batch metadata and use conservative buffer allocation instead.
+    # This eliminates the synchronization barrier that causes DP imbalance.
+    SGLANG_DEEPEP_FUSE_DP_GATHER = EnvBool(False)
     SGLANG_BLACKWELL_OVERLAP_SHARED_EXPERTS_OUTSIDE_SBO = EnvBool(False)
 
     # NIXL-EP

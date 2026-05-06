@@ -8,6 +8,7 @@ import torch
 from sglang.srt.batch_overlap.two_batch_overlap import TboDPAttentionPreparer
 from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.environ import envs
+from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.observability.metrics_collector import DPCooperationInfo
@@ -198,7 +199,12 @@ def prepare_mlp_sync_batch_raw(
         local_forward_mode=local_forward_mode,
     )
 
-    if not skip_all_gather:
+    fuse_dp_gather = (
+        envs.SGLANG_DEEPEP_FUSE_DP_GATHER.get()
+        and not get_moe_a2a_backend().is_none()
+    )
+
+    if not skip_all_gather and not fuse_dp_gather:
         mlp_sync_info.all_gather(device=device, group=group)
 
         mlp_sync_info.tbo_split_seq_index, mlp_sync_info.global_forward_mode = (
@@ -206,6 +212,22 @@ def prepare_mlp_sync_batch_raw(
                 mlp_sync_info.tp0_info[:, 4:6],
             )
         )
+    elif fuse_dp_gather:
+        # When an EP all-to-all backend is active, skip the blocking NCCL
+        # AllGather and use conservative defaults instead.  The EP dispatcher
+        # handles token redistribution dynamically, so exact per-rank token
+        # counts are not required for buffer allocation (MAX_LEN padding is
+        # forced in prepare_mlp_sync_batch).
+        mlp_sync_info.global_num_tokens = [mlp_sync_info.num_tokens] * dp_size
+        mlp_sync_info.global_num_tokens_for_logprob = (
+            [mlp_sync_info.num_tokens_for_logprob] * dp_size
+        )
+        # Conservative: use local values (safe but may miss optimisations)
+        mlp_sync_info.can_cuda_graph = can_cuda_graph
+        mlp_sync_info.is_extend_in_batch = is_extend_in_batch
+        # TBO requires global consensus — disable in fused mode
+        mlp_sync_info.tbo_split_seq_index = None
+        mlp_sync_info.global_forward_mode = local_forward_mode
 
     need_idle_batch = skip_all_gather or max(mlp_sync_info.global_num_tokens) > 0
     if need_idle_batch:
@@ -216,7 +238,10 @@ def prepare_mlp_sync_batch_raw(
             # NOTE: for prebuilt batch, we add an inner idle batch to run MLP sync
             batch_to_gather = local_batch.inner_idle_batch = get_idle_batch()
         _update_gather_batch(
-            batch_to_gather, mlp_sync_info, require_mlp_tp_gather, skip_all_gather
+            batch_to_gather,
+            mlp_sync_info,
+            require_mlp_tp_gather,
+            skip_all_gather and not fuse_dp_gather,
         )
 
     if _ENABLE_METRICS_DP_ATTENTION and local_batch is not None:
