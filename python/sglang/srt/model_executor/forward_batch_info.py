@@ -444,18 +444,6 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         batch: ModelWorkerBatch,
         model_runner: ModelRunner,
     ):
-        # If there's a pending async AllGather, finalize it before reading any
-        # batch fields so that exact per-DP-rank metadata is available.
-        if getattr(batch, "_async_allgather_info", None) is not None:
-            batch._async_allgather_info._all_gather_finalize()
-            batch.global_num_tokens = batch._async_allgather_info.global_num_tokens
-            batch.global_num_tokens_for_logprob = (
-                batch._async_allgather_info.global_num_tokens_for_logprob
-            )
-            batch.is_extend_in_batch = batch._async_allgather_info.is_extend_in_batch
-            batch.can_run_dp_cuda_graph = batch._async_allgather_info.can_cuda_graph
-            batch._async_allgather_info = None
-
         ret = cls(
             forward_mode=batch.forward_mode,
             batch_size=len(batch.seq_lens),

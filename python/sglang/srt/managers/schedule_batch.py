@@ -1380,8 +1380,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     can_run_dp_cuda_graph: bool = False
     tbo_split_seq_index: Optional[int] = None
     global_forward_mode: Optional[ForwardMode] = None
-    # Holds MLPSyncBatchInfo with pending async AllGather; finalized in ForwardBatch.init_new()
-    _async_allgather_info: Optional[object] = None
 
     # For processing logprobs
     return_logprob: bool = False
@@ -2434,7 +2432,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             tbo_split_seq_index=self.tbo_split_seq_index,
             global_forward_mode=self.global_forward_mode,
-            _async_allgather_info=self._async_allgather_info,
             extend_num_tokens=self.extend_num_tokens,
             extend_seq_lens=extend_seq_lens,
             extend_prefix_lens=extend_prefix_lens,
@@ -2684,6 +2681,3 @@ class ModelWorkerBatch:
     mamba_track_indices: Optional[torch.Tensor] = None  # shape: [b], int64
     mamba_track_mask: Optional[torch.Tensor] = None  # shape: [b], bool
     mamba_track_seqlens: Optional[torch.Tensor] = None  # shape: [b], int64
-
-    # Holds MLPSyncBatchInfo with pending async AllGather; finalized in ForwardBatch.init_new()
-    _async_allgather_info: Optional[object] = None
