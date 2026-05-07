@@ -274,7 +274,8 @@ def prepare_mlp_sync_batch_raw(
         # Conservative defaults are set immediately so scheduling decisions
         # can proceed.  The exact per-DP-rank metadata will be extracted
         # later in ForwardBatch.init_new() before the model runner needs it.
-        mlp_sync_info.all_gather_async(device=device, group=group)
+        # NOTE: temporarily using blocking AllGather to isolate async issues.
+        mlp_sync_info.all_gather(device=device, group=group)
         # Skip TBO in fused mode (requires global consensus we don't have yet)
         mlp_sync_info.tbo_split_seq_index = None
         mlp_sync_info.global_forward_mode = local_forward_mode
