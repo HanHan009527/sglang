@@ -137,7 +137,8 @@ class MLPSyncBatchInfo:
         # Each rank assumes all DP ranks have the same token count as local.
         self.global_num_tokens = [self.num_tokens] * self.dp_size
         self.global_num_tokens_for_logprob = [self.num_tokens_for_logprob] * self.dp_size
-        self.can_cuda_graph = True  # conservative: allow cuda graph
+        # can_cuda_graph requires ALL DP ranks to agree — conservative: False
+        self.can_cuda_graph = False
         self.is_extend_in_batch = self.is_extend_in_batch
         # tp0_info not available yet; set to None
         self.tp0_info = None
