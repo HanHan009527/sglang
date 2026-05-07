@@ -71,19 +71,13 @@ class MLPSyncBatchInfo:
             dtype=dtype,
         )
 
-    def all_gather(self, device, group: torch.distributed.ProcessGroup):
-        local_info_tensor = self._get_local_tensor(device=device)
-        global_info_tensor = torch.empty(
-            (self.dp_size, self.tp_size * self.cp_size, 6),
-            dtype=torch.int64,
-            device=device,
-        )
+    # For async AllGather (Phase 2 fuse_dp_gather)
+    _async_handle: Optional[object] = None  # torch.distributed.Work handle
+    _async_global_info_tensor: Optional[torch.Tensor] = None
+    _async_device: Optional[str] = None
 
-        torch.distributed.all_gather_into_tensor(
-            global_info_tensor.flatten(),
-            local_info_tensor,
-            group=group,
-        )
+    def _process_gathered_info(self, global_info_tensor, device):
+        """Extract per-DP-rank metadata from the gathered info tensor."""
         if device == "cpu":
             tp_active_ranks = get_tp_group().active_ranks_cpu
         else:
@@ -103,6 +97,64 @@ class MLPSyncBatchInfo:
         self.is_extend_in_batch = bool(tp0_info[:, 3].max().item())
         if _ENABLE_METRICS_DP_ATTENTION:
             self.dp_cooperation_info = DPCooperationInfo.create(tp0_info[:, 5].tolist())
+
+    def all_gather(self, device, group: torch.distributed.ProcessGroup):
+        local_info_tensor = self._get_local_tensor(device=device)
+        global_info_tensor = torch.empty(
+            (self.dp_size, self.tp_size * self.cp_size, 6),
+            dtype=torch.int64,
+            device=device,
+        )
+
+        torch.distributed.all_gather_into_tensor(
+            global_info_tensor.flatten(),
+            local_info_tensor,
+            group=group,
+        )
+        self._process_gathered_info(global_info_tensor, device)
+
+    def all_gather_async(self, device, group: torch.distributed.ProcessGroup):
+        """Launch an async AllGather and return immediately with conservative defaults.
+
+        The caller must later call _all_gather_finalize() to wait for completion
+        and extract the exact per-DP-rank metadata.
+        """
+        local_info_tensor = self._get_local_tensor(device=device)
+        self._async_global_info_tensor = torch.empty(
+            (self.dp_size, self.tp_size * self.cp_size, 6),
+            dtype=torch.int64,
+            device=device,
+        )
+        self._async_handle = torch.distributed.all_gather_into_tensor(
+            self._async_global_info_tensor.flatten(),
+            local_info_tensor,
+            group=group,
+            async_op=True,
+        )
+        self._async_device = device
+
+        # Set conservative defaults so the scheduler can proceed immediately.
+        # Each rank assumes all DP ranks have the same token count as local.
+        self.global_num_tokens = [self.num_tokens] * self.dp_size
+        self.global_num_tokens_for_logprob = [self.num_tokens_for_logprob] * self.dp_size
+        self.can_cuda_graph = True  # conservative: allow cuda graph
+        self.is_extend_in_batch = self.is_extend_in_batch
+        # tp0_info not available yet; set to None
+        self.tp0_info = None
+
+    def _all_gather_finalize(self):
+        """Wait for the async AllGather to complete and extract exact values.
+
+        Returns the exact global_num_tokens list.
+        """
+        if self._async_handle is None:
+            return self.global_num_tokens
+        self._async_handle.wait()
+        self._process_gathered_info(self._async_global_info_tensor, self._async_device)
+        self._async_handle = None
+        self._async_global_info_tensor = None
+        self._async_device = None
+        return self.global_num_tokens
 
 
 def _update_gather_batch(
@@ -127,6 +179,10 @@ def _update_gather_batch(
 
     # Check forward mode for cuda graph
     batch.can_run_dp_cuda_graph = mlp_sync_info.can_cuda_graph
+
+    # Propagate the async AllGather info so it can be finalized later
+    if mlp_sync_info._async_handle is not None:
+        batch._async_allgather_info = mlp_sync_info
 
 
 def prepare_mlp_sync_batch_raw(
@@ -213,23 +269,22 @@ def prepare_mlp_sync_batch_raw(
             )
         )
     elif fuse_dp_gather:
-        # When an EP all-to-all backend is active, skip the blocking NCCL
-        # AllGather and use conservative defaults instead.  The EP dispatcher
-        # handles token redistribution dynamically, so exact per-rank token
-        # counts are not required for buffer allocation (MAX_LEN padding is
-        # forced in prepare_mlp_sync_batch).
-        mlp_sync_info.global_num_tokens = [mlp_sync_info.num_tokens] * dp_size
-        mlp_sync_info.global_num_tokens_for_logprob = (
-            [mlp_sync_info.num_tokens_for_logprob] * dp_size
-        )
-        # Conservative: use local values (safe but may miss optimisations)
-        mlp_sync_info.can_cuda_graph = can_cuda_graph
-        mlp_sync_info.is_extend_in_batch = is_extend_in_batch
-        # TBO requires global consensus — disable in fused mode
+        # Phase 2: Launch async AllGather — don't block the scheduler.
+        # Conservative defaults are set immediately so scheduling decisions
+        # can proceed.  The exact per-DP-rank metadata will be extracted
+        # later in ForwardBatch.init_new() before the model runner needs it.
+        mlp_sync_info.all_gather_async(device=device, group=group)
+        # Skip TBO in fused mode (requires global consensus we don't have yet)
         mlp_sync_info.tbo_split_seq_index = None
         mlp_sync_info.global_forward_mode = local_forward_mode
 
     need_idle_batch = skip_all_gather or max(mlp_sync_info.global_num_tokens) > 0
+    # With async AllGather, conservative defaults may underestimate other ranks'
+    # token counts.  Always create an idle batch when fuse_dp_gather is active
+    # and the local rank has no tokens, because other DP ranks may need us
+    # to participate in EP dispatch.
+    if fuse_dp_gather and not need_idle_batch and local_batch is None:
+        need_idle_batch = True
     if need_idle_batch:
         batch_to_gather = local_batch
         if local_batch is None:
