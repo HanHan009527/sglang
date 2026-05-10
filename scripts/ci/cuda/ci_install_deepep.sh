@@ -21,7 +21,64 @@ if [ -z "${PIP_CMD:-}" ]; then
 fi
 
 export GDRCOPY_HOME=/usr/src/gdrdrv-2.5.1/
-export CUDA_HOME=/usr/local/cuda
+
+cu_version_to_toolkit_version() {
+    local digits="${1#cu}"
+    local len=${#digits}
+    if [ "$len" -lt 2 ]; then
+        echo "FATAL: unsupported CU_VERSION '$1'" >&2
+        return 1
+    fi
+    echo "${digits:0:len-1}.${digits:len-1:1}"
+}
+
+detect_cuda_toolkit_version() {
+    local cuda_dir="$1"
+    if [ -x "${cuda_dir}/bin/nvcc" ]; then
+        "${cuda_dir}/bin/nvcc" --version | grep -oP 'release \K[0-9]+\.[0-9]+' | head -1 || true
+    fi
+}
+
+configure_cuda_toolkit() {
+    local expected_cuda
+    expected_cuda="$(cu_version_to_toolkit_version "${CU_VERSION:-cu130}")"
+
+    local candidates=()
+    [ -n "${CUDA_HOME:-}" ] && candidates+=("${CUDA_HOME}")
+    candidates+=(
+        "/usr/local/cuda-${expected_cuda}"
+        "/usr/local/cuda-${expected_cuda/./}"
+        "/usr/local/cuda-${expected_cuda%.*}-${expected_cuda#*.}"
+        "/usr/local/cuda"
+    )
+
+    local cuda_dir cuda_ver
+    for cuda_dir in "${candidates[@]}"; do
+        [ -d "$cuda_dir" ] || continue
+        cuda_ver="$(detect_cuda_toolkit_version "$cuda_dir")"
+        if [ "$cuda_ver" = "$expected_cuda" ]; then
+            export CUDA_HOME="$cuda_dir"
+            export PATH="${CUDA_HOME}/bin:${PATH}"
+            export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "Using CUDA toolkit ${cuda_ver} at ${CUDA_HOME} for CU_VERSION=${CU_VERSION}"
+            if [ -n "${GITHUB_ENV:-}" ]; then
+                echo "CUDA_HOME=${CUDA_HOME}" >> "$GITHUB_ENV"
+                echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            fi
+            if [ -n "${GITHUB_PATH:-}" ]; then
+                echo "${CUDA_HOME}/bin" >> "$GITHUB_PATH"
+            fi
+            return 0
+        fi
+    done
+
+    cuda_ver="$(detect_cuda_toolkit_version /usr/local/cuda)"
+    echo "FATAL: CU_VERSION=${CU_VERSION} requires CUDA toolkit ${expected_cuda}, but /usr/local/cuda reports ${cuda_ver:-missing nvcc}." >&2
+    echo "Checked: ${candidates[*]}" >&2
+    return 1
+}
+
+configure_cuda_toolkit
 
 GRACE_BLACKWELL=${GRACE_BLACKWELL:-0}
 # Detect architecture
@@ -75,7 +132,7 @@ for deps_group in "$GDRCOPY_DEPS_1" "$GDRCOPY_DEPS_2" "$GDRCOPY_DEPS_3"; do
     }
 done
 cd packages
-CUDA=/usr/local/cuda ./build-deb-packages.sh
+CUDA="${CUDA_HOME}" ./build-deb-packages.sh
 dpkg -i gdrdrv-dkms_*.deb
 dpkg -i libgdrapi_*.deb
 dpkg -i gdrcopy-tests_*.deb
