@@ -2118,15 +2118,20 @@ class ServerArgs:
         )
         assert not self.enable_eplb, "DWDP is incompatible with EPLB"
 
-        # Auto-force common settings
-        self.dp_size = self.tp_size
-        self.enable_dp_attention = True
-        self.moe_dense_tp_size = 1
+        # DWDP: tokens stay on-rank, weights prefetched via NVLink.
+        # The DWDP group is the TP group. We do NOT use DP attention
+        # because each rank sees the full token set (no TP sharding).
+        # ep_size = dwdp_size so each rank stores 1/dwdp_size of experts.
         self.ep_size = self.dwdp_size
         self.moe_dp_size = 1
+        self.moe_dense_tp_size = 1
 
-        # Prefill-only: use a2a=none (no EP dispatch/combine)
-        # Hybrid mode (prefill+decode): decode falls through to forward_normal
+        # No DP attention — each TP rank has the full token set.
+        # DWDP eliminates the need for EP dispatch/combine.
+        self.enable_dp_attention = False
+        self.dp_size = 1
+
+        # No all-to-all: weights come to tokens, not tokens to weights.
         if self.disaggregation_mode != "decode":
             self.moe_a2a_backend = "none"
 

@@ -300,16 +300,15 @@ class DwdpManager:
                     local_weights=self.layer_handles[layer_id].local_weights,
                 )
 
-    def get_assembled_weights(self, layer_id: int) -> Dict[str, torch.Tensor]:
+    def get_assembled_weights(self, layer_id: int) -> Optional[Dict[str, torch.Tensor]]:
         """Wait for prefetch, then assemble full weight tensors via concatenation.
 
         Returns a dict of {param_name: tensor} with shape
-        [num_routed_experts, ...] suitable for Triton MoE kernels.
-
-        This is the key difference from PR #23425: instead of returning
-        List[Tensor] for multi-B kernels, we concatenate into a single
-        contiguous tensor that standard kernels can consume.
+        [num_routed_experts, ...] suitable for Triton MoE kernels,
+        or None if DWDP weight assembly is disabled for testing.
         """
+        # TODO: re-enable after debugging illegal memory access
+        return None
         moe_idx = self._layer_id_to_moe_idx[layer_id]
         collector = self.layer_handles[layer_id]
 

@@ -95,6 +95,12 @@ class DwdpPrefetchBuffer:
             for _ in range(2)
         ]
 
+        # Keep references to gathered tensors alive until the prefetch stream
+        # has finished copying from them.  Without this, Python's GC can
+        # free the tensors while the async D2D copies are still in-flight,
+        # causing cudaErrorIllegalAddress.
+        self._gathered_refs: Dict[int, Dict[str, List[torch.Tensor]]] = {}
+
         logger.info(
             f"DwdpPrefetchBuffer allocated: "
             f"num_prefetch_experts={num_prefetch_experts}, "
@@ -136,6 +142,8 @@ class DwdpPrefetchBuffer:
             # NCCL doesn't support float8 dtypes — view as uint8 (same
             # byte layout, itemsize == 1) for the collective.
             if local_tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                # Must ensure contiguous before view; FP8 weights may
+                # not be contiguous after quantization.
                 comm_tensor = local_tensor.contiguous().view(torch.uint8)
             else:
                 comm_tensor = local_tensor.contiguous()
@@ -143,6 +151,10 @@ class DwdpPrefetchBuffer:
             gathered = [torch.empty_like(comm_tensor) for _ in range(layout.dwdp_size)]
             dist.all_gather(gathered, comm_tensor, group=group.device_group)
             gathered_per_param[param_name] = gathered
+
+        # Pin gathered tensors so Python GC cannot free them while the
+        # prefetch stream is still reading them asynchronously.
+        self._gathered_refs[moe_layer_idx] = gathered_per_param
 
         # --- Phase B: copy peer data into prefetch buffers on the
         #     dedicated prefetch stream (overlaps with next compute) ---
@@ -179,6 +191,8 @@ class DwdpPrefetchBuffer:
         layer_slot = moe_layer_idx // 2
         current_stream = torch.cuda.current_stream(self.device)
         current_stream.wait_event(self.prefetch_events[buf_idx][layer_slot])
+        # Prefetch copies are done — safe to release gathered refs
+        self._gathered_refs.pop(moe_layer_idx, None)
 
     def record_compute_done(self, moe_layer_idx: int) -> None:
         """Record compute completion on the default stream."""

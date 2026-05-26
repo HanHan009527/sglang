@@ -671,6 +671,14 @@ class DeepseekV2MoE(nn.Module):
         # Get assembled full weight tensors via DWDP prefetch + concat
         assembled_weights = dwdp_manager.get_assembled_weights(self.layer_id)
 
+        if assembled_weights is None:
+            # Fallback: no assembled weights, use normal EP forward
+            return self.forward_normal(
+                hidden_states,
+                should_allreduce_fusion=False,
+                use_reduce_scatter=False,
+            )
+
         # Temporarily swap expert weights with assembled full weights,
         # and adjust num_local_experts so the kernel sees all experts.
         orig_w13 = self.experts.w13_weight.data
