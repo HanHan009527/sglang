@@ -390,6 +390,10 @@ class DeepseekV2MoE(nn.Module):
         self.alt_stream = alt_stream
         self.is_nextn = is_nextn
 
+        from sglang.srt.layers.moe.dwdp import enable_dwdp
+
+        self._dwdp_enabled = enable_dwdp()
+
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -563,6 +567,16 @@ class DeepseekV2MoE(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ) -> torch.Tensor:
+        # DWDP path: prefill uses prefetched peer weights, decode falls through
+        if (
+            self._dwdp_enabled
+            and forward_batch is not None
+            and not forward_batch.forward_mode.is_decode_or_idle()
+        ):
+            return self.forward_dwdp(
+                hidden_states, forward_batch, gemm_output_zero_allocator
+            )
+
         if not self._enable_a2a_moe:
             from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 
@@ -619,6 +633,103 @@ class DeepseekV2MoE(nn.Module):
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        return final_hidden_states
+
+    def forward_dwdp(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        gemm_output_zero_allocator: BumpAllocator = None,
+    ) -> torch.Tensor:
+        """DWDP forward path: all tokens stay on-rank, use prefetched weights.
+
+        Instead of dispatching tokens to expert-parallel ranks via AllToAll,
+        each rank prefetches remote expert weights via NVLink and runs all
+        experts locally. Weight assembly uses concatenation (not multi-B),
+        making this compatible with standard Triton MoE kernels.
+        """
+        from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+        dwdp_manager = get_global_dwdp_manager()
+
+        # Shared experts (same as forward_normal)
+        if hidden_states.shape[0] > 0 and self.num_fused_shared_experts == 0:
+            shared_output = self._forward_shared_experts(
+                hidden_states, gemm_output_zero_allocator
+            )
+        else:
+            shared_output = None
+
+        # Router + top-k (no EPLB dispatch_info)
+        if hidden_states.shape[0] > 0:
+            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+            topk_output = self.topk(hidden_states, router_logits)
+        else:
+            shared_output = None
+            topk_output = self.topk.empty_topk_output(hidden_states.device)
+
+        # Get assembled full weight tensors via DWDP prefetch + concat
+        assembled_weights = dwdp_manager.get_assembled_weights(self.layer_id)
+
+        # Temporarily swap expert weights with assembled full weights,
+        # and adjust num_local_experts so the kernel sees all experts.
+        orig_w13 = self.experts.w13_weight.data
+        orig_w2 = self.experts.w2_weight.data
+        orig_num_local = self.experts.num_local_experts
+        orig_moe_ep_rank = self.experts.moe_ep_rank
+
+        # Patch dispatcher: in DWDP mode all experts are local, so global
+        # expert IDs must pass through unchanged (identity mapping).
+        # The StandardDispatcher.local_expert_mapping would otherwise remap
+        # non-local expert IDs to -1, causing moe_align_block_size to hang.
+        dispatcher = self.experts.dispatcher
+        orig_disp_mapping = dispatcher.local_expert_mapping
+        orig_disp_ep_size = dispatcher.moe_ep_size
+        orig_runner_num_local = self.experts.moe_runner_config.num_local_experts
+        orig_layer_ep_size = self.experts.moe_ep_size
+
+        num_routed = dwdp_manager.layout.num_routed_experts
+
+        self.experts.w13_weight.data = assembled_weights["w13_weight"]
+        self.experts.w2_weight.data = assembled_weights["w2_weight"]
+        self.experts.num_local_experts = num_routed
+        self.experts.moe_ep_rank = 0
+
+        # Identity mapping: global expert i → local index i
+        dispatcher.local_expert_mapping = torch.arange(
+            num_routed, dtype=torch.int32, device="cuda"
+        )
+        # Setting moe_ep_size=1 skips the EP remapping branch in dispatch()
+        dispatcher.moe_ep_size = 1
+        # num_local_experts == num_experts → filter_expert=False in kernel
+        self.experts.moe_runner_config.num_local_experts = num_routed
+        # Skip all-reduce inside FusedMoELayer.forward_impl (line 1010)
+        self.experts.moe_ep_size = 1
+
+        # Run MoE forward with all experts visible (no dispatch/combine)
+        final_hidden_states = self.experts(hidden_states, topk_output)
+
+        # Restore original weights and state
+        self.experts.w13_weight.data = orig_w13
+        self.experts.w2_weight.data = orig_w2
+        self.experts.num_local_experts = orig_num_local
+        self.experts.moe_ep_rank = orig_moe_ep_rank
+        dispatcher.local_expert_mapping = orig_disp_mapping
+        dispatcher.moe_ep_size = orig_disp_ep_size
+        self.experts.moe_runner_config.num_local_experts = orig_runner_num_local
+        self.experts.moe_ep_size = orig_layer_ep_size
+
+        if not _is_cuda and not _is_xpu:
+            final_hidden_states *= self.routed_scaling_factor
+
+        # Record compute done + trigger next layer's prefetch
+        dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+
+        # Accumulate shared experts
+        if shared_output is not None:
+            final_hidden_states += shared_output
+
+        # NO tensor_model_parallel_all_reduce — each rank is fully independent
         return final_hidden_states
 
     def forward_normal(

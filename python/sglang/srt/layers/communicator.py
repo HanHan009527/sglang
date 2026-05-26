@@ -262,31 +262,61 @@ class LayerScatterModes:
     mlp_mode: ScatterMode
     middle_residual_mode: ScatterMode
     layer_output_mode: ScatterMode
+    # DWDP: prefill uses SCATTERED (DWDP) pipeline, decode uses FULL-pipeline
+    # (standard AllGather/ReduceScatter). alt is None when DWDP is off.
+    alt: Optional["LayerScatterModes"] = None
 
     @classmethod
     def init_new(cls, **kwargs):
+        from sglang.srt.layers.moe.dwdp import enable_dwdp
+
         context = _LayerModeComputationContext(**kwargs)
+        primary = cls._build(context, force_no_dwdp=False)
+        if enable_dwdp():
+            primary.alt = cls._build(context, force_no_dwdp=True)
+        return primary
+
+    @classmethod
+    def _build(cls, context: _LayerModeComputationContext, *, force_no_dwdp: bool):
         return cls(
-            layer_input_mode=cls._compute_layer_input_mode(context),
+            layer_input_mode=cls._compute_layer_input_mode(
+                context, force_no_dwdp=force_no_dwdp
+            ),
             attn_mode=ScatterMode.TP_ATTN_FULL,
-            mlp_mode=cls._compute_mlp_mode(context),
-            middle_residual_mode=cls._compute_middle_residual_mode(context),
-            layer_output_mode=cls._compute_layer_output_mode(context),
+            mlp_mode=cls._compute_mlp_mode(context, force_no_dwdp=force_no_dwdp),
+            middle_residual_mode=cls._compute_middle_residual_mode(
+                context, force_no_dwdp=force_no_dwdp
+            ),
+            layer_output_mode=cls._compute_layer_output_mode(
+                context, force_no_dwdp=force_no_dwdp
+            ),
         )
 
     @classmethod
-    def _compute_layer_input_mode(cls, context: _LayerModeComputationContext):
+    def _compute_layer_input_mode(
+        cls, context: _LayerModeComputationContext, *, force_no_dwdp: bool = False
+    ):
         if context.layer_id == 0:
             return ScatterMode.model_input_output()
-        return cls._compute_layer_output_mode(context.previous_layer())
+        return cls._compute_layer_output_mode(
+            context.previous_layer(), force_no_dwdp=force_no_dwdp
+        )
 
     @classmethod
-    def _compute_mlp_mode(cls, context: _LayerModeComputationContext):
+    def _compute_mlp_mode(
+        cls, context: _LayerModeComputationContext, *, force_no_dwdp: bool = False
+    ):
         if context.is_layer_sparse:
+            from sglang.srt.layers.moe.dwdp import enable_dwdp
+
+            # DWDP prefill: each rank has all tokens + all experts, no
+            # ReduceScatter/AllGather needed for MoE layers.
+            if not force_no_dwdp and enable_dwdp():
+                return ScatterMode.FULL
+
             return (
                 ScatterMode.SCATTERED
                 if (
-                    # Token dispatch/combine will be handled outside of LayerCommunicator for these modes.
                     not get_moe_a2a_backend().is_none()
                     or should_use_flashinfer_cutlass_moe_fp4_allgather()
                 )
@@ -309,8 +339,10 @@ class LayerScatterModes:
         )
 
     @classmethod
-    def _compute_middle_residual_mode(cls, context: _LayerModeComputationContext):
-        mlp_mode = cls._compute_mlp_mode(context)
+    def _compute_middle_residual_mode(
+        cls, context: _LayerModeComputationContext, *, force_no_dwdp: bool = False
+    ):
+        mlp_mode = cls._compute_mlp_mode(context, force_no_dwdp=force_no_dwdp)
         if mlp_mode == ScatterMode.SCATTERED:
             return ScatterMode.SCATTERED
         if mlp_mode == ScatterMode.FULL:
@@ -318,8 +350,10 @@ class LayerScatterModes:
         raise NotImplementedError
 
     @classmethod
-    def _compute_layer_output_mode(cls, context: _LayerModeComputationContext):
-        mlp_mode = cls._compute_mlp_mode(context)
+    def _compute_layer_output_mode(
+        cls, context: _LayerModeComputationContext, *, force_no_dwdp: bool = False
+    ):
+        mlp_mode = cls._compute_mlp_mode(context, force_no_dwdp=force_no_dwdp)
         if context.layer_id == context.num_layers - 1:
             return ScatterMode.model_input_output()
         if mlp_mode == ScatterMode.SCATTERED:
@@ -382,6 +416,37 @@ class LayerCommunicator:
                 context=self._context,
             )
         )
+
+        # DWDP: compile alt function set for decode path (FULL pipeline)
+        alt_modes = self.layer_scatter_modes.alt
+        if alt_modes is not None:
+            self._alt_communicate_with_all_reduce_and_layer_norm_fn = (
+                CommunicateWithAllReduceAndLayerNormFn.get_fn(
+                    hidden_states_input_mode=alt_modes.attn_mode,
+                    residual_input_mode=alt_modes.layer_input_mode,
+                    hidden_states_output_mode=alt_modes.mlp_mode,
+                    residual_output_mode=alt_modes.middle_residual_mode,
+                    context=self._context,
+                )
+            )
+            self._alt_communicate_summable_tensor_pair_fn = (
+                CommunicateSummableTensorPairFn.get_fn(
+                    hidden_states_input_mode=alt_modes.mlp_mode,
+                    residual_input_mode=alt_modes.middle_residual_mode,
+                    output_mode=alt_modes.layer_output_mode,
+                    context=self._context,
+                )
+            )
+        else:
+            self._alt_communicate_with_all_reduce_and_layer_norm_fn = None
+            self._alt_communicate_summable_tensor_pair_fn = None
+
+    def _use_alt_modes(self, forward_batch: ForwardBatch) -> bool:
+        """Whether to use alt (decode) scatter modes instead of primary (prefill/DWDP)."""
+        if self._alt_communicate_with_all_reduce_and_layer_norm_fn is None:
+            return False
+        # Alt modes are for decode/idle; primary modes are for prefill (DWDP)
+        return not forward_batch.forward_mode.is_extend()
 
     def prepare_attn_and_capture_last_layer_outputs(
         self,
@@ -543,7 +608,12 @@ class LayerCommunicator:
         if cache is not None:
             self._context.cache = cache
 
-        return self._communicate_with_all_reduce_and_layer_norm_fn(
+        fn = (
+            self._alt_communicate_with_all_reduce_and_layer_norm_fn
+            if self._use_alt_modes(forward_batch)
+            else self._communicate_with_all_reduce_and_layer_norm_fn
+        )
+        return fn(
             hidden_states=hidden_states,
             residual=residual,
             forward_batch=forward_batch,
@@ -557,7 +627,12 @@ class LayerCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
-        return self._communicate_summable_tensor_pair_fn(
+        fn = (
+            self._alt_communicate_summable_tensor_pair_fn
+            if self._use_alt_modes(forward_batch)
+            else self._communicate_summable_tensor_pair_fn
+        )
+        return fn(
             hidden_states=hidden_states,
             residual=residual,
             forward_batch=forward_batch,

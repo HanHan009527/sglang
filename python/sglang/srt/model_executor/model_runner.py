@@ -488,9 +488,17 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             if self.server_args.elastic_ep_backend
             else None
         )
+        # Initialize DWDP manager (before model loading so weight registration works)
+        if self.server_args.dwdp_size > 1:
+            self._init_dwdp_manager()
+
         # Load the model
         self.sampler = create_sampler()
         self.load_model()
+
+        # Post-load DWDP setup (IPC exchange + prefetch buffer allocation)
+        if self.server_args.dwdp_size > 1:
+            self._post_load_dwdp_setup()
 
         if (
             self.server_args.remote_instance_weight_loader_use_transfer_engine()
@@ -817,6 +825,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 attention_context_model_parallel_size=self.attn_cp_size,
                 moe_data_model_parallel_size=self.moe_dp_size,
                 duplicate_tp_group=self.server_args.enable_pdmux,
+                dwdp_size=self.server_args.dwdp_size,
             )
             initialize_dp_attention(
                 server_args=self.server_args,
@@ -891,6 +900,64 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     or self.server_args.mooncake_ib_device
                 ),
             )
+
+    def _init_dwdp_manager(self):
+        """Create DwdpManager and set global singleton before model loading."""
+        from sglang.srt.layers.moe.dwdp import set_global_dwdp_manager
+        from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpManager
+        from sglang.srt.distributed.parallel_state import get_dwdp_rank
+
+        hf_config = self.model_config.hf_text_config
+        num_routed_experts = getattr(hf_config, "n_routed_experts", 0)
+        first_k_dense_replace = getattr(hf_config, "first_k_dense_replace", 0)
+        total_num_layers = getattr(hf_config, "num_hidden_layers", 0)
+        num_moe_layers = total_num_layers - first_k_dense_replace
+
+        dwdp_manager = DwdpManager(
+            dwdp_size=self.server_args.dwdp_size,
+            dwdp_rank=get_dwdp_rank(),
+            num_routed_experts=num_routed_experts,
+            num_moe_layers=num_moe_layers,
+            first_k_dense_replace=first_k_dense_replace,
+            total_num_layers=total_num_layers,
+            num_experts_per_worker=self.server_args.dwdp_num_experts_per_worker,
+        )
+        set_global_dwdp_manager(dwdp_manager)
+
+    def _post_load_dwdp_setup(self):
+        """Register weights, exchange IPC handles, and allocate prefetch buffers."""
+        from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+        mgr = get_global_dwdp_manager()
+        if mgr is not None:
+            # Register each MoE layer's expert weights with the manager
+            self._register_dwdp_weights(mgr)
+            mgr.exchange_ipc_handles()
+            mgr.init_prefetch_buffers()
+            mgr.initialize_compute_events()
+
+    def _register_dwdp_weights(self, mgr):
+        """Walk model MoE layers and register their weights with DwdpManager."""
+        from sglang.srt.models.deepseek_v2 import DeepseekV2MoE
+
+        for name, module in self.model.named_modules():
+            if isinstance(module, DeepseekV2MoE):
+                # Extract layer_id from the module name (e.g., "model.layers.3.mlp")
+                parts = name.split(".")
+                layer_id = None
+                for i, p in enumerate(parts):
+                    if p == "layers" and i + 1 < len(parts):
+                        try:
+                            layer_id = int(parts[i + 1])
+                        except ValueError:
+                            pass
+                        break
+                if layer_id is not None:
+                    mgr.register_layer_weights(
+                        layer_id,
+                        w13_weight=module.experts.w13_weight.data,
+                        w2_weight=module.experts.w2_weight.data,
+                    )
 
     def load_model(self):
         tic_total = time.perf_counter()
@@ -2312,6 +2379,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     ) -> Tuple[
         Union[LogitsProcessorOutput, PPProxyTensors, EmbeddingPoolerOutput], bool
     ]:
+        # DWDP: trigger async prefetch of first MoE layers' weights
+        if self.server_args.dwdp_size > 1:
+            from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+            dwdp_mgr = get_global_dwdp_manager()
+            if dwdp_mgr is not None:
+                dwdp_mgr.prefetch_first_layers()
+
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors

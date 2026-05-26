@@ -514,6 +514,8 @@ class ServerArgs:
     enable_expert_distribution_metrics: bool = False
     deepep_config: Optional[str] = None
     moe_dense_tp_size: Optional[int] = None
+    dwdp_size: int = 1
+    dwdp_num_experts_per_worker: Optional[int] = None
     elastic_ep_backend: Literal[None, "mooncake"] = None
     mooncake_ib_device: Optional[str] = None
 
@@ -2106,7 +2108,37 @@ class ServerArgs:
                     self.ep_size * self.moe_dp_size == self.tp_size
                 ), "ep_size * moe_dp_size must be equal to tp_size"
 
+    def _handle_dwdp(self):
+        if self.dwdp_size <= 1:
+            return
+
+        # Validations
+        assert self.dwdp_size == self.tp_size, (
+            f"dwdp_size ({self.dwdp_size}) must equal tp_size ({self.tp_size})"
+        )
+        assert not self.enable_eplb, "DWDP is incompatible with EPLB"
+
+        # Auto-force common settings
+        self.dp_size = self.tp_size
+        self.enable_dp_attention = True
+        self.moe_dense_tp_size = 1
+        self.ep_size = self.dwdp_size
+        self.moe_dp_size = 1
+
+        # Prefill-only: use a2a=none (no EP dispatch/combine)
+        # Hybrid mode (prefill+decode): decode falls through to forward_normal
+        if self.disaggregation_mode != "decode":
+            self.moe_a2a_backend = "none"
+
+        logger.info(
+            f"DWDP enabled: dwdp_size={self.dwdp_size}, dp_size={self.dp_size}, "
+            f"ep_size={self.ep_size}, moe_a2a_backend={self.moe_a2a_backend}"
+        )
+
     def _handle_data_parallelism(self):
+        # Handle DWDP (must be before data parallelism).
+        self._handle_dwdp()
+
         if self.dp_size == 1:
             self.enable_dp_attention = False
             self.enable_dp_lm_head = False
@@ -4190,6 +4222,23 @@ class ServerArgs:
             type=int,
             default=ServerArgs.moe_dense_tp_size,
             help="TP size for MoE dense MLP layers. This flag is useful when, with large TP size, there are errors caused by weights in MLP layers having dimension smaller than the min dimension GEMM supports.",
+        )
+        parser.add_argument(
+            "--dwdp-size",
+            type=int,
+            default=ServerArgs.dwdp_size,
+            help="Number of ranks per DWDP (Distributed Weight Data Parallelism) group. "
+            "When > 1, enables DWDP for MoE prefill: weights are prefetched via NVLink "
+            "and all tokens are processed locally, eliminating all-to-all overhead. "
+            "Must equal tp_size. Default: 1 (disabled).",
+        )
+        parser.add_argument(
+            "--dwdp-num-experts-per-worker",
+            type=int,
+            default=ServerArgs.dwdp_num_experts_per_worker,
+            help="Number of experts stored locally per rank for DWDP. "
+            "Default: num_routed_experts // dwdp_size (equal partition). "
+            "Set higher for overlapping allocation to reduce NVLink prefetch volume.",
         )
         parser.add_argument(
             "--elastic-ep-backend",
