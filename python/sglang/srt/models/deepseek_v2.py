@@ -686,6 +686,16 @@ class DeepseekV2MoE(nn.Module):
         orig_num_local = self.experts.num_local_experts
         orig_moe_ep_rank = self.experts.moe_ep_rank
 
+        # Also swap FP8 block-wise quantization scales if present
+        has_w13_scale = "w13_weight_scale_inv" in assembled_weights
+        has_w2_scale = "w2_weight_scale_inv" in assembled_weights
+        orig_w13_scale = (
+            self.experts.w13_weight_scale_inv.data if has_w13_scale else None
+        )
+        orig_w2_scale = (
+            self.experts.w2_weight_scale_inv.data if has_w2_scale else None
+        )
+
         # Patch dispatcher: in DWDP mode all experts are local, so global
         # expert IDs must pass through unchanged (identity mapping).
         # The StandardDispatcher.local_expert_mapping would otherwise remap
@@ -700,6 +710,14 @@ class DeepseekV2MoE(nn.Module):
 
         self.experts.w13_weight.data = assembled_weights["w13_weight"]
         self.experts.w2_weight.data = assembled_weights["w2_weight"]
+        if has_w13_scale:
+            self.experts.w13_weight_scale_inv.data = assembled_weights[
+                "w13_weight_scale_inv"
+            ]
+        if has_w2_scale:
+            self.experts.w2_weight_scale_inv.data = assembled_weights[
+                "w2_weight_scale_inv"
+            ]
         self.experts.num_local_experts = num_routed
         self.experts.moe_ep_rank = 0
 
@@ -720,6 +738,10 @@ class DeepseekV2MoE(nn.Module):
         # Restore original weights and state
         self.experts.w13_weight.data = orig_w13
         self.experts.w2_weight.data = orig_w2
+        if has_w13_scale:
+            self.experts.w13_weight_scale_inv.data = orig_w13_scale
+        if has_w2_scale:
+            self.experts.w2_weight_scale_inv.data = orig_w2_scale
         self.experts.num_local_experts = orig_num_local
         self.experts.moe_ep_rank = orig_moe_ep_rank
         dispatcher.local_expert_mapping = orig_disp_mapping

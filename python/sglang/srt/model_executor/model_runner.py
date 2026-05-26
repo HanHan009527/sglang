@@ -953,11 +953,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                             pass
                         break
                 if layer_id is not None:
-                    mgr.register_layer_weights(
-                        layer_id,
+                    weight_kwargs = dict(
                         w13_weight=module.experts.w13_weight.data,
                         w2_weight=module.experts.w2_weight.data,
                     )
+                    # Include FP8 block-wise quantization scales if present
+                    if hasattr(module.experts, "w13_weight_scale_inv"):
+                        weight_kwargs["w13_weight_scale_inv"] = (
+                            module.experts.w13_weight_scale_inv.data
+                        )
+                    if hasattr(module.experts, "w2_weight_scale_inv"):
+                        weight_kwargs["w2_weight_scale_inv"] = (
+                            module.experts.w2_weight_scale_inv.data
+                        )
+                    mgr.register_layer_weights(layer_id, **weight_kwargs)
 
     def load_model(self):
         tic_total = time.perf_counter()

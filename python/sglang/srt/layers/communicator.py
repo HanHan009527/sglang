@@ -890,9 +890,9 @@ class CommunicateWithAllReduceAndLayerNormFn:
                 )
             else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-                if _is_npu and context.cache is not None:
-                    _ = prepare_weight_cache(hidden_states, context.cache)
-                hidden_states, residual = layernorm(hidden_states, residual)
+            if _is_npu and context.cache is not None:
+                _ = prepare_weight_cache(hidden_states, context.cache)
+            hidden_states, residual = layernorm(hidden_states, residual)
         return hidden_states, residual
 
     @staticmethod

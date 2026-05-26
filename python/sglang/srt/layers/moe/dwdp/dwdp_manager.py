@@ -17,10 +17,14 @@ import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 
-# Weight parameter names tracked per MoE layer (BF16/FP8 path)
+# Weight parameter names tracked per MoE layer.
+# Includes both the FP8 weight tensors and their block-wise quantization scales.
+# For BF16 models, the scale_inv parameters are absent and will be skipped.
 WEIGHT_PARAM_NAMES = (
     "w13_weight",
     "w2_weight",
+    "w13_weight_scale_inv",
+    "w2_weight_scale_inv",
 )
 
 
@@ -307,8 +311,6 @@ class DwdpManager:
         [num_routed_experts, ...] suitable for Triton MoE kernels,
         or None if DWDP weight assembly is disabled for testing.
         """
-        # TODO: re-enable after debugging illegal memory access
-        return None
         moe_idx = self._layer_id_to_moe_idx[layer_id]
         collector = self.layer_handles[layer_id]
 

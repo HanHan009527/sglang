@@ -158,9 +158,16 @@ class DwdpPrefetchBuffer:
 
         # --- Phase B: copy peer data into prefetch buffers on the
         #     dedicated prefetch stream (overlaps with next compute) ---
+        # The prefetch stream must wait for the all_gather on the default
+        # stream to complete before it can read the gathered tensors.
+        default_stream = torch.cuda.current_stream(self.device)
+
         wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
 
         with torch.cuda.stream(self.prefetch_stream):
+            # Wait for all_gather to complete on the default stream
+            self.prefetch_stream.wait_stream(default_stream)
+
             if wait_compute_slot is not None and wait_compute_slot >= 0:
                 self.prefetch_stream.wait_event(
                     self.compute_events[buf_idx][wait_compute_slot]
