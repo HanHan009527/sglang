@@ -112,19 +112,47 @@ class DwdpLayerHandleCollector:
                 self.local_weights[name] = kwargs[name]
 
     def get_ipc_handles(self) -> Dict[str, Tuple[bytes, int]]:
-        """Return (handle_bytes, offset) for each local weight tensor."""
-        from cuda import cudart
-        from cuda import cuda as cuda_driver
+        """Return (handle_bytes, offset) for each local weight tensor.
+
+        Uses CudaRTLibrary (libcudart.so via ctypes) for IPC handle operations
+        and libcuda.so.1 for cuMemGetAddressRange (CUDA Driver API) to compute
+        the tensor's offset within its CUDA allocation.
+        """
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+        )
+
+        lib = CudaRTLibrary()
+
+        # Load CUDA driver API for cuMemGetAddressRange (not available in cudart)
+        cu_lib = ctypes.CDLL("libcuda.so.1")
+        cuMemGetAddressRange = cu_lib.cuMemGetAddressRange
+        cuMemGetAddressRange.restype = ctypes.c_int  # CUresult
+        cuMemGetAddressRange.argtypes = [
+            ctypes.POINTER(ctypes.c_size_t),  # pbase
+            ctypes.POINTER(ctypes.c_size_t),  # psize
+            ctypes.c_size_t,                   # dptr
+        ]
 
         handles = {}
         for name, tensor in self.local_weights.items():
             data_ptr = tensor.data_ptr()
-            err, handle = cudart.cudaIpcGetMemHandle(data_ptr)
-            assert err == cudart.cudaError_t.cudaSuccess, f"cudaIpcGetMemHandle failed: {err}"
-            err, alloc_base, alloc_size = cuda_driver.cuMemGetAddressRange(data_ptr)
-            assert err == cuda_driver.CUresult.CUDA_SUCCESS, f"cuMemGetAddressRange failed: {err}"
-            offset = data_ptr - int(alloc_base)
-            handles[name] = (bytes(handle.reserved), offset)
+            handle = lib.cudaIpcGetMemHandle(ctypes.c_void_p(data_ptr))
+
+            # cudaIpcGetMemHandle returns a handle for the entire allocation.
+            # cudaIpcOpenMemHandle returns the allocation base address.
+            # We need offset = data_ptr - alloc_base to find the tensor within it.
+            alloc_base = ctypes.c_size_t()
+            alloc_size = ctypes.c_size_t()
+            err = cuMemGetAddressRange(
+                ctypes.byref(alloc_base), ctypes.byref(alloc_size), data_ptr
+            )
+            if err != 0:
+                raise RuntimeError(f"cuMemGetAddressRange failed: error code {err}")
+            offset = data_ptr - alloc_base.value
+            handles[name] = (bytes(handle.internal), offset)
         return handles
 
     def open_peer_handles(
@@ -132,33 +160,52 @@ class DwdpLayerHandleCollector:
         all_handles: List[Dict[str, Tuple[bytes, int]]],
         dwdp_rank: int,
     ) -> None:
-        """Open peer IPC handles and compute NVLink-accessible pointers."""
-        from cuda import cudart
+        """Open peer IPC handles and compute NVLink-accessible pointers.
+
+        Uses CudaRTLibrary (libcudart.so via ctypes) instead of the
+        nvidia-cuda-runtime-cu12 Python bindings for consistency with
+        the rest of the SGLang codebase.
+        """
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+
+        lib = CudaRTLibrary()
 
         for peer_rank, peer_handles in enumerate(all_handles):
             if peer_rank == dwdp_rank:
                 continue
             for name, (handle_bytes, offset) in peer_handles.items():
-                handle = cudart.cudaIpcMemHandle_t()
-                handle.reserved = list(handle_bytes)
-                err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                    handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                )
-                assert err == cudart.cudaError_t.cudaSuccess, (
-                    f"cudaIpcOpenMemHandle failed for peer {peer_rank} param {name}: {err}"
-                )
-                base_ptr_int = int(base_ptr)
+                handle = cudaIpcMemHandle_t()
+                handle.internal = (ctypes.c_byte * 128)(*handle_bytes)
+                base_ptr = lib.cudaIpcOpenMemHandle(handle)
+                base_ptr_int = base_ptr.value
                 self._ipc_mappings.append(base_ptr_int)
                 self.peer_base_ptrs[(peer_rank, name)] = base_ptr_int + offset
 
     def cleanup(self) -> None:
         """Close all IPC memory mappings."""
-        from cuda import cudart
+        import ctypes
 
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+        )
+
+        lib = CudaRTLibrary()
         for base_ptr in self._ipc_mappings:
-            cudart.cudaIpcCloseMemHandle(base_ptr)
+            try:
+                lib.cudaIpcCloseMemHandle(ctypes.c_void_p(base_ptr))
+            except RuntimeError:
+                pass  # Already closed or invalid
         self._ipc_mappings.clear()
         self.peer_base_ptrs.clear()
+
+    def close_peer_handles(self) -> None:
+        """Close peer IPC handles (alias for cleanup, called after P2P copy)."""
+        self.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +308,7 @@ class DwdpManager:
         )
 
     def init_prefetch_buffers(self) -> None:
-        """Allocate double-buffered prefetch buffers."""
+        """Allocate double-buffered prefetch buffers and wire up IPC collectors."""
         from sglang.srt.layers.moe.dwdp.prefetch_buffer import DwdpPrefetchBuffer
 
         first_collector = next(iter(self.layer_handles.values()))
@@ -278,7 +325,23 @@ class DwdpManager:
             param_dtypes=param_dtypes,
             device=next(iter(first_collector.local_weights.values())).device,
         )
-        logger.info("DWDP prefetch buffers allocated")
+
+        # Re-key collectors and handles by moe_idx for prefetch buffer access.
+        # layer_handles and _all_handles use absolute layer_id as keys,
+        # but prefetch_layer() uses 0-based moe_layer_idx.
+        collectors_by_moe_idx: Dict[int, DwdpLayerHandleCollector] = {}
+        handles_by_moe_idx: Dict[int, list] = {}
+        for layer_id, moe_idx in self._layer_id_to_moe_idx.items():
+            if layer_id in self.layer_handles:
+                collectors_by_moe_idx[moe_idx] = self.layer_handles[layer_id]
+                handles_by_moe_idx[moe_idx] = self._all_handles[layer_id]
+
+        self._prefetch_buffer.set_layer_collectors(
+            collectors=collectors_by_moe_idx,
+            all_handles_by_layer=handles_by_moe_idx,
+        )
+
+        logger.info("DWDP prefetch buffers allocated (P2P mode)")
 
     def initialize_compute_events(self) -> None:
         """Pre-record initial compute events so the first prefetch can proceed."""

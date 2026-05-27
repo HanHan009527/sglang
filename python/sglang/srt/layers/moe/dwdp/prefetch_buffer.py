@@ -1,24 +1,26 @@
 """Double-buffered async prefetch system for DWDP.
 
-Uses torch.distributed all_gather (NCCL) to fetch peer expert weights via
-NVLink, with a dedicated CUDA stream and ping-pong buffers to overlap
+Uses CUDA IPC P2P reads (cudaMemcpyAsync over NVLink) to fetch peer expert
+weights, with a dedicated CUDA stream and ping-pong buffers to overlap
 buffer copies with MoE compute.
 
-Key design: all_gather runs on the default stream (NCCL requirement);
-buffer copies run on the dedicated prefetch stream for overlap.
+Key design: unlike the previous NCCL all_gather approach, P2P copies run
+entirely on the prefetch stream with no default-stream dependency and no
+collective synchronization barrier. This enables independent rank execution
+compatible with DP attention.
 """
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import math
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
-import torch.distributed as dist
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpExpertLayout
+    from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpExpertLayout, DwdpLayerHandleCollector
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,9 @@ class DwdpPrefetchBuffer:
     Buffer slot 0 is used by even-indexed MoE layers (0, 2, 4, ...),
     and slot 1 by odd-indexed (1, 3, 5, ...).
 
-    Uses all_gather via torch.distributed to fetch peer weights over NVLink
-    instead of CUDA IPC, which has compatibility issues on some hardware.
+    Uses CUDA IPC P2P reads (cudaMemcpyAsync) to fetch peer expert weights
+    over NVLink instead of NCCL all_gather. Each rank independently reads
+    peer GPU memory — no collective synchronization is required.
     """
 
     def __init__(
@@ -95,18 +98,34 @@ class DwdpPrefetchBuffer:
             for _ in range(2)
         ]
 
-        # Keep references to gathered tensors alive until the prefetch stream
-        # has finished copying from them.  Without this, Python's GC can
-        # free the tensors while the async D2D copies are still in-flight,
-        # causing cudaErrorIllegalAddress.
-        self._gathered_refs: Dict[int, Dict[str, List[torch.Tensor]]] = {}
+        # CudaRTLibrary instance for P2P operations
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+        self._cuda_lib = CudaRTLibrary()
+
+        # Layer handle collectors and exchanged IPC handles, keyed by moe_idx.
+        # Set by DwdpManager.init_prefetch_buffers() after IPC exchange.
+        self._layer_collectors: Dict[int, DwdpLayerHandleCollector] = {}
+        self._all_handles_by_layer: Dict[int, list] = {}
 
         logger.info(
-            f"DwdpPrefetchBuffer allocated: "
+            f"DwdpPrefetchBuffer allocated (P2P mode): "
             f"num_prefetch_experts={num_prefetch_experts}, "
             f"num_slots_per_buffer={num_slots_per_buffer}, "
             f"per_expert_bytes={self.per_expert_bytes}"
         )
+
+    def set_layer_collectors(
+        self,
+        collectors: Dict[int, DwdpLayerHandleCollector],
+        all_handles_by_layer: Dict[int, list],
+    ) -> None:
+        """Set reference to layer handle collectors and exchanged IPC handles.
+
+        Called by DwdpManager after IPC exchange completes.
+        Both dicts are keyed by moe_layer_idx (0-based).
+        """
+        self._layer_collectors = collectors
+        self._all_handles_by_layer = all_handles_by_layer
 
     def initialize_compute_events(self) -> None:
         """Pre-record first compute events so prefetch_first_layers() can proceed."""
@@ -119,78 +138,78 @@ class DwdpPrefetchBuffer:
         moe_layer_idx: int,
         local_weights: Dict[str, torch.Tensor],
     ) -> None:
-        """Fetch peer expert weights via all_gather over NVLink.
+        """Fetch peer expert weights via CUDA IPC P2P over NVLink.
 
-        Uses torch.distributed all_gather to collect each rank's local
-        expert weights, then copies the peer portion into the prefetch buffer.
-        This avoids CUDA IPC which has compatibility issues on some hardware.
+        Unlike the previous NCCL all_gather approach, this method:
+        - Runs entirely on the prefetch stream (no default stream dependency)
+        - Does NOT require peer ranks to participate (true P2P read)
+        - Opens IPC handles per-call, closes after copy is enqueued
+        - Transfers only the needed expert slice (not full local weights)
+        - No FP8 dtype workaround needed (raw byte copy)
         """
-        from sglang.srt.distributed.parallel_state import get_dwdp_group
-
         buf_idx = moe_layer_idx % 2
         layer_slot = moe_layer_idx // 2
         layout = self.layout
         dwdp_rank = layout.dwdp_rank
-        group = get_dwdp_group()
 
-        # --- Phase A: all_gather on the DEFAULT stream (NCCL) ---
-        # NCCL collectives must run on the default stream; using a
-        # non-default stream can cause illegal-address errors.
-        # gloo (cpu_group) cannot handle CUDA tensors at all.
-        gathered_per_param: Dict[str, List[torch.Tensor]] = {}
-        for param_name, local_tensor in local_weights.items():
-            # NCCL doesn't support float8 dtypes — view as uint8 (same
-            # byte layout, itemsize == 1) for the collective.
-            if local_tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                # Must ensure contiguous before view; FP8 weights may
-                # not be contiguous after quantization.
-                comm_tensor = local_tensor.contiguous().view(torch.uint8)
-            else:
-                comm_tensor = local_tensor.contiguous()
+        # Get the handle collector for this layer
+        collector = self._layer_collectors[moe_layer_idx]
+        all_handles = self._all_handles_by_layer[moe_layer_idx]
 
-            gathered = [torch.empty_like(comm_tensor) for _ in range(layout.dwdp_size)]
-            dist.all_gather(gathered, comm_tensor, group=group.device_group)
-            gathered_per_param[param_name] = gathered
+        # Open IPC handles for peer weights (~4 params * (dwdp_size-1) mappings,
+        # well under the CUDA driver IPC mapping limit of ~256)
+        collector.open_peer_handles(all_handles, dwdp_rank)
 
-        # Pin gathered tensors so Python GC cannot free them while the
-        # prefetch stream is still reading them asynchronously.
-        self._gathered_refs[moe_layer_idx] = gathered_per_param
-
-        # --- Phase B: copy peer data into prefetch buffers on the
-        #     dedicated prefetch stream (overlaps with next compute) ---
-        # The prefetch stream must wait for the all_gather on the default
-        # stream to complete before it can read the gathered tensors.
-        default_stream = torch.cuda.current_stream(self.device)
-
+        # --- P2P copy on prefetch stream ---
         wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
 
         with torch.cuda.stream(self.prefetch_stream):
-            # Wait for all_gather to complete on the default stream
-            self.prefetch_stream.wait_stream(default_stream)
-
+            # Wait for previous layer's compute to finish (overlap window)
             if wait_compute_slot is not None and wait_compute_slot >= 0:
                 self.prefetch_stream.wait_event(
                     self.compute_events[buf_idx][wait_compute_slot]
                 )
 
+            # Async P2P copies from peer GPU memory to local buffers
+            stream_handle = self.prefetch_stream.cuda_stream
+
             for param_name in local_weights:
-                gathered = gathered_per_param[param_name]
-                dst_dtype = self.param_dtypes[param_name]
+                per_expert_size = self.per_expert_bytes[param_name]
+                num_prefetch = layout.num_prefetch_experts
+
                 for peer_rank in range(layout.dwdp_size):
                     if peer_rank == dwdp_rank:
                         continue
+
+                    # Calculate source pointer (peer's weight tensor + expert offset)
                     src_expert_offset = layout.get_prefetch_src_offset(peer_rank)
-                    num_prefetch = layout.num_prefetch_experts
-                    dst_tensor = self.buffers[buf_idx][param_name][peer_rank]
-                    peer_data = gathered[peer_rank]
-                    # View back from uint8 to original dtype if needed
-                    if peer_data.dtype == torch.uint8 and dst_dtype != torch.uint8:
-                        peer_data = peer_data.view(dst_dtype)
-                    dst_tensor.copy_(
-                        peer_data[src_expert_offset:src_expert_offset + num_prefetch]
+                    src_byte_offset = src_expert_offset * per_expert_size
+                    copy_bytes = num_prefetch * per_expert_size
+
+                    src_ptr = ctypes.c_void_p(
+                        collector.peer_base_ptrs[(peer_rank, param_name)] + src_byte_offset
+                    )
+                    dst_ptr = ctypes.c_void_p(
+                        self.buffers[buf_idx][param_name][peer_rank].data_ptr()
+                    )
+
+                    assert src_ptr.value is not None and src_ptr.value != 0, (
+                        f"Null src_ptr for peer={peer_rank} param={param_name}"
+                    )
+                    assert dst_ptr.value is not None and dst_ptr.value != 0, (
+                        f"Null dst_ptr for peer={peer_rank} param={param_name}"
+                    )
+
+                    self._cuda_lib.cudaMemcpyAsync(
+                        dst_ptr, src_ptr, copy_bytes, stream_handle
                     )
 
             self.prefetch_events[buf_idx][layer_slot].record(self.prefetch_stream)
+
+        # Close IPC handles immediately — cudaMemcpyAsync has already recorded
+        # the source address in the CUDA command buffer, so the mapping is no
+        # longer needed. This keeps concurrent IPC mappings minimal (~28).
+        collector.close_peer_handles()
 
     def wait_for_prefetch(self, moe_layer_idx: int) -> None:
         """Default stream waits for prefetch of this layer to complete."""
@@ -198,8 +217,6 @@ class DwdpPrefetchBuffer:
         layer_slot = moe_layer_idx // 2
         current_stream = torch.cuda.current_stream(self.device)
         current_stream.wait_event(self.prefetch_events[buf_idx][layer_slot])
-        # Prefetch copies are done — safe to release gathered refs
-        self._gathered_refs.pop(moe_layer_idx, None)
 
     def record_compute_done(self, moe_layer_idx: int) -> None:
         """Record compute completion on the default stream."""
@@ -220,4 +237,7 @@ class DwdpPrefetchBuffer:
         self.buffers.clear()
         self.prefetch_events.clear()
         self.compute_events.clear()
+        self._layer_collectors.clear()
+        self._all_handles_by_layer.clear()
         self.prefetch_stream = None
+        self._cuda_lib = None

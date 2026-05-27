@@ -2118,19 +2118,18 @@ class ServerArgs:
         )
         assert not self.enable_eplb, "DWDP is incompatible with EPLB"
 
-        # DWDP: tokens stay on-rank, weights prefetched via NVLink.
-        # All TP ranks process the SAME tokens (standard TP, not DP attention).
+        # DWDP: tokens stay on-rank, weights prefetched via NVLink P2P.
         # Each rank stores 1/dwdp_size of experts locally and prefetches the
-        # rest via NVLink all_gather.  Because all ranks execute the same
-        # forward pass (same batch), the all_gather naturally synchronizes.
+        # rest via CUDA IPC P2P reads over NVLink (cudaMemcpyAsync).
         # ep_size = dwdp_size so each rank stores 1/dwdp_size of experts.
         self.ep_size = self.dwdp_size
         self.moe_dp_size = 1
         self.moe_dense_tp_size = 1
 
-        # Standard TP (dp_size=1): all ranks see the same batch, so the
-        # DWDP all_gather naturally synchronizes.  DP attention would give
-        # each rank a different batch (or IDLE), breaking the all_gather.
+        # TODO(P2P): P2P prefetch eliminates the NCCL all_gather synchronization
+        # barrier, enabling independent rank execution. Once verified, remove
+        # these constraints to allow dp_size > 1 with DP attention.
+        # With P2P, IDLE ranks can skip prefetch without blocking active ranks.
         self.enable_dp_attention = False
         self.dp_size = 1
 
