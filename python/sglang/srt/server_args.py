@@ -2128,11 +2128,9 @@ class ServerArgs:
         self.moe_dp_size = 1
         self.moe_dense_tp_size = 1
 
-        # Do NOT enable DP attention.  DP attention gives each DP rank a
-        # different batch (or IDLE), which breaks DWDP's all_gather because
-        # not all ranks call forward_dwdp simultaneously.  With standard TP
-        # (dp_size=1), all ranks see the same batch and naturally synchronize
-        # at the all_gather.
+        # Standard TP (dp_size=1): all ranks see the same batch, so the
+        # DWDP all_gather naturally synchronizes.  DP attention would give
+        # each rank a different batch (or IDLE), breaking the all_gather.
         self.enable_dp_attention = False
         self.dp_size = 1
 

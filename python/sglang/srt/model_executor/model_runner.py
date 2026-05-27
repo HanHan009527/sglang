@@ -2388,12 +2388,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     ) -> Tuple[
         Union[LogitsProcessorOutput, PPProxyTensors, EmbeddingPoolerOutput], bool
     ]:
-        # DWDP: prefetch is triggered lazily from forward_dwdp() and
-        # forward_dwdp_idle() when the first MoE layer is reached.
-        # Both real and IDLE batches participate in the all_gather,
-        # ensuring all DP ranks are synchronized.  Do NOT trigger
-        # prefetch here — it must happen inside the MoE layer's forward
-        # path so that all ranks enter the collective together.
+        # DWDP: prefetch is triggered lazily from forward_dwdp() when the
+        # first MoE layer is reached.  With dp_size=1 (standard TP), all
+        # ranks process the same batch and naturally synchronize at the
+        # all_gather.  Do NOT trigger prefetch here — it must happen inside
+        # the MoE layer's forward path so that all ranks enter the collective
+        # together.
 
         kwargs = {}
         if self.support_pp:

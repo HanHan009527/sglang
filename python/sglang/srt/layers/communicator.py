@@ -793,15 +793,6 @@ class CommunicateWithAllReduceAndLayerNormFn:
         ):
             return CommunicateWithAllReduceAndLayerNormFn._simple
 
-        # DWDP: when mlp_mode=FULL, each rank has complete data (all tokens
-        # + all expert weights via NVLink prefetch).  No TP communication
-        # needed — skip all_gather/reduce_scatter to avoid deadlocking with
-        # the DWDP weight-prefetch all_gather on the same NCCL communicator.
-        if hidden_states_output_mode == ScatterMode.FULL:
-            from sglang.srt.layers.moe.dwdp import enable_dwdp
-            if enable_dwdp():
-                return CommunicateWithAllReduceAndLayerNormFn._simple
-
         if (
             (hidden_states_input_mode == ScatterMode.TP_ATTN_FULL)
             and (
@@ -975,14 +966,6 @@ class CommunicateSummableTensorPairFn:
             hidden_states_input_mode, output_mode
         ) and context.is_same_group_size(residual_input_mode, output_mode):
             return CommunicateSummableTensorPairFn._trivial
-
-        # DWDP: when mlp_mode=FULL, each rank has complete data.
-        # No reduce_scatter needed — skip to avoid deadlocking with
-        # the DWDP weight-prefetch all_gather.
-        if hidden_states_input_mode == ScatterMode.FULL:
-            from sglang.srt.layers.moe.dwdp import enable_dwdp
-            if enable_dwdp():
-                return CommunicateSummableTensorPairFn._trivial
 
         if (
             (hidden_states_input_mode == ScatterMode.FULL)
