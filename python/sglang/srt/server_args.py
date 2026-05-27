@@ -2118,16 +2118,23 @@ class ServerArgs:
         )
         assert not self.enable_eplb, "DWDP is incompatible with EPLB"
 
-        # DWDP uses DP attention: each DP rank processes a different
-        # subset of tokens, and weights are prefetched so every rank
-        # can compute all experts locally (no EP dispatch/combine).
-        # IDLE batches must still participate in the all_gather for
-        # weight prefetch — handled in deepseek_v2.py forward_dwdp_idle.
+        # DWDP: tokens stay on-rank, weights prefetched via NVLink.
+        # All TP ranks process the SAME tokens (standard TP, not DP attention).
+        # Each rank stores 1/dwdp_size of experts locally and prefetches the
+        # rest via NVLink all_gather.  Because all ranks execute the same
+        # forward pass (same batch), the all_gather naturally synchronizes.
+        # ep_size = dwdp_size so each rank stores 1/dwdp_size of experts.
         self.ep_size = self.dwdp_size
         self.moe_dp_size = 1
         self.moe_dense_tp_size = 1
-        self.enable_dp_attention = True
-        self.dp_size = self.tp_size
+
+        # Do NOT enable DP attention.  DP attention gives each DP rank a
+        # different batch (or IDLE), which breaks DWDP's all_gather because
+        # not all ranks call forward_dwdp simultaneously.  With standard TP
+        # (dp_size=1), all ranks see the same batch and naturally synchronize
+        # at the all_gather.
+        self.enable_dp_attention = False
+        self.dp_size = 1
 
         # No all-to-all: weights come to tokens, not tokens to weights.
         if self.disaggregation_mode != "decode":

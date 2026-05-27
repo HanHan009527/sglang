@@ -567,20 +567,17 @@ class DeepseekV2MoE(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ) -> torch.Tensor:
-        # DWDP path: prefill uses prefetched peer weights.
-        # IDLE batches must also participate in the DWDP all_gather
-        # for weight prefetch, otherwise NCCL deadlocks because not
-        # all ranks call the collective.  IDLE batches use a lightweight
-        # path (forward_dwdp_idle) that only does the all_gather sync.
-        if self._dwdp_enabled and forward_batch is not None:
-            if not forward_batch.forward_mode.is_decode_or_idle():
-                return self.forward_dwdp(
-                    hidden_states, forward_batch, gemm_output_zero_allocator
-                )
-            elif forward_batch.forward_mode.is_idle():
-                return self.forward_dwdp_idle(
-                    hidden_states, forward_batch, gemm_output_zero_allocator
-                )
+        # DWDP path: prefill uses prefetched peer weights, decode falls through
+        # to forward_normal.  With dp_size=1 (standard TP), all ranks process
+        # the same batch, so the DWDP all_gather naturally synchronizes.
+        if (
+            self._dwdp_enabled
+            and forward_batch is not None
+            and not forward_batch.forward_mode.is_decode_or_idle()
+        ):
+            return self.forward_dwdp(
+                hidden_states, forward_batch, gemm_output_zero_allocator
+            )
 
         if not self._enable_a2a_moe:
             from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
