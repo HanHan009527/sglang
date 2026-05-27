@@ -207,6 +207,11 @@ class DwdpManager:
         # Prefetch buffer (created after IPC exchange)
         self._prefetch_buffer = None
 
+        # Track whether the initial prefetch has been triggered.
+        # Must be triggered from forward_dwdp (not model_runner.forward_extend)
+        # to avoid NCCL deadlock when DP ranks are desynchronized.
+        self._initial_prefetch_done = False
+
         # Mapping from absolute layer_id to moe_layer_index (0-based)
         self._layer_id_to_moe_idx: Dict[int, int] = {}
         moe_idx = 0
@@ -303,6 +308,16 @@ class DwdpManager:
                     moe_layer_idx=moe_idx,
                     local_weights=self.layer_handles[layer_id].local_weights,
                 )
+
+    def sync_prefetch_only(self, layer_id: int) -> None:
+        """Wait for prefetch to complete without assembling weights.
+
+        Used by IDLE batches that must participate in the all_gather but
+        don't need the assembled weight tensors.  Avoids the overhead of
+        allocating and copying full [num_routed_experts, ...] tensors.
+        """
+        moe_idx = self._layer_id_to_moe_idx[layer_id]
+        self._prefetch_buffer.wait_for_prefetch(moe_idx)
 
     def get_assembled_weights(self, layer_id: int) -> Optional[Dict[str, torch.Tensor]]:
         """Wait for prefetch, then assemble full weight tensors via concatenation.

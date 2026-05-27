@@ -2388,13 +2388,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     ) -> Tuple[
         Union[LogitsProcessorOutput, PPProxyTensors, EmbeddingPoolerOutput], bool
     ]:
-        # DWDP: trigger async prefetch of first MoE layers' weights
-        if self.server_args.dwdp_size > 1:
-            from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
-
-            dwdp_mgr = get_global_dwdp_manager()
-            if dwdp_mgr is not None:
-                dwdp_mgr.prefetch_first_layers()
+        # DWDP: prefetch is triggered lazily from forward_dwdp() and
+        # forward_dwdp_idle() when the first MoE layer is reached.
+        # Both real and IDLE batches participate in the all_gather,
+        # ensuring all DP ranks are synchronized.  Do NOT trigger
+        # prefetch here — it must happen inside the MoE layer's forward
+        # path so that all ranks enter the collective together.
 
         kwargs = {}
         if self.support_pp:

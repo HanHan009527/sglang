@@ -309,10 +309,15 @@ class LayerScatterModes:
         if context.is_layer_sparse:
             from sglang.srt.layers.moe.dwdp import enable_dwdp
 
-            # DWDP prefill: each rank has all tokens + all experts, no
-            # ReduceScatter/AllGather needed for MoE layers.
+            # DWDP prefill: each rank has its own tokens + all expert weights
+            # (prefetched via NVLink). No DP gather/scatter needed — tokens
+            # stay on-rank and weights move instead.  Using TP_ATTN_FULL
+            # (group_size = attn_tp_size = 1 when dp_size == tp_size) makes
+            # the communicator select the _simple path (layernorm only),
+            # avoiding the all_gather that would deadlock with the DWDP
+            # weight-prefetch all_gather on the same NCCL communicator.
             if not force_no_dwdp and enable_dwdp():
-                return ScatterMode.FULL
+                return ScatterMode.TP_ATTN_FULL
 
             return (
                 ScatterMode.SCATTERED
@@ -345,7 +350,7 @@ class LayerScatterModes:
         mlp_mode = cls._compute_mlp_mode(context, force_no_dwdp=force_no_dwdp)
         if mlp_mode == ScatterMode.SCATTERED:
             return ScatterMode.SCATTERED
-        if mlp_mode == ScatterMode.FULL:
+        if mlp_mode in (ScatterMode.FULL, ScatterMode.TP_ATTN_FULL):
             return ScatterMode.TP_ATTN_FULL
         raise NotImplementedError
 
@@ -360,7 +365,7 @@ class LayerScatterModes:
             if cls._should_gather_for_tbo(context):
                 return ScatterMode.TP_ATTN_FULL
             return ScatterMode.SCATTERED
-        if mlp_mode == ScatterMode.FULL:
+        if mlp_mode in (ScatterMode.FULL, ScatterMode.TP_ATTN_FULL):
             return ScatterMode.TP_ATTN_FULL
         raise NotImplementedError
 

@@ -567,15 +567,20 @@ class DeepseekV2MoE(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ) -> torch.Tensor:
-        # DWDP path: prefill uses prefetched peer weights, decode falls through
-        if (
-            self._dwdp_enabled
-            and forward_batch is not None
-            and not forward_batch.forward_mode.is_decode_or_idle()
-        ):
-            return self.forward_dwdp(
-                hidden_states, forward_batch, gemm_output_zero_allocator
-            )
+        # DWDP path: prefill uses prefetched peer weights.
+        # IDLE batches must also participate in the DWDP all_gather
+        # for weight prefetch, otherwise NCCL deadlocks because not
+        # all ranks call the collective.  IDLE batches use a lightweight
+        # path (forward_dwdp_idle) that only does the all_gather sync.
+        if self._dwdp_enabled and forward_batch is not None:
+            if not forward_batch.forward_mode.is_decode_or_idle():
+                return self.forward_dwdp(
+                    hidden_states, forward_batch, gemm_output_zero_allocator
+                )
+            elif forward_batch.forward_mode.is_idle():
+                return self.forward_dwdp_idle(
+                    hidden_states, forward_batch, gemm_output_zero_allocator
+                )
 
         if not self._enable_a2a_moe:
             from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
@@ -651,6 +656,15 @@ class DeepseekV2MoE(nn.Module):
         from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
 
         dwdp_manager = get_global_dwdp_manager()
+
+        # Trigger initial prefetch for the first 2 MoE layers on first call.
+        # This must happen inside forward_dwdp (not model_runner.forward_extend)
+        # so that all DP ranks are naturally synchronized at this point —
+        # they've all executed the same dense layers before reaching here.
+        moe_idx = dwdp_manager._layer_id_to_moe_idx[self.layer_id]
+        if moe_idx == 0 and not dwdp_manager._initial_prefetch_done:
+            dwdp_manager.prefetch_first_layers()
+            dwdp_manager._initial_prefetch_done = True
 
         # Shared experts (same as forward_normal)
         if hidden_states.shape[0] > 0 and self.num_fused_shared_experts == 0:
@@ -761,6 +775,44 @@ class DeepseekV2MoE(nn.Module):
 
         # NO tensor_model_parallel_all_reduce — each rank is fully independent
         return final_hidden_states
+
+    def forward_dwdp_idle(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        gemm_output_zero_allocator: BumpAllocator = None,
+    ) -> torch.Tensor:
+        """Lightweight DWDP path for IDLE batches.
+
+        IDLE batches must participate in the DWDP all_gather for weight
+        prefetch, otherwise NCCL deadlocks.  This path does the bare
+        minimum: trigger prefetch + wait for all_gather for the current
+        layer, then return hidden_states unchanged (no MoE computation
+        needed for an IDLE batch).
+        """
+        from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+        dwdp_manager = get_global_dwdp_manager()
+
+        # Trigger initial prefetch on first MoE layer (same as forward_dwdp)
+        moe_idx = dwdp_manager._layer_id_to_moe_idx[self.layer_id]
+        if moe_idx == 0 and not dwdp_manager._initial_prefetch_done:
+            dwdp_manager.prefetch_first_layers()
+            dwdp_manager._initial_prefetch_done = True
+
+        # Wait for the all_gather to complete (must participate to avoid
+        # NCCL deadlock), but skip the expensive weight assembly since
+        # IDLE batches don't need the assembled weights.
+        dwdp_manager.sync_prefetch_only(self.layer_id)
+
+        # Record compute done + trigger next layer's prefetch so the
+        # ping-pong pipeline keeps advancing for all ranks.
+        dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+
+        # No actual MoE computation for IDLE batch — return hidden_states
+        # unchanged.  The communicator's _simple path (attn_tp_size=1)
+        # just does layernorm + residual, which is correct for IDLE.
+        return hidden_states
 
     def forward_normal(
         self,
