@@ -568,12 +568,12 @@ class DeepseekV2MoE(nn.Module):
         gemm_output_zero_allocator: BumpAllocator = None,
     ) -> torch.Tensor:
         # DWDP path: prefill uses prefetched peer weights, decode falls through
-        # to forward_normal.  With dp_size=1 (standard TP), all ranks process
-        # the same batch, so the DWDP all_gather naturally synchronizes.
+        # to forward_normal.  IDLE ranks (DP attention) also enter forward_dwdp
+        # so the prefetch pipeline keeps moving on all ranks.
         if (
             self._dwdp_enabled
             and forward_batch is not None
-            and not forward_batch.forward_mode.is_decode_or_idle()
+            and not forward_batch.forward_mode.is_decode()
         ):
             return self.forward_dwdp(
                 hidden_states, forward_batch, gemm_output_zero_allocator
@@ -663,8 +663,14 @@ class DeepseekV2MoE(nn.Module):
             dwdp_manager.prefetch_first_layers()
             dwdp_manager._initial_prefetch_done = True
 
+        # IDLE rank (DP attention, 0 tokens): skip MoE but keep prefetch
+        # pipeline moving so subsequent layers don't stall.
+        if hidden_states.shape[0] == 0:
+            dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+            return hidden_states
+
         # Shared experts (same as forward_normal)
-        if hidden_states.shape[0] > 0 and self.num_fused_shared_experts == 0:
+        if self.num_fused_shared_experts == 0:
             shared_output = self._forward_shared_experts(
                 hidden_states, gemm_output_zero_allocator
             )
@@ -672,12 +678,8 @@ class DeepseekV2MoE(nn.Module):
             shared_output = None
 
         # Router + top-k (no EPLB dispatch_info)
-        if hidden_states.shape[0] > 0:
-            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
-            topk_output = self.topk(hidden_states, router_logits)
-        else:
-            shared_output = None
-            topk_output = self.topk.empty_topk_output(hidden_states.device)
+        router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+        topk_output = self.topk(hidden_states, router_logits)
 
         # Get assembled full weight tensors via DWDP prefetch + concat
         assembled_weights = dwdp_manager.get_assembled_weights(self.layer_id)

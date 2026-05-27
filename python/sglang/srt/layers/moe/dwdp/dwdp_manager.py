@@ -128,7 +128,16 @@ class DwdpLayerHandleCollector:
 
         # Load CUDA driver API for cuMemGetAddressRange (not available in cudart)
         cu_lib = ctypes.CDLL("libcuda.so.1")
-        cuMemGetAddressRange = cu_lib.cuMemGetAddressRange
+
+        # Initialize CUDA Driver API (required before any driver API calls)
+        cu_init = cu_lib.cuInit
+        cu_init.restype = ctypes.c_int
+        cu_init.argtypes = [ctypes.c_uint]
+        cu_init(0)
+
+        # Must use the _v2 variant — the unversioned cuMemGetAddressRange
+        # returns CUDA_ERROR_NOT_INITIALIZED (201) on modern drivers.
+        cuMemGetAddressRange = cu_lib.cuMemGetAddressRange_v2
         cuMemGetAddressRange.restype = ctypes.c_int  # CUresult
         cuMemGetAddressRange.argtypes = [
             ctypes.POINTER(ctypes.c_size_t),  # pbase

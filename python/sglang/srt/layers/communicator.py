@@ -309,11 +309,11 @@ class LayerScatterModes:
         if context.is_layer_sparse:
             from sglang.srt.layers.moe.dwdp import enable_dwdp
 
-            # DWDP prefill: each rank has all tokens + all expert weights
-            # (prefetched via NVLink). No TP communication needed around
-            # MoE layers — each rank independently computes with full
-            # expert weights.  Using FULL mode so the communicator treats
-            # all ranks as having complete data (no gather/scatter).
+            # DWDP prefill: each rank independently computes MoE with all
+            # expert weights (prefetched via NVLink P2P).  No TP or DP
+            # communication needed around MoE.  Using FULL mode (same as
+            # EP baseline with moe_a2a_backend=none) so the communicator
+            # treats MoE output as fully replicated across the TP group.
             if not force_no_dwdp and enable_dwdp():
                 return ScatterMode.FULL
 

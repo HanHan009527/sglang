@@ -2126,12 +2126,13 @@ class ServerArgs:
         self.moe_dp_size = 1
         self.moe_dense_tp_size = 1
 
-        # TODO(P2P): P2P prefetch eliminates the NCCL all_gather synchronization
-        # barrier, enabling independent rank execution. Once verified, remove
-        # these constraints to allow dp_size > 1 with DP attention.
-        # With P2P, IDLE ranks can skip prefetch without blocking active ranks.
-        self.enable_dp_attention = False
-        self.dp_size = 1
+        # DWDP + DP attention: P2P prefetch eliminates the NCCL all_gather
+        # synchronization barrier, so each rank can independently prefetch
+        # weights and process its own tokens.  dp_size = dwdp_size means
+        # each DWDP rank is also a DP rank (attn_tp_size = 1).
+        # IDLE ranks (0 tokens) skip MoE but keep the prefetch pipeline moving.
+        self.enable_dp_attention = True
+        self.dp_size = self.dwdp_size
 
         # No all-to-all: weights come to tokens, not tokens to weights.
         if self.disaggregation_mode != "decode":
