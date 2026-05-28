@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import ctypes
 import logging
-import math
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -41,20 +40,39 @@ def _align_up(size: int, alignment: int) -> int:
 
 
 class _CudaDriver:
-    """Lazy-loaded CUDA Driver API wrapper for VMM operations."""
+    """Lazy-loaded CUDA Driver API wrapper for VMM operations.
+
+    Uses cuda.bindings.driver (cuda-python 13.x API).
+    In this API, functions return (CUresult, ...) tuples; void-like
+    functions return (CUresult,). We normalize error checking via _check().
+    """
 
     def __init__(self):
         self._lib = None
+        self._initialized = False
 
     @property
     def lib(self):
         if self._lib is None:
-            from cuda import cuda as cuda_driver
+            from cuda.bindings import driver as cuda_driver
             self._lib = cuda_driver
         return self._lib
 
     def init(self):
+        if self._initialized:
+            return
         self.lib.cuInit(0)
+        self._initialized = True
+
+    @staticmethod
+    def check(err, msg=""):
+        """Check CUDA Driver API return value. Handles tuple returns from cuda-python 13.x."""
+        if isinstance(err, tuple):
+            err = err[0]
+        if isinstance(err, int) and err != 0:
+            raise RuntimeError(f"{msg}: err={err}")
+        if hasattr(err, 'value') and err.value != 0:
+            raise RuntimeError(f"{msg}: err={err}")
 
 
 # Module-level singleton
@@ -72,15 +90,13 @@ class VmmRegion:
         """Map a physical memory handle at a given offset in the VA region."""
         va_ptr = _cuda.lib.CUdeviceptr(self.va + offset)
         err = _cuda.lib.cuMemMap(va_ptr, size, 0, handle, 0)
-        if err != 0:
-            raise RuntimeError(f"cuMemMap failed at offset {offset}: err={err}")
+        _cuda.check(err, f"cuMemMap failed at offset {offset}")
 
     def unmap(self, offset: int, size: int) -> None:
         """Unmap a region of virtual address space."""
         va_ptr = _cuda.lib.CUdeviceptr(self.va + offset)
         err = _cuda.lib.cuMemUnmap(va_ptr, size)
-        if err != 0:
-            raise RuntimeError(f"cuMemUnmap failed at offset {offset}: err={err}")
+        _cuda.check(err, f"cuMemUnmap failed at offset {offset}")
 
     def set_access(self, device_id: int) -> None:
         """Set read/write access for a specific device on the entire region."""
@@ -90,15 +106,13 @@ class VmmRegion:
         desc.flags = _cuda.lib.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         va_ptr = _cuda.lib.CUdeviceptr(self.va)
         err = _cuda.lib.cuMemSetAccess(va_ptr, self.size, [desc], 1)
-        if err != 0:
-            raise RuntimeError(f"cuMemSetAccess failed: err={err}")
+        _cuda.check(err, "cuMemSetAccess failed")
 
     def free(self) -> None:
         """Free the virtual address reservation."""
         va_ptr = _cuda.lib.CUdeviceptr(self.va)
         err = _cuda.lib.cuMemAddressFree(va_ptr, self.size)
-        if err != 0:
-            logger.warning(f"cuMemAddressFree failed: err={err}")
+        _cuda.check(err, "cuMemAddressFree failed")
 
 
 class _VmmTensorView:
@@ -198,17 +212,11 @@ class DwdpVmmWeightBuffer:
             prop.location.id = device_id
 
             err, handle = _cuda.lib.cuMemCreate(total_aligned, prop, 0)
-            if err != 0:
-                raise RuntimeError(
-                    f"cuMemCreate failed for {name} on layer {layer_id}: err={err}"
-                )
+            _cuda.check(err, f"cuMemCreate failed for {name} on layer {layer_id}")
 
             # Reserve VA and map the handle
             err, va = _cuda.lib.cuMemAddressReserve(total_aligned, 0, 0, 0)
-            if err != 0:
-                raise RuntimeError(
-                    f"cuMemAddressReserve failed for {name} on layer {layer_id}: err={err}"
-                )
+            _cuda.check(err, f"cuMemAddressReserve failed for {name} on layer {layer_id}")
             va_int = int(va)
 
             region = VmmRegion(va_int, total_aligned)
