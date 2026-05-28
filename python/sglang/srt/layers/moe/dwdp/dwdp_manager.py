@@ -1,8 +1,14 @@
 """DWDP Manager — expert layout, IPC handle exchange, and weight assembly.
 
+Supports two weight assembly modes:
+1. VMM Composite VA (default): maps local + remote expert weights into a single
+   contiguous virtual address region. The MoE kernel sees one tensor — no
+   concatenation or multi-B kernel changes required. Eliminates local expert
+   copy overhead and reduces memory footprint.
+2. Concat fallback: concatenates local + prefetched weights into a new tensor
+   each layer. Simpler but copies local experts unnecessarily.
+
 Adapted from SGLang PR #23425 and TRT-LLM PR #12136.
-Key difference from PR #23425: weight assembly via torch.cat instead of
-multi-B List[Tensor], enabling compatibility with Triton MoE kernels.
 """
 
 from __future__ import annotations
@@ -224,11 +230,13 @@ class DwdpLayerHandleCollector:
 
 class DwdpManager:
     """Orchestrates the DWDP lifecycle: weight registration, IPC exchange,
-    prefetch buffer management, and weight assembly via concatenation.
+    prefetch buffer management, and weight assembly.
 
-    Unlike PR #23425 which uses multi-B List[Tensor] for CuteDSL kernels,
-    this implementation concatenates local + prefetched weights into a single
-    contiguous tensor compatible with Triton MoE kernels.
+    Supports two weight assembly modes:
+    - VMM Composite VA (default): maps local + remote expert weights into a
+      single contiguous virtual address region. No concatenation needed.
+    - Concat fallback: concatenates local + prefetched weights into a new
+      tensor each layer. Copies local experts unnecessarily.
     """
 
     def __init__(
@@ -240,12 +248,14 @@ class DwdpManager:
         first_k_dense_replace: int,
         total_num_layers: int,
         num_experts_per_worker: Optional[int] = None,
+        use_vmm: bool = True,
     ):
         self.dwdp_size = dwdp_size
         self.dwdp_rank = dwdp_rank
         self.num_moe_layers = num_moe_layers
         self.first_k_dense_replace = first_k_dense_replace
         self.total_num_layers = total_num_layers
+        self.use_vmm = use_vmm
 
         if num_experts_per_worker is None:
             num_experts_per_worker = num_routed_experts // dwdp_size
@@ -267,6 +277,10 @@ class DwdpManager:
         # Must be triggered from forward_dwdp (not model_runner.forward_extend)
         # to avoid NCCL deadlock when DP ranks are desynchronized.
         self._initial_prefetch_done = False
+
+        # VMM weight buffers per MoE layer, keyed by moe_idx.
+        # Created in _init_vmm_buffers() after IPC exchange.
+        self._vmm_buffers: Dict[int, "DwdpVmmWeightBuffer"] = {}
 
         # Mapping from absolute layer_id to moe_layer_index (0-based)
         self._layer_id_to_moe_idx: Dict[int, int] = {}
@@ -317,7 +331,10 @@ class DwdpManager:
         )
 
     def init_prefetch_buffers(self) -> None:
-        """Allocate double-buffered prefetch buffers and wire up IPC collectors."""
+        """Allocate double-buffered prefetch buffers and wire up IPC collectors.
+
+        In VMM mode, also creates VMM composite VA weight buffers per layer.
+        """
         from sglang.srt.layers.moe.dwdp.prefetch_buffer import DwdpPrefetchBuffer
 
         first_collector = next(iter(self.layer_handles.values()))
@@ -350,7 +367,45 @@ class DwdpManager:
             all_handles_by_layer=handles_by_moe_idx,
         )
 
-        logger.info("DWDP prefetch buffers allocated (P2P mode)")
+        # Create VMM composite VA buffers if enabled
+        if self.use_vmm:
+            self._init_vmm_buffers(collectors_by_moe_idx, param_shapes, param_dtypes)
+
+        logger.info(
+            f"DWDP prefetch buffers allocated (P2P mode, vmm={self.use_vmm})"
+        )
+
+    def _init_vmm_buffers(
+        self,
+        collectors_by_moe_idx: Dict[int, DwdpLayerHandleCollector],
+        param_shapes: Dict[str, torch.Size],
+        param_dtypes: Dict[str, torch.dtype],
+    ) -> None:
+        """Create VMM composite VA weight buffers for all MoE layers."""
+        from sglang.srt.layers.moe.dwdp.vmm_buffer import DwdpVmmWeightBuffer
+
+        device_id = torch.cuda.current_device()
+
+        for moe_idx, collector in collectors_by_moe_idx.items():
+            vmm_buf = DwdpVmmWeightBuffer(
+                layer_id=collector.layer_id,
+                num_routed_experts=self.layout.num_routed_experts,
+                local_expert_start=self.layout.local_expert_start,
+                local_expert_end=self.layout.local_expert_end,
+                param_shapes=param_shapes,
+                param_dtypes=param_dtypes,
+                local_weights=collector.local_weights,
+                device_id=device_id,
+                dwdp_size=self.dwdp_size,
+            )
+            self._vmm_buffers[moe_idx] = vmm_buf
+
+        # Wire VMM buffers into the prefetch buffer for P2P destination routing
+        self._prefetch_buffer.set_vmm_buffers(self._vmm_buffers)
+
+        logger.info(
+            f"VMM composite VA buffers created for {len(self._vmm_buffers)} MoE layers"
+        )
 
     def initialize_compute_events(self) -> None:
         """Pre-record initial compute events so the first prefetch can proceed."""
@@ -382,13 +437,23 @@ class DwdpManager:
                 )
 
     def get_assembled_weights(self, layer_id: int) -> Optional[Dict[str, torch.Tensor]]:
-        """Wait for prefetch, then assemble full weight tensors via concatenation.
+        """Return full [num_routed_experts, ...] weight tensors for a MoE layer.
 
-        Returns a dict of {param_name: tensor} with shape
-        [num_routed_experts, ...] suitable for Triton MoE kernels,
-        or None if DWDP weight assembly is disabled for testing.
+        In VMM mode, returns the composite VA tensor views directly — no
+        concatenation needed. The VMM buffer already maps local experts
+        (zero-copy) and remote experts (P2P pool) into a contiguous VA.
+
+        In concat mode, waits for prefetch then assembles via torch.cat.
         """
         moe_idx = self._layer_id_to_moe_idx[layer_id]
+
+        # VMM mode: return composite VA tensor views directly
+        if self.use_vmm and moe_idx in self._vmm_buffers:
+            self._prefetch_buffer.wait_for_prefetch(moe_idx)
+            vmm_buf = self._vmm_buffers[moe_idx]
+            return {name: vmm_buf.get_tensor(name) for name in vmm_buf._param_state}
+
+        # Concat fallback mode
         collector = self.layer_handles[layer_id]
 
         # Wait for prefetch to complete
@@ -456,6 +521,9 @@ class DwdpManager:
         if self._prefetch_buffer is not None:
             self._prefetch_buffer.cleanup()
             self._prefetch_buffer = None
+        for vmm_buf in self._vmm_buffers.values():
+            vmm_buf.cleanup()
+        self._vmm_buffers.clear()
         for collector in self.layer_handles.values():
             collector.cleanup()
         self.layer_handles.clear()

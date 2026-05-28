@@ -516,6 +516,7 @@ class ServerArgs:
     moe_dense_tp_size: Optional[int] = None
     dwdp_size: int = 1
     dwdp_num_experts_per_worker: Optional[int] = None
+    dwdp_use_vmm: bool = True
     elastic_ep_backend: Literal[None, "mooncake"] = None
     mooncake_ib_device: Optional[str] = None
 
@@ -4247,6 +4248,15 @@ class ServerArgs:
             help="Number of experts stored locally per rank for DWDP. "
             "Default: num_routed_experts // dwdp_size (equal partition). "
             "Set higher for overlapping allocation to reduce NVLink prefetch volume.",
+        )
+        parser.add_argument(
+            "--dwdp-use-vmm",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.dwdp_use_vmm,
+            help="Use VMM Composite VA for weight assembly instead of concatenation. "
+            "VMM maps local + remote expert weights into a single contiguous virtual "
+            "address region, eliminating local expert copy overhead. "
+            "Use --no-dwdp-use-vmm to fall back to concat. Default: True.",
         )
         parser.add_argument(
             "--elastic-ep-backend",

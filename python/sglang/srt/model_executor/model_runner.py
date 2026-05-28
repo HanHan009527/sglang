@@ -921,6 +921,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             first_k_dense_replace=first_k_dense_replace,
             total_num_layers=total_num_layers,
             num_experts_per_worker=self.server_args.dwdp_num_experts_per_worker,
+            use_vmm=self.server_args.dwdp_use_vmm,
         )
         set_global_dwdp_manager(dwdp_manager)
 

@@ -1,15 +1,18 @@
 """DWDP (Distributed Weight Data Parallelism) for MoE layers.
 
 Tokens stay on-rank; expert weights are prefetched via NVLink P2P (CUDA IPC).
-This implementation uses Triton MoE kernels with concatenated weight assembly,
-making it work on non-Blackwell hardware (H800, A100, H20, etc.) without requiring
-FlashInfer CuteDSL multi-B API.
+Weight assembly uses VMM Composite VA by default, mapping local + remote expert
+weights into a single contiguous virtual address region — the MoE kernel sees
+one tensor with no concatenation or multi-B kernel changes required.
+Falls back to concat-based assembly if VMM is disabled.
+
+This implementation works on non-Blackwell hardware (H800, A100, H20, etc.)
+without requiring FlashInfer CuteDSL multi-B API.
 
 Weight transfer uses cudaMemcpyAsync over NVLink (not NCCL all_gather),
 enabling independent rank execution compatible with DP attention.
 
 Ported from SGLang PR #23425 (NVIDIA/CUDA) and TRT-LLM PR #12136.
-Key difference: weight assembly via concatenation instead of multi-B List[Tensor].
 """
 
 from typing import Optional

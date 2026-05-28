@@ -21,6 +21,7 @@ import torch
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpExpertLayout, DwdpLayerHandleCollector
+    from sglang.srt.layers.moe.dwdp.vmm_buffer import DwdpVmmWeightBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,11 @@ class DwdpPrefetchBuffer:
         self._layer_collectors: Dict[int, DwdpLayerHandleCollector] = {}
         self._all_handles_by_layer: Dict[int, list] = {}
 
+        # VMM weight buffers, keyed by moe_idx.
+        # When set, P2P copies write directly into VMM pool regions instead of
+        # separate buffer tensors. Set by DwdpManager._init_vmm_buffers().
+        self._vmm_buffers: Dict[int, DwdpVmmWeightBuffer] = {}
+
         logger.info(
             f"DwdpPrefetchBuffer allocated (P2P mode): "
             f"num_prefetch_experts={num_prefetch_experts}, "
@@ -127,6 +133,14 @@ class DwdpPrefetchBuffer:
         self._layer_collectors = collectors
         self._all_handles_by_layer = all_handles_by_layer
 
+    def set_vmm_buffers(self, vmm_buffers: Dict[int, DwdpVmmWeightBuffer]) -> None:
+        """Set VMM weight buffers for direct P2P-to-VMM-pool copy mode.
+
+        When VMM buffers are set, prefetch_layer() writes P2P copies directly
+        into the VMM pool regions instead of separate buffer tensors.
+        """
+        self._vmm_buffers = vmm_buffers
+
     def initialize_compute_events(self) -> None:
         """Pre-record first compute events so prefetch_first_layers() can proceed."""
         current_stream = torch.cuda.current_stream(self.device)
@@ -146,6 +160,10 @@ class DwdpPrefetchBuffer:
         - Opens IPC handles per-call, closes after copy is enqueued
         - Transfers only the needed expert slice (not full local weights)
         - No FP8 dtype workaround needed (raw byte copy)
+
+        When VMM buffers are available, P2P copies write directly into the
+        VMM pool regions (composite VA layout), eliminating the need for
+        separate buffer tensors and subsequent concatenation.
         """
         buf_idx = moe_layer_idx % 2
         layer_slot = moe_layer_idx // 2
@@ -159,6 +177,9 @@ class DwdpPrefetchBuffer:
         # Open IPC handles for peer weights (~4 params * (dwdp_size-1) mappings,
         # well under the CUDA driver IPC mapping limit of ~256)
         collector.open_peer_handles(all_handles, dwdp_rank)
+
+        # Check if VMM mode is active for this layer
+        vmm_buf = self._vmm_buffers.get(moe_layer_idx)
 
         # --- P2P copy on prefetch stream ---
         wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
@@ -189,9 +210,18 @@ class DwdpPrefetchBuffer:
                     src_ptr = ctypes.c_void_p(
                         collector.peer_base_ptrs[(peer_rank, param_name)] + src_byte_offset
                     )
-                    dst_ptr = ctypes.c_void_p(
-                        self.buffers[buf_idx][param_name][peer_rank].data_ptr()
-                    )
+
+                    if vmm_buf is not None:
+                        # VMM mode: copy directly into the composite VA pool region
+                        dst_ptr_int, _ = vmm_buf.get_pool_ptr(
+                            param_name, peer_rank, layout
+                        )
+                        dst_ptr = ctypes.c_void_p(dst_ptr_int)
+                    else:
+                        # Concat mode: copy into separate buffer tensor
+                        dst_ptr = ctypes.c_void_p(
+                            self.buffers[buf_idx][param_name][peer_rank].data_ptr()
+                        )
 
                     assert src_ptr.value is not None and src_ptr.value != 0, (
                         f"Null src_ptr for peer={peer_rank} param={param_name}"
@@ -239,5 +269,6 @@ class DwdpPrefetchBuffer:
         self.compute_events.clear()
         self._layer_collectors.clear()
         self._all_handles_by_layer.clear()
+        self._vmm_buffers.clear()
         self.prefetch_stream = None
         self._cuda_lib = None
