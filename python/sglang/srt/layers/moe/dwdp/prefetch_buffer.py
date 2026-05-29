@@ -17,8 +17,10 @@ into the VMM slot on the prefetch stream before P2P copies begin.
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
 import math
+import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -102,13 +104,36 @@ class DwdpPrefetchBuffer:
         # Per-layer CUDA events
         num_slots_per_buffer = math.ceil(num_moe_layers / 2)
         self.prefetch_events: List[List[torch.cuda.Event]] = [
-            [torch.cuda.Event() for _ in range(num_slots_per_buffer)]
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
             for _ in range(2)
         ]
         self.compute_events: List[List[torch.cuda.Event]] = [
-            [torch.cuda.Event() for _ in range(num_slots_per_buffer)]
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
             for _ in range(2)
         ]
+
+        # Per-layer timing events for profiling
+        self.prefetch_start_events: List[List[torch.cuda.Event]] = [
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
+            for _ in range(2)
+        ]
+        self.prefetch_end_events: List[List[torch.cuda.Event]] = [
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
+            for _ in range(2)
+        ]
+        self.compute_start_events: List[List[torch.cuda.Event]] = [
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
+            for _ in range(2)
+        ]
+        self.compute_end_events: List[List[torch.cuda.Event]] = [
+            [torch.cuda.Event(enable_timing=True) for _ in range(num_slots_per_buffer)]
+            for _ in range(2)
+        ]
+
+        # Per-layer CPU wall-clock timing for blocking sync
+        self._sync_wall_ms: Dict[int, float] = {}
+        self._ipc_open_ms: Dict[int, float] = {}
+        self._ipc_close_ms: Dict[int, float] = {}
 
         # CudaRTLibrary instance for P2P operations
         from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
@@ -188,9 +213,15 @@ class DwdpPrefetchBuffer:
         collector = self._layer_collectors[moe_layer_idx]
         all_handles = self._all_handles_by_layer[moe_layer_idx]
 
+        # --- Timing: IPC open ---
+        t_ipc_open_start = time.perf_counter_ns()
+
         # Open IPC handles for peer weights (~4 params * (dwdp_size-1) mappings,
         # well under the CUDA driver IPC mapping limit of ~256)
         collector.open_peer_handles(all_handles, dwdp_rank)
+
+        t_ipc_open_end = time.perf_counter_ns()
+        self._ipc_open_ms[moe_layer_idx] = (t_ipc_open_end - t_ipc_open_start) / 1e6
 
         # Select VMM slot (ping-pong)
         vmm_slot = self._vmm_slots[buf_idx] if self._vmm_slots else None
@@ -199,6 +230,9 @@ class DwdpPrefetchBuffer:
         wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
 
         with torch.cuda.stream(self.prefetch_stream):
+            # Record prefetch start on GPU
+            self.prefetch_start_events[buf_idx][layer_slot].record(self.prefetch_stream)
+
             # Wait for previous layer's compute to finish (overlap window)
             if wait_compute_slot is not None and wait_compute_slot >= 0:
                 self.prefetch_stream.wait_event(
@@ -252,7 +286,12 @@ class DwdpPrefetchBuffer:
                         dst_ptr, src_ptr, copy_bytes, stream_handle
                     )
 
+            # Record prefetch end on GPU
+            self.prefetch_end_events[buf_idx][layer_slot].record(self.prefetch_stream)
             self.prefetch_events[buf_idx][layer_slot].record(self.prefetch_stream)
+
+        # --- Timing: blocking sync ---
+        t_sync_start = time.perf_counter_ns()
 
         # CRITICAL: synchronize before closing IPC handles.
         # cudaMemcpyAsync is asynchronous — the copy may not have executed
@@ -260,8 +299,17 @@ class DwdpPrefetchBuffer:
         # until the DMA completes, otherwise the GPU reads unmapped memory.
         self.prefetch_stream.synchronize()
 
+        t_sync_end = time.perf_counter_ns()
+        self._sync_wall_ms[moe_layer_idx] = (t_sync_end - t_sync_start) / 1e6
+
+        # --- Timing: IPC close ---
+        t_ipc_close_start = time.perf_counter_ns()
+
         # Close IPC handles now that the copies have completed.
         collector.close_peer_handles()
+
+        t_ipc_close_end = time.perf_counter_ns()
+        self._ipc_close_ms[moe_layer_idx] = (t_ipc_close_end - t_ipc_close_start) / 1e6
 
     def wait_for_prefetch(self, moe_layer_idx: int) -> None:
         """Default stream waits for prefetch of this layer to complete."""
@@ -276,6 +324,14 @@ class DwdpPrefetchBuffer:
         layer_slot = moe_layer_idx // 2
         current_stream = torch.cuda.current_stream(self.device)
         self.compute_events[buf_idx][layer_slot].record(current_stream)
+        self.compute_end_events[buf_idx][layer_slot].record(current_stream)
+
+    def record_compute_start(self, moe_layer_idx: int) -> None:
+        """Record compute start on the default stream."""
+        buf_idx = moe_layer_idx % 2
+        layer_slot = moe_layer_idx // 2
+        current_stream = torch.cuda.current_stream(self.device)
+        self.compute_start_events[buf_idx][layer_slot].record(current_stream)
 
     def get_buffer_views(
         self, moe_layer_idx: int
@@ -283,6 +339,56 @@ class DwdpPrefetchBuffer:
         """Return buffer tensor views for the given MoE layer."""
         buf_idx = moe_layer_idx % 2
         return self.buffers[buf_idx]
+
+    def get_layer_timing(self, moe_layer_idx: int) -> Dict[str, float]:
+        """Return per-layer timing data for profiling.
+
+        Returns dict with:
+        - prefetch_gpu_ms: GPU time for P2P copy (CUDA event elapsed)
+        - compute_gpu_ms: GPU time for MoE compute (CUDA event elapsed)
+        - ipc_open_ms: CPU wall-clock for IPC handle open
+        - sync_wall_ms: CPU wall-clock for prefetch_stream.synchronize()
+        - ipc_close_ms: CPU wall-clock for IPC handle close
+        - overlap_ratio: min(compute, prefetch_next) / prefetch_next
+          (only meaningful when comparing layer N compute vs layer N+2 prefetch)
+        """
+        buf_idx = moe_layer_idx % 2
+        layer_slot = moe_layer_idx // 2
+
+        result: Dict[str, float] = {
+            "prefetch_gpu_ms": 0.0,
+            "compute_gpu_ms": 0.0,
+            "ipc_open_ms": self._ipc_open_ms.get(moe_layer_idx, 0.0),
+            "sync_wall_ms": self._sync_wall_ms.get(moe_layer_idx, 0.0),
+            "ipc_close_ms": self._ipc_close_ms.get(moe_layer_idx, 0.0),
+        }
+
+        # GPU timing via CUDA events (requires synchronization)
+        try:
+            result["prefetch_gpu_ms"] = self.prefetch_start_events[buf_idx][
+                layer_slot
+            ].elapsed_time(self.prefetch_end_events[buf_idx][layer_slot])
+        except Exception:
+            pass
+
+        try:
+            result["compute_gpu_ms"] = self.compute_start_events[buf_idx][
+                layer_slot
+            ].elapsed_time(self.compute_end_events[buf_idx][layer_slot])
+        except Exception:
+            pass
+
+        return result
+
+    def dump_layer_timing(self, path: str) -> None:
+        """Dump per-layer timing data to JSON file."""
+        data = {}
+        for moe_idx in range(self.num_moe_layers):
+            data[f"layer_{moe_idx}"] = self.get_layer_timing(moe_idx)
+
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"Layer timing dumped to {path}")
 
     def cleanup(self) -> None:
         """Release prefetch buffers and events."""

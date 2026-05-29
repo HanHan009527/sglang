@@ -287,6 +287,9 @@ class DwdpManager:
         # to avoid NCCL deadlock when DP ranks are desynchronized.
         self._initial_prefetch_done = False
 
+        # Per-layer timing accumulation for profiling
+        self._layer_timing: Dict[int, Dict[str, float]] = {}
+
         # VMM ping-pong slots (2 entries: slot 0 for even, slot 1 for odd).
         # Created in _init_vmm_buffers() after IPC exchange.
         self._vmm_slots: List["DwdpVmmWeightBuffer"] = []
@@ -531,6 +534,9 @@ class DwdpManager:
         # Record compute done on default stream
         self._prefetch_buffer.record_compute_done(moe_idx)
 
+        # Accumulate per-layer timing
+        self._layer_timing[moe_idx] = self._prefetch_buffer.get_layer_timing(moe_idx)
+
         # Trigger prefetch for moe_idx + 2 (same buffer slot)
         next_moe_idx = moe_idx + 2
         if next_moe_idx < self.num_moe_layers:
@@ -540,6 +546,10 @@ class DwdpManager:
                     moe_layer_idx=next_moe_idx,
                     local_weights=self.layer_handles[next_layer_id].local_weights,
                 )
+
+    def dump_layer_timing(self, path: str) -> None:
+        """Dump accumulated per-layer timing data to JSON file."""
+        self._prefetch_buffer.dump_layer_timing(path)
 
     # ----- Phase 5: Cleanup -----
 

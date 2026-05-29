@@ -756,6 +756,9 @@ class DeepseekV2MoE(nn.Module):
                 hidden_size=hidden_states.shape[-1],
             )
 
+        # Record compute start on default stream (profiling)
+        dwdp_manager._prefetch_buffer.record_compute_start(moe_idx)
+
         # Run MoE forward with all experts visible (no dispatch/combine)
         final_hidden_states = self.experts(hidden_states, topk_output)
 
