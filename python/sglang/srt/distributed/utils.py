@@ -228,3 +228,19 @@ class StatelessProcessGroup:
             store=store,
             data_expiration_seconds=data_expiration_seconds,
         )
+
+
+# Global TCPStore that is created during distributed initialization
+_global_tcp_store: Optional[TCPStore] = None
+
+
+def set_global_tcp_store(store: TCPStore) -> None:
+    """Set the global TCPStore instance."""
+    global _global_tcp_store
+    _global_tcp_store = store
+
+
+def get_global_tcp_store() -> Optional[TCPStore]:
+    """Get the existing global TCPStore instance."""
+    global _global_tcp_store
+    return _global_tcp_store
