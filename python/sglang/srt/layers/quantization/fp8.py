@@ -1561,9 +1561,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         device = layer.w13_weight.device
         num_experts = layer.w13_weight.shape[0]
-        hidden_size = layer.w2_weight.shape[1]
-        intermediate_size_per_partition = layer.intermediate_size_per_partition
+        self._init_cutlass_buffers(device, num_experts, layer.intermediate_size_per_partition, layer.w2_weight.shape[1])
+        self._cutlass_buffers_ready = True
 
+    def _init_cutlass_buffers(self, device, num_experts, intermediate_size_per_partition, hidden_size) -> None:
+        """Allocate or reallocate cutlass kernel buffers for a given expert count."""
         self.ab_strides1 = torch.full(
             (num_experts,), hidden_size, device=device, dtype=torch.int64
         )
@@ -1598,7 +1600,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             num_experts, 3, device=device, dtype=torch.int32
         )
 
-        self._cutlass_buffers_ready = True
+    def ensure_cutlass_buffers_for_experts(self, device, num_experts, intermediate_size_per_partition, hidden_size) -> None:
+        """Reinitialize cutlass buffers if the expert count differs from current allocation.
+
+        Called by DWDP forward_dwdp when the assembled weight tensor has more
+        experts than the original per-rank local expert count.
+        """
+        if not getattr(self, "_cutlass_buffers_ready", False):
+            return
+        current_num = self.ab_strides1.shape[0]
+        if current_num != num_experts:
+            self._init_cutlass_buffers(device, num_experts, intermediate_size_per_partition, hidden_size)
 
     def maybe_apply_hip_fused_experts(
         self,

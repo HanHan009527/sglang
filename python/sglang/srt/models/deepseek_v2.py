@@ -745,6 +745,17 @@ class DeepseekV2MoE(nn.Module):
         # Skip all-reduce inside FusedMoELayer.forward_impl (line 1010)
         self.experts.moe_ep_size = 1
 
+        # Reinitialize cutlass buffers if expert count changed (DWDP assembles
+        # all num_routed_experts, but buffers were sized for num_local_experts)
+        quant_method = self.experts.quant_method
+        if hasattr(quant_method, "ensure_cutlass_buffers_for_experts"):
+            quant_method.ensure_cutlass_buffers_for_experts(
+                device=hidden_states.device,
+                num_experts=num_routed,
+                intermediate_size_per_partition=self.experts.intermediate_size_per_partition,
+                hidden_size=hidden_states.shape[-1],
+            )
+
         # Run MoE forward with all experts visible (no dispatch/combine)
         final_hidden_states = self.experts(hidden_states, topk_output)
 
@@ -769,10 +780,15 @@ class DeepseekV2MoE(nn.Module):
         dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
 
         # Accumulate shared experts
+        # NOTE: With DWDP (moe_tp_size=1), routed expert output is identical
+        # across ranks (full weights + full hidden_states).  But shared experts
+        # are TP-sharded, so their output differs per rank.  We must all-reduce
+        # ONLY the shared expert output, not the combined result — otherwise
+        # the identical routed expert output gets multiplied by tp_size.
         if shared_output is not None:
+            if self.tp_size > 1:
+                shared_output = tensor_model_parallel_all_reduce(shared_output)
             final_hidden_states += shared_output
-
-        # NO tensor_model_parallel_all_reduce — each rank is fully independent
         return final_hidden_states
 
 

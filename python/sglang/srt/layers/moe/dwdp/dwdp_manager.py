@@ -2,9 +2,10 @@
 
 Supports two weight assembly modes:
 1. VMM Composite VA (default): maps local + remote expert weights into a single
-   contiguous virtual address region. The MoE kernel sees one tensor — no
-   concatenation or multi-B kernel changes required. Eliminates local expert
-   copy overhead and reduces memory footprint.
+   contiguous virtual address region using ping-pong VMM slots. The MoE kernel
+   sees one tensor — no concatenation or multi-B kernel changes required.
+   Local expert weights are copied per-layer on the prefetch stream (overlapped
+   with compute). Only 2 VMM slots (~1.48GB) instead of per-layer allocations (~44GB).
 2. Concat fallback: concatenates local + prefetched weights into a new tensor
    each layer. Simpler but copies local experts unnecessarily.
 
@@ -112,10 +113,17 @@ class DwdpLayerHandleCollector:
         self._ipc_mappings: List[int] = []  # base ptrs to close on cleanup
 
     def register(self, **kwargs: torch.Tensor) -> None:
-        """Register local weight tensors for this layer."""
+        """Register local weight tensors for this layer.
+
+        Clones each tensor to ensure it owns a separate CUDA allocation.
+        This is required for IPC: cudaIpcGetMemHandle operates on the
+        entire allocation, and if the tensor is a view (e.g. a slice of
+        a larger tensor), the offset calculation via cuMemGetAddressRange
+        would be wrong.  Cloning guarantees data_ptr() == allocation base.
+        """
         for name in WEIGHT_PARAM_NAMES:
             if name in kwargs:
-                self.local_weights[name] = kwargs[name]
+                self.local_weights[name] = kwargs[name].clone()
 
     def get_ipc_handles(self) -> Dict[str, Tuple[bytes, int]]:
         """Return (handle_bytes, offset) for each local weight tensor.
@@ -234,7 +242,8 @@ class DwdpManager:
 
     Supports two weight assembly modes:
     - VMM Composite VA (default): maps local + remote expert weights into a
-      single contiguous virtual address region. No concatenation needed.
+      single contiguous virtual address region using ping-pong VMM slots.
+      No concatenation needed. Local expert copy per-layer on prefetch stream.
     - Concat fallback: concatenates local + prefetched weights into a new
       tensor each layer. Copies local experts unnecessarily.
     """
@@ -257,7 +266,7 @@ class DwdpManager:
         self.total_num_layers = total_num_layers
         self.use_vmm = use_vmm
 
-        if num_experts_per_worker is None:
+        if num_experts_per_worker is None or num_experts_per_worker <= 0:
             num_experts_per_worker = num_routed_experts // dwdp_size
 
         self.layout = DwdpExpertLayout(
@@ -278,9 +287,9 @@ class DwdpManager:
         # to avoid NCCL deadlock when DP ranks are desynchronized.
         self._initial_prefetch_done = False
 
-        # VMM weight buffers per MoE layer, keyed by moe_idx.
+        # VMM ping-pong slots (2 entries: slot 0 for even, slot 1 for odd).
         # Created in _init_vmm_buffers() after IPC exchange.
-        self._vmm_buffers: Dict[int, "DwdpVmmWeightBuffer"] = {}
+        self._vmm_slots: List["DwdpVmmWeightBuffer"] = []
 
         # Mapping from absolute layer_id to moe_layer_index (0-based)
         self._layer_id_to_moe_idx: Dict[int, int] = {}
@@ -314,8 +323,10 @@ class DwdpManager:
     # ----- Phase 3: IPC Exchange -----
 
     def exchange_ipc_handles(self) -> None:
-        """AllGather IPC handles across DWDP group and store them."""
-        from sglang.srt.distributed.parallel_state import get_dwdp_group
+        """AllGather IPC handles across DWDP group and enable P2P access."""
+        import ctypes
+
+        from sglang.srt.distributed.parallel_state import get_dwdp_group, get_dwdp_rank
 
         group = get_dwdp_group()
         self._all_handles: Dict[int, list] = {}
@@ -326,14 +337,30 @@ class DwdpManager:
             dist.all_gather_object(all_handles, local_handles, group=group.cpu_group)
             self._all_handles[layer_id] = all_handles
 
+        # Enable P2P access between all GPU pairs in the DWDP group.
+        # Required for cudaMemcpyAsync with cudaMemcpyDefault across devices.
+        dwdp_rank = get_dwdp_rank()
+        cudart = ctypes.CDLL("libcudart.so")
+        for peer_rank in range(self.dwdp_size):
+            if peer_rank == dwdp_rank:
+                continue
+            # cudaDeviceEnablePeerAccess(peerDevice, flags=0)
+            # Returns cudaSuccess (0) or cudaErrorPeerAccessAlreadyEnabled (704)
+            err = cudart.cudaDeviceEnablePeerAccess(peer_rank, 0)
+            if err != 0 and err != 704:
+                raise RuntimeError(
+                    f"cudaDeviceEnablePeerAccess({peer_rank}) failed: error {err}"
+                )
+
         logger.info(
-            f"DWDP IPC handles exchanged for {len(self.layer_handles)} MoE layers"
+            f"DWDP IPC handles exchanged for {len(self.layer_handles)} MoE layers, "
+            f"P2P access enabled"
         )
 
     def init_prefetch_buffers(self) -> None:
         """Allocate double-buffered prefetch buffers and wire up IPC collectors.
 
-        In VMM mode, also creates VMM composite VA weight buffers per layer.
+        In VMM mode, also creates 2 ping-pong VMM composite VA slots.
         """
         from sglang.srt.layers.moe.dwdp.prefetch_buffer import DwdpPrefetchBuffer
 
@@ -350,6 +377,7 @@ class DwdpManager:
             param_shapes=param_shapes,
             param_dtypes=param_dtypes,
             device=next(iter(first_collector.local_weights.values())).device,
+            use_vmm=self.use_vmm,
         )
 
         # Re-key collectors and handles by moe_idx for prefetch buffer access.
@@ -381,31 +409,30 @@ class DwdpManager:
         param_shapes: Dict[str, torch.Size],
         param_dtypes: Dict[str, torch.dtype],
     ) -> None:
-        """Create VMM composite VA weight buffers for all MoE layers."""
+        """Create 2 ping-pong VMM composite VA slots shared across all layers."""
         from sglang.srt.layers.moe.dwdp.vmm_buffer import DwdpVmmWeightBuffer
 
         device_id = torch.cuda.current_device()
 
-        for moe_idx, collector in collectors_by_moe_idx.items():
-            vmm_buf = DwdpVmmWeightBuffer(
-                layer_id=collector.layer_id,
+        # Create 2 ping-pong VMM slots (shared across all layers)
+        for slot_idx in range(2):
+            slot = DwdpVmmWeightBuffer(
+                slot_idx=slot_idx,
                 num_routed_experts=self.layout.num_routed_experts,
                 local_expert_start=self.layout.local_expert_start,
                 local_expert_end=self.layout.local_expert_end,
                 param_shapes=param_shapes,
                 param_dtypes=param_dtypes,
-                local_weights=collector.local_weights,
+                local_weights=None,  # No init-time copy; filled per-layer
                 device_id=device_id,
                 dwdp_size=self.dwdp_size,
             )
-            self._vmm_buffers[moe_idx] = vmm_buf
+            self._vmm_slots.append(slot)
 
-        # Wire VMM buffers into the prefetch buffer for P2P destination routing
-        self._prefetch_buffer.set_vmm_buffers(self._vmm_buffers)
+        # Wire VMM slots into the prefetch buffer for P2P destination routing
+        self._prefetch_buffer.set_vmm_slots(self._vmm_slots)
 
-        logger.info(
-            f"VMM composite VA buffers created for {len(self._vmm_buffers)} MoE layers"
-        )
+        logger.info(f"VMM ping-pong slots created: 2 slots")
 
     def initialize_compute_events(self) -> None:
         """Pre-record initial compute events so the first prefetch can proceed."""
@@ -439,19 +466,19 @@ class DwdpManager:
     def get_assembled_weights(self, layer_id: int) -> Optional[Dict[str, torch.Tensor]]:
         """Return full [num_routed_experts, ...] weight tensors for a MoE layer.
 
-        In VMM mode, returns the composite VA tensor views directly — no
-        concatenation needed. The VMM buffer already maps local experts
-        (zero-copy) and remote experts (P2P pool) into a contiguous VA.
+        In VMM mode, returns the composite VA tensor views from the ping-pong
+        slot — no concatenation needed. Local experts are copied per-layer on
+        the prefetch stream; remote experts are filled by P2P prefetch.
 
         In concat mode, waits for prefetch then assembles via torch.cat.
         """
         moe_idx = self._layer_id_to_moe_idx[layer_id]
 
-        # VMM mode: return composite VA tensor views directly
-        if self.use_vmm and moe_idx in self._vmm_buffers:
+        # VMM mode: return composite VA tensor views from ping-pong slot
+        if self.use_vmm and self._vmm_slots:
             self._prefetch_buffer.wait_for_prefetch(moe_idx)
-            vmm_buf = self._vmm_buffers[moe_idx]
-            return {name: vmm_buf.get_tensor(name) for name in vmm_buf._param_state}
+            slot = self._vmm_slots[moe_idx % 2]
+            return {name: slot.get_tensor(name) for name in slot._param_state}
 
         # Concat fallback mode
         collector = self.layer_handles[layer_id]
@@ -521,9 +548,9 @@ class DwdpManager:
         if self._prefetch_buffer is not None:
             self._prefetch_buffer.cleanup()
             self._prefetch_buffer = None
-        for vmm_buf in self._vmm_buffers.values():
-            vmm_buf.cleanup()
-        self._vmm_buffers.clear()
+        for slot in self._vmm_slots:
+            slot.cleanup()
+        self._vmm_slots.clear()
         for collector in self.layer_handles.values():
             collector.cleanup()
         self.layer_handles.clear()

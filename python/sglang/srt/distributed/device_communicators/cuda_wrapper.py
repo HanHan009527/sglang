@@ -105,17 +105,17 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
-        # cudaError_t cudaMemcpyAsync (void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream)  # noqa
-        Function(
-            "cudaMemcpyAsync",
-            cudaError_t,
-            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind, ctypes.c_void_p],
-        ),
-        # cudaError_t cudaIpcCloseMemHandle (void* devPtr)  # noqa
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
         Function(
             "cudaIpcCloseMemHandle",
             cudaError_t,
             [ctypes.c_void_p],
+        ),
+        # cudaError_t cudaMemcpyAsync ( void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream )
+        Function(
+            "cudaMemcpyAsync",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind, ctypes.c_void_p],
         ),
     ]
 
@@ -198,17 +198,16 @@ class CudaRTLibrary:
         )
         return devPtr
 
-    def cudaMemcpyAsync(
-        self, dst: ctypes.c_void_p, src: ctypes.c_void_p, count: int, stream: int
-    ) -> None:
-        """Asynchronous device-to-device memory copy on specified CUDA stream."""
-        cudaMemcpyDefault = 4
-        self.CUDART_CHECK(
-            self.funcs["cudaMemcpyAsync"](
-                dst, src, count, cudaMemcpyDefault, ctypes.c_void_p(stream)
-            )
-        )
-
     def cudaIpcCloseMemHandle(self, devPtr: ctypes.c_void_p) -> None:
-        """Close an IPC memory handle mapping."""
         self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](devPtr))
+
+    def cudaMemcpyAsync(
+        self,
+        dst: ctypes.c_void_p,
+        src: ctypes.c_void_p,
+        count: int,
+        stream: ctypes.c_void_p = None,
+    ) -> None:
+        cudaMemcpyDefault = 4
+        kind = cudaMemcpyDefault
+        self.CUDART_CHECK(self.funcs["cudaMemcpyAsync"](dst, src, count, kind, stream))

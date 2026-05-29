@@ -8,6 +8,10 @@ Key design: unlike the previous NCCL all_gather approach, P2P copies run
 entirely on the prefetch stream with no default-stream dependency and no
 collective synchronization barrier. This enables independent rank execution
 compatible with DP attention.
+
+In VMM mode, P2P copies write directly into VMM ping-pong slots instead
+of separate concat buffer tensors. Local expert weights are also copied
+into the VMM slot on the prefetch stream before P2P copies begin.
 """
 
 from __future__ import annotations
@@ -35,6 +39,10 @@ class DwdpPrefetchBuffer:
     Uses CUDA IPC P2P reads (cudaMemcpyAsync) to fetch peer expert weights
     over NVLink instead of NCCL all_gather. Each rank independently reads
     peer GPU memory — no collective synchronization is required.
+
+    In VMM mode, concat buffers are not allocated — P2P copies write
+    directly into VMM ping-pong slots, and local expert weights are
+    copied into the slot on the prefetch stream.
     """
 
     def __init__(
@@ -44,12 +52,14 @@ class DwdpPrefetchBuffer:
         param_shapes: Dict[str, torch.Size],
         param_dtypes: Dict[str, torch.dtype],
         device: torch.device,
+        use_vmm: bool = False,
     ):
         self.layout = layout
         self.num_moe_layers = num_moe_layers
         self.param_shapes = param_shapes
         self.param_dtypes = param_dtypes
         self.device = device
+        self.use_vmm = use_vmm
 
         self.prefetch_stream = torch.cuda.Stream(device=device)
 
@@ -69,24 +79,25 @@ class DwdpPrefetchBuffer:
             view_shape[0] = num_prefetch_experts
             self.prefetch_view_shapes[name] = torch.Size(view_shape)
 
-        # Allocate 2 buffer slots (ping-pong)
-        # buffers[buf_idx][param_name] = list of tensors, one per rank
-        # Entry at dwdp_rank is None (local weights used directly)
+        # Allocate 2 buffer slots (ping-pong) for concat fallback mode.
+        # In VMM mode, concat buffers are not needed — P2P copies go
+        # directly into VMM slots.
         self.buffers: List[Dict[str, List[Optional[torch.Tensor]]]] = []
-        for buf_idx in range(2):
-            buffer = {}
-            for param_name in param_shapes:
-                tensor_list: List[Optional[torch.Tensor]] = [None] * dwdp_size
-                for peer_rank in range(dwdp_size):
-                    if peer_rank != dwdp_rank:
-                        view_shape = self.prefetch_view_shapes[param_name]
-                        tensor_list[peer_rank] = torch.empty(
-                            view_shape,
-                            dtype=param_dtypes[param_name],
-                            device=device,
-                        )
-                buffer[param_name] = tensor_list
-            self.buffers.append(buffer)
+        if not use_vmm:
+            for buf_idx in range(2):
+                buffer = {}
+                for param_name in param_shapes:
+                    tensor_list: List[Optional[torch.Tensor]] = [None] * dwdp_size
+                    for peer_rank in range(dwdp_size):
+                        if peer_rank != dwdp_rank:
+                            view_shape = self.prefetch_view_shapes[param_name]
+                            tensor_list[peer_rank] = torch.empty(
+                                view_shape,
+                                dtype=param_dtypes[param_name],
+                                device=device,
+                            )
+                    buffer[param_name] = tensor_list
+                self.buffers.append(buffer)
 
         # Per-layer CUDA events
         num_slots_per_buffer = math.ceil(num_moe_layers / 2)
@@ -108,13 +119,13 @@ class DwdpPrefetchBuffer:
         self._layer_collectors: Dict[int, DwdpLayerHandleCollector] = {}
         self._all_handles_by_layer: Dict[int, list] = {}
 
-        # VMM weight buffers, keyed by moe_idx.
-        # When set, P2P copies write directly into VMM pool regions instead of
+        # VMM ping-pong slots (2 entries: slot 0 for even, slot 1 for odd).
+        # When set, P2P copies write directly into VMM slot regions instead of
         # separate buffer tensors. Set by DwdpManager._init_vmm_buffers().
-        self._vmm_buffers: Dict[int, DwdpVmmWeightBuffer] = {}
+        self._vmm_slots: List[DwdpVmmWeightBuffer] = []
 
         logger.info(
-            f"DwdpPrefetchBuffer allocated (P2P mode): "
+            f"DwdpPrefetchBuffer allocated (P2P mode, vmm={use_vmm}): "
             f"num_prefetch_experts={num_prefetch_experts}, "
             f"num_slots_per_buffer={num_slots_per_buffer}, "
             f"per_expert_bytes={self.per_expert_bytes}"
@@ -133,13 +144,15 @@ class DwdpPrefetchBuffer:
         self._layer_collectors = collectors
         self._all_handles_by_layer = all_handles_by_layer
 
-    def set_vmm_buffers(self, vmm_buffers: Dict[int, DwdpVmmWeightBuffer]) -> None:
-        """Set VMM weight buffers for direct P2P-to-VMM-pool copy mode.
+    def set_vmm_slots(self, slots: List[DwdpVmmWeightBuffer]) -> None:
+        """Set VMM ping-pong slots for direct P2P-to-VMM-pool copy mode.
 
-        When VMM buffers are set, prefetch_layer() writes P2P copies directly
-        into the VMM pool regions instead of separate buffer tensors.
+        When VMM slots are set, prefetch_layer() writes P2P copies directly
+        into the VMM slot regions instead of separate buffer tensors.
+        Local expert weights are also copied into the slot on the prefetch
+        stream before P2P copies begin.
         """
-        self._vmm_buffers = vmm_buffers
+        self._vmm_slots = slots
 
     def initialize_compute_events(self) -> None:
         """Pre-record first compute events so prefetch_first_layers() can proceed."""
@@ -161,9 +174,10 @@ class DwdpPrefetchBuffer:
         - Transfers only the needed expert slice (not full local weights)
         - No FP8 dtype workaround needed (raw byte copy)
 
-        When VMM buffers are available, P2P copies write directly into the
-        VMM pool regions (composite VA layout), eliminating the need for
-        separate buffer tensors and subsequent concatenation.
+        When VMM slots are available, P2P copies write directly into the
+        VMM slot regions (composite VA layout), and local expert weights
+        are copied into the slot before P2P copies begin. This eliminates
+        the need for separate buffer tensors and subsequent concatenation.
         """
         buf_idx = moe_layer_idx % 2
         layer_slot = moe_layer_idx // 2
@@ -178,8 +192,8 @@ class DwdpPrefetchBuffer:
         # well under the CUDA driver IPC mapping limit of ~256)
         collector.open_peer_handles(all_handles, dwdp_rank)
 
-        # Check if VMM mode is active for this layer
-        vmm_buf = self._vmm_buffers.get(moe_layer_idx)
+        # Select VMM slot (ping-pong)
+        vmm_slot = self._vmm_slots[buf_idx] if self._vmm_slots else None
 
         # --- P2P copy on prefetch stream ---
         wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
@@ -190,6 +204,10 @@ class DwdpPrefetchBuffer:
                 self.prefetch_stream.wait_event(
                     self.compute_events[buf_idx][wait_compute_slot]
                 )
+
+            # Copy local expert weights into VMM slot (overlaps with prev compute)
+            if vmm_slot is not None:
+                vmm_slot.copy_local_experts(local_weights)
 
             # Async P2P copies from peer GPU memory to local buffers
             stream_handle = self.prefetch_stream.cuda_stream
@@ -211,9 +229,9 @@ class DwdpPrefetchBuffer:
                         collector.peer_base_ptrs[(peer_rank, param_name)] + src_byte_offset
                     )
 
-                    if vmm_buf is not None:
-                        # VMM mode: copy directly into the composite VA pool region
-                        dst_ptr_int, _ = vmm_buf.get_pool_ptr(
+                    if vmm_slot is not None:
+                        # VMM mode: copy directly into the composite VA slot region
+                        dst_ptr_int, _ = vmm_slot.get_pool_ptr(
                             param_name, peer_rank, layout
                         )
                         dst_ptr = ctypes.c_void_p(dst_ptr_int)
@@ -236,9 +254,13 @@ class DwdpPrefetchBuffer:
 
             self.prefetch_events[buf_idx][layer_slot].record(self.prefetch_stream)
 
-        # Close IPC handles immediately — cudaMemcpyAsync has already recorded
-        # the source address in the CUDA command buffer, so the mapping is no
-        # longer needed. This keeps concurrent IPC mappings minimal (~28).
+        # CRITICAL: synchronize before closing IPC handles.
+        # cudaMemcpyAsync is asynchronous — the copy may not have executed
+        # yet when we reach this point.  The IPC mapping must remain valid
+        # until the DMA completes, otherwise the GPU reads unmapped memory.
+        self.prefetch_stream.synchronize()
+
+        # Close IPC handles now that the copies have completed.
         collector.close_peer_handles()
 
     def wait_for_prefetch(self, moe_layer_idx: int) -> None:
@@ -269,6 +291,6 @@ class DwdpPrefetchBuffer:
         self.compute_events.clear()
         self._layer_collectors.clear()
         self._all_handles_by_layer.clear()
-        self._vmm_buffers.clear()
+        self._vmm_slots.clear()
         self.prefetch_stream = None
         self._cuda_lib = None
