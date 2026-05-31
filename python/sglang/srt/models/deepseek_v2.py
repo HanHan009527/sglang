@@ -724,7 +724,7 @@ class DeepseekV2MoE(nn.Module):
             self.experts.dispatcher.local_expert_mapping = orig_local_expert_mapping
             self.experts.dispatcher.moe_ep_size = orig_moe_ep_size
             self.experts.moe_runner_config.num_local_experts = self.experts.num_local_experts
-            self.experts.moe_ep_size = self.ep_size
+            self.experts.moe_ep_size = orig_moe_ep_size
         else:
             # FP4 path: NvFp4WeightView + CuteDSL multi-B kernel
             final_hidden_states = self.experts.forward_dwdp(
