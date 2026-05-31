@@ -693,7 +693,7 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.w2_weight_scale_inv.data = weight_view["w2_weight_scale_inv"]
 
             # Patch dispatcher: identity mapping (all experts are local)
-            num_routed = self.num_routed_experts
+            num_routed = self.config.n_routed_experts
             orig_local_expert_mapping = self.experts.dispatcher.local_expert_mapping
             orig_moe_ep_size = self.experts.dispatcher.moe_ep_size
             self.experts.dispatcher.local_expert_mapping = torch.arange(
@@ -723,7 +723,7 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.w2_weight_scale_inv.data = orig_w2_scale
             self.experts.dispatcher.local_expert_mapping = orig_local_expert_mapping
             self.experts.dispatcher.moe_ep_size = orig_moe_ep_size
-            self.experts.moe_runner_config.num_local_experts = self.num_experts_per_rank
+            self.experts.moe_runner_config.num_local_experts = self.experts.num_local_experts
             self.experts.moe_ep_size = self.ep_size
         else:
             # FP4 path: NvFp4WeightView + CuteDSL multi-B kernel

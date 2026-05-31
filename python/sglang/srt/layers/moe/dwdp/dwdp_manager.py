@@ -159,7 +159,7 @@ class DwdpLayerHandleCollector:
             handle = cudart.cudaIpcGetMemHandle(ctypes.c_void_p(data_ptr))
             # Compute offset from the start of the underlying storage allocation.
             # This avoids needing cuMemGetAddressRange from the driver API.
-            storage_ptr = tensor.storage().data_ptr()
+            storage_ptr = tensor.untyped_storage().data_ptr()
             offset = data_ptr - storage_ptr
             handles[name] = (bytes(handle.internal), offset)
         return handles
