@@ -103,6 +103,170 @@ class DwdpExpertLayout:
 # ---------------------------------------------------------------------------
 
 
+class DwdpIpcHandleCache:
+    """Caches CUDA IPC handle mappings across all layers.
+
+    Instead of opening/closing IPC handles per layer (which costs ~26ms/layer
+    due to cudaIpcOpenMemHandle overhead), this class opens all peer handles
+    once at init time and caches the mapped base pointers. Per-layer offsets
+    are computed from the cached base pointers at prefetch time.
+
+    Total mappings: (dwdp_size - 1) peers × num_moe_layers × num_params.
+    For DeepSeek-V3 with 4 ranks, 29 MoE layers, 4 params = 348 mappings.
+    The CUDA driver IPC mapping limit is ~256, so we use a sliding window
+    if needed (opening handles for a batch of layers at a time).
+    """
+
+    def __init__(self, dwdp_rank: int, dwdp_size: int):
+        self.dwdp_rank = dwdp_rank
+        self.dwdp_size = dwdp_size
+
+        # Cached mapped pointers: (moe_idx, peer_rank, param_name) -> int
+        # This is the base_ptr + offset from cudaIpcOpenMemHandle.
+        self._mapped_ptrs: Dict[Tuple[int, int, str], int] = {}
+
+        # Raw IPC mappings that need to be closed: (moe_idx, peer_rank, param_name) -> base_ptr_int
+        # (the value returned by cudaIpcOpenMemHandle, before adding offset)
+        self._ipc_base_ptrs: Dict[Tuple[int, int, str], int] = {}
+
+        # Whether all handles are currently open
+        self._all_open = False
+
+    def open_all_handles(
+        self,
+        all_handles_by_moe_idx: Dict[int, list],
+    ) -> bool:
+        """Open all peer IPC handles at once and cache mapped pointers.
+
+        Returns True if all handles were opened successfully, False if we
+        hit the IPC mapping limit (caller should use sliding window instead).
+        """
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+
+        lib = CudaRTLibrary()
+
+        for moe_idx, all_handles in all_handles_by_moe_idx.items():
+            for peer_rank, peer_handles in enumerate(all_handles):
+                if peer_rank == self.dwdp_rank:
+                    continue
+                for name, (handle_bytes, offset) in peer_handles.items():
+                    handle = cudaIpcMemHandle_t()
+                    handle.internal = (ctypes.c_byte * 128)(*handle_bytes)
+                    try:
+                        base_ptr = lib.cudaIpcOpenMemHandle(handle)
+                    except RuntimeError:
+                        # Hit IPC mapping limit — close what we've opened so far
+                        # and return False so caller falls back to sliding window
+                        logger.warning(
+                            f"IPC mapping limit hit after opening "
+                            f"{len(self._ipc_base_ptrs)} handles. "
+                            f"Falling back to sliding window mode."
+                        )
+                        self.close_all_handles()
+                        return False
+
+                    base_ptr_int = base_ptr.value
+                    key = (moe_idx, peer_rank, name)
+                    self._ipc_base_ptrs[key] = base_ptr_int
+                    self._mapped_ptrs[key] = base_ptr_int + offset
+
+        self._all_open = True
+        logger.info(
+            f"DwdpIpcHandleCache: opened {len(self._ipc_base_ptrs)} IPC mappings "
+            f"for {len(all_handles_by_moe_idx)} layers"
+        )
+        return True
+
+    def open_layer_handles(
+        self,
+        moe_idx: int,
+        all_handles: list,
+    ) -> None:
+        """Open IPC handles for a single layer (sliding window mode)."""
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+
+        lib = CudaRTLibrary()
+
+        for peer_rank, peer_handles in enumerate(all_handles):
+            if peer_rank == self.dwdp_rank:
+                continue
+            for name, (handle_bytes, offset) in peer_handles.items():
+                key = (moe_idx, peer_rank, name)
+                if key in self._ipc_base_ptrs:
+                    continue  # Already open
+                handle = cudaIpcMemHandle_t()
+                handle.internal = (ctypes.c_byte * 128)(*handle_bytes)
+                base_ptr = lib.cudaIpcOpenMemHandle(handle)
+                base_ptr_int = base_ptr.value
+                self._ipc_base_ptrs[key] = base_ptr_int
+                self._mapped_ptrs[key] = base_ptr_int + offset
+
+    def close_layer_handles(self, moe_idx: int) -> None:
+        """Close IPC handles for a single layer (sliding window mode)."""
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+        )
+
+        lib = CudaRTLibrary()
+
+        keys_to_close = [
+            (m, p, n) for (m, p, n) in self._ipc_base_ptrs if m == moe_idx
+        ]
+        for key in keys_to_close:
+            base_ptr = self._ipc_base_ptrs.pop(key, None)
+            self._mapped_ptrs.pop(key, None)
+            if base_ptr is not None:
+                try:
+                    lib.cudaIpcCloseMemHandle(ctypes.c_void_p(base_ptr))
+                except RuntimeError:
+                    pass
+
+    def get_peer_ptr(self, moe_idx: int, peer_rank: int, param_name: str) -> int:
+        """Get the cached mapped pointer for a peer's weight tensor.
+
+        Returns the NVLink-accessible pointer (base_ptr + offset) for the
+        given layer, peer rank, and parameter name.
+        """
+        key = (moe_idx, peer_rank, param_name)
+        return self._mapped_ptrs[key]
+
+    def close_all_handles(self) -> None:
+        """Close all cached IPC handle mappings."""
+        import ctypes
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+        )
+
+        lib = CudaRTLibrary()
+
+        for base_ptr in self._ipc_base_ptrs.values():
+            try:
+                lib.cudaIpcCloseMemHandle(ctypes.c_void_p(base_ptr))
+            except RuntimeError:
+                pass
+
+        self._ipc_base_ptrs.clear()
+        self._mapped_ptrs.clear()
+        self._all_open = False
+
+    @property
+    def is_all_open(self) -> bool:
+        return self._all_open
+
+
 class DwdpLayerHandleCollector:
     """Manages CUDA IPC handles for one MoE layer's weight tensors."""
 
@@ -185,9 +349,9 @@ class DwdpLayerHandleCollector:
     ) -> None:
         """Open peer IPC handles and compute NVLink-accessible pointers.
 
-        Uses CudaRTLibrary (libcudart.so via ctypes) instead of the
-        nvidia-cuda-runtime-cu12 Python bindings for consistency with
-        the rest of the SGLang codebase.
+        Used in the slow path (sliding window mode) when cached handles
+        are not available. Each call opens handles, and close_peer_handles()
+        must be called after the P2P copy completes.
         """
         import ctypes
 
@@ -209,8 +373,8 @@ class DwdpLayerHandleCollector:
                 self._ipc_mappings.append(base_ptr_int)
                 self.peer_base_ptrs[(peer_rank, name)] = base_ptr_int + offset
 
-    def cleanup(self) -> None:
-        """Close all IPC memory mappings."""
+    def close_peer_handles(self) -> None:
+        """Close peer IPC handles after P2P copy (slow path only)."""
         import ctypes
 
         from sglang.srt.distributed.device_communicators.cuda_wrapper import (
@@ -226,9 +390,11 @@ class DwdpLayerHandleCollector:
         self._ipc_mappings.clear()
         self.peer_base_ptrs.clear()
 
-    def close_peer_handles(self) -> None:
-        """Close peer IPC handles (alias for cleanup, called after P2P copy)."""
-        self.cleanup()
+    def cleanup(self) -> None:
+        """Release local weight references (IPC handles managed by DwdpIpcHandleCache)."""
+        self.local_weights.clear()
+        self.peer_base_ptrs.clear()
+        self._ipc_mappings.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +445,9 @@ class DwdpManager:
         # Per-layer handle collectors, keyed by absolute layer_id
         self.layer_handles: Dict[int, DwdpLayerHandleCollector] = {}
 
+        # IPC handle cache (opened after exchange, used by prefetch buffer)
+        self._ipc_cache: Optional[DwdpIpcHandleCache] = None
+
         # Prefetch buffer (created after IPC exchange)
         self._prefetch_buffer = None
 
@@ -326,7 +495,13 @@ class DwdpManager:
     # ----- Phase 3: IPC Exchange -----
 
     def exchange_ipc_handles(self) -> None:
-        """AllGather IPC handles across DWDP group and enable P2P access."""
+        """AllGather IPC handles across DWDP group and enable P2P access.
+
+        After exchanging handles, opens all peer IPC handles at once via
+        DwdpIpcHandleCache to avoid per-layer open/close overhead (~26ms/layer).
+        Falls back to sliding window mode if the CUDA driver IPC mapping
+        limit is exceeded.
+        """
         import ctypes
 
         from sglang.srt.distributed.parallel_state import get_dwdp_group, get_dwdp_rank
@@ -355,10 +530,28 @@ class DwdpManager:
                     f"cudaDeviceEnablePeerAccess({peer_rank}) failed: error {err}"
                 )
 
-        logger.info(
-            f"DWDP IPC handles exchanged for {len(self.layer_handles)} MoE layers, "
-            f"P2P access enabled"
-        )
+        # Open all peer IPC handles at once via the cache.
+        # Re-key handles by moe_idx for the cache.
+        handles_by_moe_idx: Dict[int, list] = {}
+        for layer_id, moe_idx in self._layer_id_to_moe_idx.items():
+            if layer_id in self._all_handles:
+                handles_by_moe_idx[moe_idx] = self._all_handles[layer_id]
+
+        self._ipc_cache = DwdpIpcHandleCache(dwdp_rank, self.dwdp_size)
+        all_opened = self._ipc_cache.open_all_handles(handles_by_moe_idx)
+
+        if not all_opened:
+            # Sliding window mode: handles will be opened/closed per layer
+            # by the prefetch buffer. The cache still manages the lifecycle.
+            logger.info(
+                f"DWDP IPC handles exchanged for {len(self.layer_handles)} MoE layers, "
+                f"P2P access enabled, sliding window IPC mode"
+            )
+        else:
+            logger.info(
+                f"DWDP IPC handles exchanged for {len(self.layer_handles)} MoE layers, "
+                f"P2P access enabled, all {len(self._ipc_cache._ipc_base_ptrs)} IPC mappings cached"
+            )
 
     def init_prefetch_buffers(self) -> None:
         """Allocate double-buffered prefetch buffers and wire up IPC collectors.
@@ -396,6 +589,7 @@ class DwdpManager:
         self._prefetch_buffer.set_layer_collectors(
             collectors=collectors_by_moe_idx,
             all_handles_by_layer=handles_by_moe_idx,
+            ipc_cache=self._ipc_cache,
         )
 
         # Create VMM composite VA buffers if enabled
@@ -561,6 +755,10 @@ class DwdpManager:
         for slot in self._vmm_slots:
             slot.cleanup()
         self._vmm_slots.clear()
+        # Close cached IPC handles before clearing collectors
+        if self._ipc_cache is not None:
+            self._ipc_cache.close_all_handles()
+            self._ipc_cache = None
         for collector in self.layer_handles.values():
             collector.cleanup()
         self.layer_handles.clear()

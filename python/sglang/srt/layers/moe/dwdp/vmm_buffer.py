@@ -299,6 +299,11 @@ class DwdpVmmWeightBuffer:
 
         Must be called on the prefetch stream so the copy overlaps with
         previous layer's compute.
+
+        ``local_weights`` contains only this rank's local experts, i.e.
+        shape [num_local_experts, ...] (already sliced by EP).  The VMM
+        _local_views are positioned at the correct offset within the
+        composite VA, so we copy the entire tensor directly.
         """
         for name, local_tensor in local_weights.items():
             if name in self._local_views:

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import torch
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpExpertLayout, DwdpLayerHandleCollector
+    from sglang.srt.layers.moe.dwdp.dwdp_manager import DwdpExpertLayout, DwdpIpcHandleCache, DwdpLayerHandleCollector
     from sglang.srt.layers.moe.dwdp.vmm_buffer import DwdpVmmWeightBuffer
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,10 @@ class DwdpPrefetchBuffer:
         self._layer_collectors: Dict[int, DwdpLayerHandleCollector] = {}
         self._all_handles_by_layer: Dict[int, list] = {}
 
+        # IPC handle cache for fast-path prefetch (no per-layer open/close).
+        # Set by DwdpManager.init_prefetch_buffers() after IPC exchange.
+        self._ipc_cache: Optional[DwdpIpcHandleCache] = None
+
         # VMM ping-pong slots (2 entries: slot 0 for even, slot 1 for odd).
         # When set, P2P copies write directly into VMM slot regions instead of
         # separate buffer tensors. Set by DwdpManager._init_vmm_buffers().
@@ -160,14 +164,21 @@ class DwdpPrefetchBuffer:
         self,
         collectors: Dict[int, DwdpLayerHandleCollector],
         all_handles_by_layer: Dict[int, list],
+        ipc_cache: Optional[DwdpIpcHandleCache] = None,
     ) -> None:
-        """Set reference to layer handle collectors and exchanged IPC handles.
+        """Set reference to layer handle collectors, exchanged IPC handles, and IPC cache.
 
         Called by DwdpManager after IPC exchange completes.
-        Both dicts are keyed by moe_layer_idx (0-based).
+        All dicts are keyed by moe_layer_idx (0-based).
+
+        When ipc_cache is provided and all handles are cached, prefetch_layer()
+        skips per-layer open/close and uses cached pointers directly.
+        When ipc_cache is None or in sliding window mode, falls back to
+        per-layer open/close via the collector.
         """
         self._layer_collectors = collectors
         self._all_handles_by_layer = all_handles_by_layer
+        self._ipc_cache = ipc_cache
 
     def set_vmm_slots(self, slots: List[DwdpVmmWeightBuffer]) -> None:
         """Set VMM ping-pong slots for direct P2P-to-VMM-pool copy mode.
@@ -192,36 +203,39 @@ class DwdpPrefetchBuffer:
     ) -> None:
         """Fetch peer expert weights via CUDA IPC P2P over NVLink.
 
-        Unlike the previous NCCL all_gather approach, this method:
-        - Runs entirely on the prefetch stream (no default stream dependency)
-        - Does NOT require peer ranks to participate (true P2P read)
-        - Opens IPC handles per-call, closes after copy is enqueued
-        - Transfers only the needed expert slice (not full local weights)
-        - No FP8 dtype workaround needed (raw byte copy)
+        When IPC handles are cached (DwdpIpcHandleCache with all handles open),
+        this method skips the per-layer open/close overhead (~26ms) and uses
+        cached mapped pointers directly. This is the fast path.
 
-        When VMM slots are available, P2P copies write directly into the
-        VMM slot regions (composite VA layout), and local expert weights
-        are copied into the slot before P2P copies begin. This eliminates
-        the need for separate buffer tensors and subsequent concatenation.
+        When the cache is in sliding window mode or unavailable, falls back
+        to per-layer open/close via the collector (slow path).
+
+        In VMM mode, P2P copies write directly into the VMM slot regions
+        (composite VA layout), and local expert weights are copied into the
+        slot before P2P copies begin.
         """
         buf_idx = moe_layer_idx % 2
         layer_slot = moe_layer_idx // 2
         layout = self.layout
         dwdp_rank = layout.dwdp_rank
 
-        # Get the handle collector for this layer
-        collector = self._layer_collectors[moe_layer_idx]
-        all_handles = self._all_handles_by_layer[moe_layer_idx]
+        # Determine if we can use cached IPC handles
+        use_cached = (
+            self._ipc_cache is not None
+            and self._ipc_cache.is_all_open
+        )
 
-        # --- Timing: IPC open ---
-        t_ipc_open_start = time.perf_counter_ns()
+        if not use_cached:
+            # Slow path: per-layer IPC open/close
+            # Get the handle collector for this layer
+            collector = self._layer_collectors[moe_layer_idx]
+            all_handles = self._all_handles_by_layer[moe_layer_idx]
 
-        # Open IPC handles for peer weights (~4 params * (dwdp_size-1) mappings,
-        # well under the CUDA driver IPC mapping limit of ~256)
-        collector.open_peer_handles(all_handles, dwdp_rank)
-
-        t_ipc_open_end = time.perf_counter_ns()
-        self._ipc_open_ms[moe_layer_idx] = (t_ipc_open_end - t_ipc_open_start) / 1e6
+            # --- Timing: IPC open ---
+            t_ipc_open_start = time.perf_counter_ns()
+            collector.open_peer_handles(all_handles, dwdp_rank)
+            t_ipc_open_end = time.perf_counter_ns()
+            self._ipc_open_ms[moe_layer_idx] = (t_ipc_open_end - t_ipc_open_start) / 1e6
 
         # Select VMM slot (ping-pong)
         vmm_slot = self._vmm_slots[buf_idx] if self._vmm_slots else None
@@ -259,9 +273,17 @@ class DwdpPrefetchBuffer:
                     src_byte_offset = src_expert_offset * per_expert_size
                     copy_bytes = num_prefetch * per_expert_size
 
-                    src_ptr = ctypes.c_void_p(
-                        collector.peer_base_ptrs[(peer_rank, param_name)] + src_byte_offset
-                    )
+                    if use_cached:
+                        # Fast path: use cached IPC pointer
+                        src_ptr_int = self._ipc_cache.get_peer_ptr(
+                            moe_layer_idx, peer_rank, param_name
+                        )
+                        src_ptr = ctypes.c_void_p(src_ptr_int + src_byte_offset)
+                    else:
+                        # Slow path: use collector's per-layer opened pointer
+                        src_ptr = ctypes.c_void_p(
+                            collector.peer_base_ptrs[(peer_rank, param_name)] + src_byte_offset
+                        )
 
                     if vmm_slot is not None:
                         # VMM mode: copy directly into the composite VA slot region
@@ -290,26 +312,25 @@ class DwdpPrefetchBuffer:
             self.prefetch_end_events[buf_idx][layer_slot].record(self.prefetch_stream)
             self.prefetch_events[buf_idx][layer_slot].record(self.prefetch_stream)
 
-        # --- Timing: blocking sync ---
-        t_sync_start = time.perf_counter_ns()
+        if use_cached:
+            # Fast path: no sync needed, IPC handles stay open
+            # The default stream will wait via wait_for_prefetch() before
+            # reading the data, which provides the necessary ordering.
+            self._ipc_open_ms[moe_layer_idx] = 0.0
+            self._sync_wall_ms[moe_layer_idx] = 0.0
+            self._ipc_close_ms[moe_layer_idx] = 0.0
+        else:
+            # Slow path: synchronize before closing IPC handles
+            t_sync_start = time.perf_counter_ns()
+            self.prefetch_stream.synchronize()
+            t_sync_end = time.perf_counter_ns()
+            self._sync_wall_ms[moe_layer_idx] = (t_sync_end - t_sync_start) / 1e6
 
-        # CRITICAL: synchronize before closing IPC handles.
-        # cudaMemcpyAsync is asynchronous — the copy may not have executed
-        # yet when we reach this point.  The IPC mapping must remain valid
-        # until the DMA completes, otherwise the GPU reads unmapped memory.
-        self.prefetch_stream.synchronize()
-
-        t_sync_end = time.perf_counter_ns()
-        self._sync_wall_ms[moe_layer_idx] = (t_sync_end - t_sync_start) / 1e6
-
-        # --- Timing: IPC close ---
-        t_ipc_close_start = time.perf_counter_ns()
-
-        # Close IPC handles now that the copies have completed.
-        collector.close_peer_handles()
-
-        t_ipc_close_end = time.perf_counter_ns()
-        self._ipc_close_ms[moe_layer_idx] = (t_ipc_close_end - t_ipc_close_start) / 1e6
+            # Close IPC handles now that the copies have completed
+            t_ipc_close_start = time.perf_counter_ns()
+            collector.close_peer_handles()
+            t_ipc_close_end = time.perf_counter_ns()
+            self._ipc_close_ms[moe_layer_idx] = (t_ipc_close_end - t_ipc_close_start) / 1e6
 
     def wait_for_prefetch(self, moe_layer_idx: int) -> None:
         """Default stream waits for prefetch of this layer to complete."""
@@ -397,6 +418,7 @@ class DwdpPrefetchBuffer:
         self.compute_events.clear()
         self._layer_collectors.clear()
         self._all_handles_by_layer.clear()
+        self._ipc_cache = None
         self._vmm_slots.clear()
         self.prefetch_stream = None
         self._cuda_lib = None
