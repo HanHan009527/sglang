@@ -138,10 +138,13 @@ class DwdpLayerHandleCollector:
         starting at ``data_ptr()`` with experts as the outermost physical
         dim, so IPC D2D copies remain a single ``cudaMemcpyAsync`` per
         expert range.
+
+        All kwargs are stored — FP4 layers pass w13_weight_sf/w2_weight_sf/
+        w1_alpha/w2_alpha, while FP8 layers pass w13_weight_scale_inv/
+        w2_weight_scale_inv.
         """
-        for name in WEIGHT_PARAM_NAMES:
-            if name in kwargs:
-                self.local_weights[name] = kwargs[name]
+        for name, tensor in kwargs.items():
+            self.local_weights[name] = tensor
 
     def get_ipc_handles(self) -> Dict[str, Tuple[bytes, int]]:
         """Return (handle_bytes, offset) for each local weight tensor."""
