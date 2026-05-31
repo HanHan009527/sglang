@@ -198,6 +198,107 @@ class DwdpLayerHandleCollector:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# IPC handle cache — keeps all handles open across layers
+# ---------------------------------------------------------------------------
+
+
+class DwdpIpcHandleCache:
+    """Cache of opened IPC memory mappings across all MoE layers.
+
+    When all layers' handles can be opened simultaneously (typical for
+    4-GPU nodes with ~348 total mappings), this eliminates per-layer
+    open/close/sync overhead (~26ms per layer on H20).
+
+    Falls back to per-layer open/close (sliding window) if the total
+    handle count exceeds the CUDA driver limit.
+    """
+
+    def __init__(self, dwdp_size: int, dwdp_rank: int):
+        self.dwdp_size = dwdp_size
+        self.dwdp_rank = dwdp_rank
+        # _ptrs[(moe_idx, peer_rank, param_name)] = mapped pointer (int)
+        self._ptrs: Dict[Tuple[int, int, str], int] = {}
+        self._base_ptrs: List[int] = []  # base ptrs to close on cleanup
+        self._is_all_open = False
+
+    @property
+    def is_all_open(self) -> bool:
+        return self._is_all_open
+
+    def open_all_handles(
+        self,
+        all_handles_by_layer: Dict[int, list],
+        layer_id_to_moe_idx: Dict[int, int],
+    ) -> None:
+        """Attempt to open all IPC handles at once.
+
+        If successful, sets ``is_all_open = True`` and subsequent
+        ``get_peer_ptr()`` calls use cached pointers directly.
+        If the CUDA driver limit is exceeded, closes all opened handles
+        and leaves ``is_all_open = False``.
+        """
+        from cuda import cudart
+
+        try:
+            for layer_id, all_handles in all_handles_by_layer.items():
+                moe_idx = layer_id_to_moe_idx[layer_id]
+                for peer_rank, handle_dict in enumerate(all_handles):
+                    if peer_rank == self.dwdp_rank:
+                        continue
+                    for param_name, (handle_bytes, offset) in handle_dict.items():
+                        handle = cudart.cudaIpcMemHandle_t()
+                        handle.reserved = list(handle_bytes)
+                        err, base_ptr = cudart.cudaIpcOpenMemHandle(
+                            handle, cudart.cudaIpcMemLazyEnablePeerAccess
+                        )
+                        if err != cudart.cudaError_t.cudaSuccess:
+                            # Exceeded limit — close everything and fall back
+                            logger.warning(
+                                f"DWDP IPC cache: cudaIpcOpenMemHandle failed at "
+                                f"moe_idx={moe_idx} peer={peer_rank} param={param_name}: "
+                                f"{err}. Falling back to per-layer open/close."
+                            )
+                            self._close_all()
+                            return
+                        base_ptr_int = int(base_ptr)
+                        self._base_ptrs.append(base_ptr_int)
+                        self._ptrs[(moe_idx, peer_rank, param_name)] = (
+                            base_ptr_int + offset
+                        )
+
+            self._is_all_open = True
+            logger.info(
+                f"DWDP IPC cache: all {len(self._ptrs)} handles opened successfully"
+            )
+        except Exception as e:
+            logger.warning(f"DWDP IPC cache: failed to open handles: {e}")
+            self._close_all()
+
+    def get_peer_ptr(self, moe_idx: int, peer_rank: int, param_name: str) -> int:
+        """Return cached mapped pointer for a peer's weight tensor."""
+        return self._ptrs[(moe_idx, peer_rank, param_name)]
+
+    def _close_all(self) -> None:
+        """Close all cached IPC memory mappings."""
+        from cuda import cudart
+
+        for base_ptr in self._base_ptrs:
+            cudart.cudaIpcCloseMemHandle(base_ptr)
+        self._base_ptrs.clear()
+        self._ptrs.clear()
+        self._is_all_open = False
+
+    def cleanup(self) -> None:
+        """Release all cached IPC handles."""
+        self._close_all()
+
+
+# ---------------------------------------------------------------------------
+# DwdpManager — global singleton
+# ---------------------------------------------------------------------------
+
+
 class DwdpManager:
     """Orchestrates the DWDP lifecycle: weight registration, IPC exchange,
     prefetch buffer management, and weight view assembly."""
@@ -234,6 +335,9 @@ class DwdpManager:
         # Prefetch buffer (created after IPC exchange)
         self._prefetch_buffer = None
 
+        # IPC handle cache (created after IPC exchange)
+        self._ipc_cache: Optional[DwdpIpcHandleCache] = None
+
         # Mapping from absolute layer_id to moe_layer_index (0-based)
         self._layer_id_to_moe_idx: Dict[int, int] = {}
         moe_idx = 0
@@ -268,8 +372,9 @@ class DwdpManager:
     def exchange_ipc_handles(self) -> None:
         """AllGather IPC handles across DWDP group and store them.
 
-        IPC handles are stored as bytes and opened lazily to avoid
-        exceeding the CUDA driver's per-process IPC mapping limit.
+        After exchange, attempts to open all handles at once via
+        DwdpIpcHandleCache. If successful, prefetch_layer() can use
+        cached pointers directly without per-layer open/close/sync.
         """
         from sglang.srt.distributed.parallel_state import get_dwdp_group
 
@@ -282,9 +387,16 @@ class DwdpManager:
             dist.all_gather_object(all_handles, local_handles, group=group.cpu_group)
             self._all_handles[layer_id] = all_handles
 
+        # Attempt to open all handles at once for caching
+        self._ipc_cache = DwdpIpcHandleCache(self.dwdp_size, self.dwdp_rank)
+        self._ipc_cache.open_all_handles(
+            self._all_handles, self._layer_id_to_moe_idx
+        )
+
         logger.info(
-            f"DWDP IPC handles exchanged (lazy open) for "
-            f"{len(self.layer_handles)} MoE layers"
+            f"DWDP IPC handles exchanged for "
+            f"{len(self.layer_handles)} MoE layers "
+            f"(cache={'enabled' if self._ipc_cache.is_all_open else 'disabled'})"
         )
 
     def init_prefetch_buffers(self) -> None:
@@ -310,13 +422,14 @@ class DwdpManager:
             param_full_strides=param_full_strides,
             param_dtypes=param_dtypes,
             device=next(iter(first_collector.local_weights.values())).device,
+            ipc_cache=self._ipc_cache,
         )
         logger.info("DWDP prefetch buffers allocated")
 
-    def initialize_compute_events(self) -> None:
-        """Pre-record initial compute events so the first prefetch can proceed."""
+    def initialize_events(self) -> None:
+        """Pre-record initial events so the first prefetch can proceed."""
         assert self._prefetch_buffer is not None
-        self._prefetch_buffer.initialize_compute_events()
+        self._prefetch_buffer.initialize_events()
 
     # ----- Phase 4: Forward Pass Operations -----
 
@@ -412,6 +525,9 @@ class DwdpManager:
         if self._prefetch_buffer is not None:
             self._prefetch_buffer.cleanup()
             self._prefetch_buffer = None
+        if self._ipc_cache is not None:
+            self._ipc_cache.cleanup()
+            self._ipc_cache = None
         for collector in self.layer_handles.values():
             collector.cleanup()
         self.layer_handles.clear()

@@ -1,7 +1,22 @@
 """Double-buffered async prefetch system for DWDP.
 
-Uses a dedicated CUDA stream and ping-pong buffers to overlap
-weight prefetch (D2D NVLink copy) with MoE compute.
+Uses CUDA IPC P2P reads (cudaMemcpyAsync over NVLink) to fetch peer expert
+weights, with a dedicated CUDA stream and ping-pong buffers to overlap
+buffer copies with MoE compute AND the attention phase of the next layer.
+
+Key design (event-driven pipeline):
+- 4 per-slot CUDA events (2 prefetch + 2 consume), following TRT-LLM #14453.
+- No CPU-side synchronize() — all stream ordering is GPU-side via events.
+- P2P copies on prefetch_stream overlap with attention + MoE on default stream.
+- When IPC handles are cached (DwdpIpcHandleCache), per-layer open/close/sync
+  is eliminated entirely.
+
+Pipeline timeline:
+  compute_stream:  [wait_prefetch[0]] [Attn(L)+MoE(L)] [wait_prefetch[1]] [Attn(L+1)+MoE(L+1)] ...
+                                  |record consume[1]|                                |record consume[0]|
+  copy_stream:     [P2P_L0] ────────────────────── [P2P_L1] ────────────────────── [P2P_L2] ...
+                  |wait consume[0]|                  |wait consume[1]|
+                  |record prefetch[0]|               |record prefetch[1]|
 """
 
 from __future__ import annotations
@@ -15,6 +30,7 @@ import torch
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.dwdp.dwdp_manager import (
         DwdpExpertLayout,
+        DwdpIpcHandleCache,
         DwdpLayerHandleCollector,
     )
 
@@ -26,6 +42,14 @@ class DwdpPrefetchBuffer:
 
     Buffer slot 0 is used by even-indexed MoE layers (0, 2, 4, ...),
     and slot 1 by odd-indexed (1, 3, 5, ...).
+
+    Uses CUDA IPC P2P reads (cudaMemcpyAsync) to fetch peer expert weights
+    over NVLink instead of NCCL all_gather. Each rank independently reads
+    peer GPU memory — no collective synchronization is required.
+
+    Event-driven pipeline (Fix 2): no CPU-side synchronize() when IPC
+    handles are cached. Stream ordering is enforced via per-slot CUDA
+    events following TRT-LLM #14453.
     """
 
     def __init__(
@@ -36,6 +60,7 @@ class DwdpPrefetchBuffer:
         param_full_strides: Dict[str, Tuple[int, ...]],
         param_dtypes: Dict[str, torch.dtype],
         device: torch.device,
+        ipc_cache: Optional[DwdpIpcHandleCache] = None,
     ):
         self.layout = layout
         self.num_moe_layers = num_moe_layers
@@ -43,6 +68,7 @@ class DwdpPrefetchBuffer:
         self.param_full_strides = param_full_strides
         self.param_dtypes = param_dtypes
         self.device = device
+        self._ipc_cache = ipc_cache
 
         self.prefetch_stream = torch.cuda.Stream(device=device)
 
@@ -57,14 +83,6 @@ class DwdpPrefetchBuffer:
         # outermost in physical memory). This holds both for contiguous
         # tensors (expert dim 0) and for the MMA-layout SF strided views
         # (expert dim 5, but still outermost in physical memory).
-        #
-        # Having the expert dim be the outermost physical dim means:
-        #   - per-expert bytes = stride[expert_dim] (elements) * itemsize
-        #   - "first N experts" occupy a contiguous byte range of size
-        #     N * per_expert_bytes at the start of physical storage, so a
-        #     single cudaMemcpyAsync per expert range is sufficient.
-        #   - The prefetch-view strides are identical to the original
-        #     strides (none of the other strides depend on num_experts).
         self.per_expert_bytes: Dict[str, int] = {}
         self.prefetch_view_shapes: Dict[str, torch.Size] = {}
         self.prefetch_view_strides: Dict[str, Tuple[int, ...]] = {}
@@ -111,46 +129,54 @@ class DwdpPrefetchBuffer:
                 buffer[param_name] = tensor_list
             self.buffers.append(buffer)
 
-        # Per-layer CUDA events
-        # Number of layer slots per buffer = ceil(num_moe_layers / 2)
-        num_slots_per_buffer = math.ceil(num_moe_layers / 2)
-        self.prefetch_events: List[List[torch.cuda.Event]] = [
-            [torch.cuda.Event() for _ in range(num_slots_per_buffer)]
-            for _ in range(2)
-        ]
-        self.compute_events: List[List[torch.cuda.Event]] = [
-            [torch.cuda.Event() for _ in range(num_slots_per_buffer)]
-            for _ in range(2)
-        ]
+        # Per-slot CUDA events (4 total, following TRT-LLM #14453).
+        # prefetch_events[buf_idx]: recorded on prefetch_stream after P2P copy completes.
+        #   Default stream waits on this before reading (RAW hazard prevention).
+        # consume_events[buf_idx]: recorded on default stream after wait_for_prefetch()
+        #   for the OTHER slot. Fires after all prior default-stream work completes
+        #   (including MoE kernel that read from the other slot). Prefetch stream
+        #   waits on this before overwriting the slot (WAR hazard prevention).
+        self.prefetch_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+        self.consume_events = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
         logger.info(
-            f"DwdpPrefetchBuffer allocated: "
+            f"DwdpPrefetchBuffer allocated (event-driven pipeline): "
             f"num_prefetch_experts={num_prefetch_experts}, "
-            f"num_slots_per_buffer={num_slots_per_buffer}, "
             f"per_expert_bytes={self.per_expert_bytes}, "
+            f"ipc_cache={'enabled' if ipc_cache and ipc_cache.is_all_open else 'disabled'}, "
             f"params={list(param_full_shapes.keys())}"
         )
 
-    def initialize_compute_events(self) -> None:
-        """Pre-record first compute events so prefetch_first_layers() can proceed.
+    def initialize_events(self) -> None:
+        """Pre-record consume events so the first prefetch can proceed.
 
-        This records a compute event on the current (default) stream for
-        layer_slot=0 of each buffer, ensuring subsequent ``wait_event()``
-        calls in the prefetch path have valid events to synchronize on.
+        Both consume_events are recorded as "already signaled" on the current
+        stream, so the first prefetch_layer() calls won't deadlock waiting
+        for a never-recorded event.
         """
         current_stream = torch.cuda.current_stream(self.device)
-        for buf_idx in range(2):
-            self.compute_events[buf_idx][0].record(current_stream)
+        self.consume_events[0].record(current_stream)
+        self.consume_events[1].record(current_stream)
 
     def prefetch_layer(
         self,
         moe_layer_idx: int,
         peer_handles: Dict[int, Dict[str, Tuple[bytes, int]]],
     ) -> None:
-        """Issue async D2D copies for one MoE layer's peer weights.
+        """Fetch peer expert weights via CUDA IPC P2P over NVLink.
 
-        Opens IPC handles on the fly, copies data, then closes them
-        to stay within the CUDA driver's per-process IPC mapping limit.
+        Event-driven pipeline: no CPU-side synchronize() when IPC handles
+        are cached. P2P copies run on prefetch_stream and overlap with
+        attention + MoE on the default stream. Stream ordering is enforced
+        via per-slot CUDA events:
+        - WAR: prefetch_stream waits on consume_events[buf_idx] before
+          overwriting the slot (ensures prior compute is done).
+        - RAW: prefetch_events[buf_idx] is recorded after P2P copy;
+          default stream waits on it in wait_for_prefetch().
+
+        When IPC handles are cached (DwdpIpcHandleCache with all handles open),
+        this method uses cached mapped pointers directly (fast path).
+        Otherwise, falls back to per-layer open/close/sync (slow path).
         """
         import os
         from cuda import cudart
@@ -162,25 +188,27 @@ class DwdpPrefetchBuffer:
             print(
                 f"[DWDP_DEBUG] prefetch_layer begin rank={_rank} "
                 f"moe_layer_idx={moe_layer_idx} "
-                f"current_device={torch.cuda.current_device()}",
+                f"cached={self._ipc_cache is not None and self._ipc_cache.is_all_open}",
                 flush=True,
             )
 
         buf_idx = moe_layer_idx % 2
-        layer_slot = moe_layer_idx // 2
         layout = self.layout
         dwdp_rank = layout.dwdp_rank
         num_prefetch_experts = layout.num_prefetch_experts
 
-        wait_compute_slot = layer_slot - 1 if moe_layer_idx >= 2 else None
+        use_cached = (
+            self._ipc_cache is not None and self._ipc_cache.is_all_open
+        )
 
+        # --- P2P copy on prefetch stream (event-driven) ---
         with torch.cuda.stream(self.prefetch_stream):
-            if wait_compute_slot is not None and wait_compute_slot >= 0:
-                self.prefetch_stream.wait_event(
-                    self.compute_events[buf_idx][wait_compute_slot]
-                )
+            # WAR: wait for previous use of this buffer slot to finish.
+            # consume_events[buf_idx] fires after all prior default-stream work
+            # that read from this slot has completed.
+            self.prefetch_stream.wait_event(self.consume_events[buf_idx])
 
-            opened_ptrs = []
+            opened_ptrs = [] if not use_cached else None
 
             for peer_rank, handle_dict in peer_handles.items():
                 src_expert_offset = layout.get_prefetch_src_offset(peer_rank)
@@ -188,25 +216,33 @@ class DwdpPrefetchBuffer:
                 for param_name in self.per_expert_bytes:
                     if param_name not in handle_dict:
                         continue
-                    handle_bytes, offset = handle_dict[param_name]
-
-                    handle = cudart.cudaIpcMemHandle_t()
-                    handle.reserved = list(handle_bytes)
-                    err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                        handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                    )
-                    assert err == cudart.cudaError_t.cudaSuccess, (
-                        f"cudaIpcOpenMemHandle failed: peer={peer_rank} "
-                        f"param={param_name}: {err}"
-                    )
-                    base_ptr_int = int(base_ptr)
-                    opened_ptrs.append(base_ptr_int)
 
                     expert_bytes = self.per_expert_bytes[param_name]
-                    src_ptr = base_ptr_int + offset + src_expert_offset * expert_bytes
                     dst_tensor = self.buffers[buf_idx][param_name][peer_rank]
                     dst_ptr = dst_tensor.data_ptr()
                     data_size = num_prefetch_experts * expert_bytes
+
+                    if use_cached:
+                        # Fast path: use cached IPC pointer
+                        src_ptr_int = self._ipc_cache.get_peer_ptr(
+                            moe_layer_idx, peer_rank, param_name
+                        )
+                        src_ptr = src_ptr_int + src_expert_offset * expert_bytes
+                    else:
+                        # Slow path: open IPC handle on the fly
+                        handle_bytes, offset = handle_dict[param_name]
+                        handle = cudart.cudaIpcMemHandle_t()
+                        handle.reserved = list(handle_bytes)
+                        err, base_ptr = cudart.cudaIpcOpenMemHandle(
+                            handle, cudart.cudaIpcMemLazyEnablePeerAccess
+                        )
+                        assert err == cudart.cudaError_t.cudaSuccess, (
+                            f"cudaIpcOpenMemHandle failed: peer={peer_rank} "
+                            f"param={param_name}: {err}"
+                        )
+                        base_ptr_int = int(base_ptr)
+                        opened_ptrs.append(base_ptr_int)
+                        src_ptr = base_ptr_int + offset + src_expert_offset * expert_bytes
 
                     err = cudart.cudaMemcpyAsync(
                         dst_ptr,
@@ -222,7 +258,17 @@ class DwdpPrefetchBuffer:
                         f"param={param_name}: {err}"
                     )
 
-            # Sync before closing handles
+            # RAW: signal that prefetch for this slot is done.
+            # Default stream will wait on this in wait_for_prefetch().
+            self.prefetch_events[buf_idx].record(self.prefetch_stream)
+
+        if use_cached:
+            # Fast path: no sync needed, IPC handles stay open
+            pass
+        else:
+            # Slow path: must synchronize before closing IPC handles.
+            # This breaks the overlap but is required for correctness
+            # when handles are not cached.
             sync_err = cudart.cudaStreamSynchronize(self.prefetch_stream.cuda_stream)
             if isinstance(sync_err, tuple):
                 sync_err = sync_err[0]
@@ -241,34 +287,45 @@ class DwdpPrefetchBuffer:
                         flush=True,
                     )
 
-            self.prefetch_events[buf_idx][layer_slot].record(self.prefetch_stream)
-
-            if _dwdp_debug:
-                import torch.distributed as _dist
-                _rank = _dist.get_rank() if _dist.is_initialized() else -1
-                try:
-                    torch.cuda.synchronize()
-                except Exception as _e:
-                    print(
-                        f"[DWDP_DEBUG] post-prefetch sync failed rank={_rank} "
-                        f"moe_layer_idx={moe_layer_idx}: {_e}",
-                        flush=True,
-                    )
-                    raise
+        if _dwdp_debug:
+            import torch.distributed as _dist
+            _rank = _dist.get_rank() if _dist.is_initialized() else -1
+            print(
+                f"[DWDP_DEBUG] prefetch_layer end rank={_rank} "
+                f"moe_layer_idx={moe_layer_idx}",
+                flush=True,
+            )
 
     def wait_for_prefetch(self, moe_layer_idx: int) -> None:
-        """Default stream waits for prefetch of this layer to complete."""
+        """Default stream waits for prefetch of this layer to complete.
+
+        Also records consume_events for the OTHER buffer slot, which provides
+        the WAR signal for the next prefetch into that slot. This relies on
+        CUDA stream in-order semantics: the consume event fires only after
+        all prior work on the default stream (including the MoE kernel that
+        reads from the other slot) has completed.
+        """
         buf_idx = moe_layer_idx % 2
-        layer_slot = moe_layer_idx // 2
+        other_buf = 1 - buf_idx
         current_stream = torch.cuda.current_stream(self.device)
-        current_stream.wait_event(self.prefetch_events[buf_idx][layer_slot])
+
+        # RAW: wait for prefetch of this slot to complete
+        current_stream.wait_event(self.prefetch_events[buf_idx])
+
+        # WAR: record that the OTHER slot's data is being consumed.
+        # This event fires after all prior default-stream work completes,
+        # which includes the MoE kernel that read from other_buf.
+        # The next prefetch into other_buf will wait on this event.
+        self.consume_events[other_buf].record(current_stream)
 
     def record_compute_done(self, moe_layer_idx: int) -> None:
-        """Record compute completion on the default stream."""
-        buf_idx = moe_layer_idx % 2
-        layer_slot = moe_layer_idx // 2
-        current_stream = torch.cuda.current_stream(self.device)
-        self.compute_events[buf_idx][layer_slot].record(current_stream)
+        """Record compute completion on the default stream (profiling only).
+
+        In the event-driven pipeline, WAR protection is handled by
+        consume_events recorded in wait_for_prefetch(). This method
+        is kept for API compatibility but does not affect pipeline ordering.
+        """
+        pass
 
     def get_buffer_views(
         self, moe_layer_idx: int
@@ -308,5 +365,5 @@ class DwdpPrefetchBuffer:
         """Release prefetch buffers and events."""
         self.buffers.clear()
         self.prefetch_events.clear()
-        self.compute_events.clear()
+        self.consume_events.clear()
         self.prefetch_stream = None

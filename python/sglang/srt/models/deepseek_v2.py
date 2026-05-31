@@ -640,6 +640,19 @@ class DeepseekV2MoE(nn.Module):
 
         dwdp_manager = get_global_dwdp_manager()
 
+        # IDLE rank (DP attention, 0 tokens): skip MoE but keep prefetch
+        # pipeline moving so subsequent layers don't stall.
+        # Must record consume_events for the OTHER buffer slot so the
+        # next prefetch into that slot doesn't deadlock.
+        if hidden_states.shape[0] == 0:
+            moe_idx = dwdp_manager._layer_id_to_moe_idx[self.layer_id]
+            buf_idx = moe_idx % 2
+            other_buf = 1 - buf_idx
+            current_stream = torch.cuda.current_stream(hidden_states.device)
+            dwdp_manager._prefetch_buffer.consume_events[other_buf].record(current_stream)
+            dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+            return hidden_states
+
         # Shared experts (same as forward_normal)
         if hidden_states.shape[0] > 0 and self.num_fused_shared_experts == 0:
             shared_output = self._forward_shared_experts(

@@ -1438,7 +1438,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if mgr is not None:
             mgr.exchange_ipc_handles()
             mgr.init_prefetch_buffers()
-            mgr.initialize_compute_events()
+            mgr.initialize_events()
 
     def update_expert_location(
         self,
