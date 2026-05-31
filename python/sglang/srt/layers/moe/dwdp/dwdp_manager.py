@@ -466,9 +466,11 @@ class DwdpManager:
                     peer_handles=self._get_peer_handles(layer_id),
                 )
 
-    def get_weight_view(self, layer_id: int) -> NvFp4WeightView:
+    def get_weight_view(self, layer_id: int):
         """Wait for prefetch to complete and return assembled weight view.
 
+        Returns NvFp4WeightView for modelopt_fp4 (multi-B CuteDSL kernel),
+        or Dict[str, Tensor] for FP8/other quantizations (param.data swap).
         Called from DeepseekV2MoE.forward_dwdp() before the MoE kernel.
         """
         moe_idx = self._layer_id_to_moe_idx[layer_id]
@@ -477,7 +479,19 @@ class DwdpManager:
         # Wait for prefetch to complete
         self._prefetch_buffer.wait_for_prefetch(moe_idx)
 
-        # Assemble weight view: local weights + prefetch buffer views
+        # Check if this is FP4 (has scale factor params) or FP8
+        has_sf = any("weight_sf" in name or "alpha" in name
+                     for name in collector.local_weights)
+
+        if has_sf:
+            # FP4 path: return NvFp4WeightView (multi-B CuteDSL kernel)
+            return self._get_fp4_weight_view(moe_idx, collector)
+        else:
+            # FP8 path: return Dict[str, Tensor] (param.data swap)
+            return self._get_assembled_weights(moe_idx, collector)
+
+    def _get_fp4_weight_view(self, moe_idx: int, collector) -> NvFp4WeightView:
+        """Build NvFp4WeightView for CuteDSL multi-B kernel."""
         buffer_views = self._prefetch_buffer.get_buffer_views(moe_idx)
 
         def _build_weight_list(param_name: str) -> List[torch.Tensor]:
@@ -497,6 +511,44 @@ class DwdpManager:
             w1_alphas=_build_weight_list("w1_alpha"),
             w2_alphas=_build_weight_list("w2_alpha"),
         )
+
+    def _get_assembled_weights(self, moe_idx: int, collector) -> Dict[str, torch.Tensor]:
+        """Build Dict[str, Tensor] for FP8 param.data swap path.
+
+        Assembles a [num_routed_experts, ...] tensor per parameter by
+        placing each rank's expert weights at their correct positions.
+        Local weights are already in the right place; prefetched peer
+        weights fill in the gaps.
+        """
+        import torch
+
+        buffer_views = self._prefetch_buffer.get_buffer_views(moe_idx)
+        layout = self.layout
+        num_routed = layout.num_routed_experts
+
+        assembled = {}
+        for param_name, local_tensor in collector.local_weights.items():
+            # Create output tensor with same dtype/device, sized for all experts
+            full_shape = list(local_tensor.shape)
+            full_shape[0] = num_routed
+            result = torch.empty(full_shape, dtype=local_tensor.dtype, device=local_tensor.device)
+
+            # Place local experts at their correct positions
+            local_start = layout.local_expert_start
+            local_end = layout.local_expert_end
+            result[local_start:local_end].copy_(local_tensor)
+
+            # Place prefetched peer experts at their correct positions
+            for peer_rank in range(layout.dwdp_size):
+                if peer_rank == layout.dwdp_rank:
+                    continue
+                peer_start, peer_end = layout.peer_expert_range(peer_rank)
+                # The prefetched view contains the experts we need from this peer
+                result[peer_start:peer_end].copy_(buffer_views[param_name][peer_rank])
+
+            assembled[param_name] = result
+
+        return assembled
 
     def record_compute_and_prefetch_next(self, layer_id: int) -> None:
         """Record compute done event and trigger prefetch for layer_id + 2.
