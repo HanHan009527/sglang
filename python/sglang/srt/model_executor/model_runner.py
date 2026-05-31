@@ -1662,7 +1662,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self._register_dwdp_weights(mgr)
             mgr.exchange_ipc_handles()
             mgr.init_prefetch_buffers()
-            mgr.initialize_compute_events()
+            mgr.initialize_events()
 
     def _register_dwdp_weights(self, mgr):
         """Walk model MoE layers and register their weights with DwdpManager."""

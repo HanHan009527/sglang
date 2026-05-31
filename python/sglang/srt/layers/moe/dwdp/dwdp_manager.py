@@ -631,10 +631,10 @@ class DwdpManager:
 
         logger.info(f"VMM ping-pong slots created: 2 slots")
 
-    def initialize_compute_events(self) -> None:
-        """Pre-record initial compute events so the first prefetch can proceed."""
+    def initialize_events(self) -> None:
+        """Pre-record initial events so the first prefetch can proceed."""
         assert self._prefetch_buffer is not None
-        self._prefetch_buffer.initialize_compute_events()
+        self._prefetch_buffer.initialize_events()
 
     # ----- Phase 4: Forward Pass Operations -----
 
