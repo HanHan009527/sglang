@@ -21,6 +21,7 @@ Pipeline timeline:
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import math
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
@@ -179,7 +180,11 @@ class DwdpPrefetchBuffer:
         Otherwise, falls back to per-layer open/close/sync (slow path).
         """
         import os
-        from cuda import cudart
+
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
 
         _dwdp_debug = bool(os.environ.get("SGL_DWDP_DEBUG"))
         if _dwdp_debug:
@@ -192,6 +197,7 @@ class DwdpPrefetchBuffer:
                 flush=True,
             )
 
+        cudart = CudaRTLibrary()
         buf_idx = moe_layer_idx % 2
         layout = self.layout
         dwdp_rank = layout.dwdp_rank
@@ -231,31 +237,19 @@ class DwdpPrefetchBuffer:
                     else:
                         # Slow path: open IPC handle on the fly
                         handle_bytes, offset = handle_dict[param_name]
-                        handle = cudart.cudaIpcMemHandle_t()
-                        handle.reserved = list(handle_bytes)
-                        err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                            handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                        )
-                        assert err == cudart.cudaError_t.cudaSuccess, (
-                            f"cudaIpcOpenMemHandle failed: peer={peer_rank} "
-                            f"param={param_name}: {err}"
-                        )
-                        base_ptr_int = int(base_ptr)
+                        handle = cudaIpcMemHandle_t()
+                        handle.internal = (ctypes.c_byte * 128).from_buffer_copy(handle_bytes)
+                        base_ptr = cudart.cudaIpcOpenMemHandle(handle)
+                        base_ptr_int = int(base_ptr.value)
                         opened_ptrs.append(base_ptr_int)
                         src_ptr = base_ptr_int + offset + src_expert_offset * expert_bytes
 
-                    err = cudart.cudaMemcpyAsync(
+                    cudart.cudaMemcpyAsync(
                         dst_ptr,
                         src_ptr,
                         data_size,
-                        cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice,
-                        self.prefetch_stream.cuda_stream,
-                    )
-                    if isinstance(err, tuple):
-                        err = err[0]
-                    assert err == cudart.cudaError_t.cudaSuccess, (
-                        f"cudaMemcpyAsync failed: peer={peer_rank} "
-                        f"param={param_name}: {err}"
+                        kind=4,  # cudaMemcpyDefault
+                        stream=self.prefetch_stream.cuda_stream,
                     )
 
             # RAW: signal that prefetch for this slot is done.
@@ -269,23 +263,10 @@ class DwdpPrefetchBuffer:
             # Slow path: must synchronize before closing IPC handles.
             # This breaks the overlap but is required for correctness
             # when handles are not cached.
-            sync_err = cudart.cudaStreamSynchronize(self.prefetch_stream.cuda_stream)
-            if isinstance(sync_err, tuple):
-                sync_err = sync_err[0]
-            assert sync_err == cudart.cudaError_t.cudaSuccess, (
-                f"cudaStreamSynchronize failed: {sync_err}"
-            )
+            cudart.cudaStreamSynchronize(self.prefetch_stream.cuda_stream)
 
             for ptr in opened_ptrs:
-                close_err = cudart.cudaIpcCloseMemHandle(ptr)
-                if isinstance(close_err, tuple):
-                    close_err = close_err[0]
-                if _dwdp_debug and close_err != cudart.cudaError_t.cudaSuccess:
-                    print(
-                        f"[DWDP_DEBUG] cudaIpcCloseMemHandle failed: "
-                        f"ptr={ptr} err={close_err}",
-                        flush=True,
-                    )
+                cudart.cudaIpcCloseMemHandle(ptr)
 
         if _dwdp_debug:
             import torch.distributed as _dist

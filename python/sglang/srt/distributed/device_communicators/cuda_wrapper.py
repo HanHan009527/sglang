@@ -8,7 +8,7 @@ convenient for use when we just need to call a few functions.
 import ctypes
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
@@ -105,6 +105,16 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
+        Function("cudaIpcCloseMemHandle", cudaError_t, [ctypes.c_void_p]),
+        # cudaError_t cudaMemcpyAsync ( void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream ) # noqa
+        Function(
+            "cudaMemcpyAsync",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind, ctypes.c_void_p],
+        ),
+        # cudaError_t cudaStreamSynchronize ( cudaStream_t stream )
+        Function("cudaStreamSynchronize", cudaError_t, [ctypes.c_void_p]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -185,3 +195,48 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaIpcCloseMemHandle(self, devPtr: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](ctypes.c_void_p(devPtr)))
+
+    def cudaMemcpyAsync(
+        self,
+        dst: int,
+        src: int,
+        count: int,
+        kind: int = 4,  # cudaMemcpyDefault
+        stream: int = 0,  # 0 = default stream
+    ) -> None:
+        self.CUDART_CHECK(
+            self.funcs["cudaMemcpyAsync"](
+                ctypes.c_void_p(dst),
+                ctypes.c_void_p(src),
+                ctypes.c_size_t(count),
+                kind,
+                ctypes.c_void_p(stream),
+            )
+        )
+
+    def cudaStreamSynchronize(self, stream: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaStreamSynchronize"](ctypes.c_void_p(stream)))
+
+
+def cuMemGetAddressRange(dev_ptr: int) -> Tuple[int, int]:
+    """Query the allocation base address and size for a device pointer.
+
+    Uses the CUDA driver API (libcuda.so) since the runtime API has no
+    equivalent. Returns (base_addr, size).
+    """
+    _libcuda = ctypes.CDLL("libcuda.so.1")
+    _cuMemGetAddressRange = _libcuda.cuMemGetAddressRange
+    _cuMemGetAddressRange.restype = ctypes.c_int  # CUresult
+    _cuMemGetAddressRange.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),  # CUdeviceptr *base
+        ctypes.POINTER(ctypes.c_size_t),   # size_t *size
+        ctypes.c_uint64,                   # CUdeviceptr devPtr
+    ]
+    base = ctypes.c_uint64()
+    size = ctypes.c_size_t()
+    result = _cuMemGetAddressRange(ctypes.byref(base), ctypes.byref(size), ctypes.c_uint64(dev_ptr))
+    assert result == 0, f"cuMemGetAddressRange failed with error {result}"
+    return int(base.value), int(size.value)

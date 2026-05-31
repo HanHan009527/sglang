@@ -272,18 +272,13 @@ def _split_as_dwdp_prefetch(
             dtype=torch.uint8,
             device=t.device,
         )
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
-        err = cudart.cudaMemcpy(
+        cudart = CudaRTLibrary()
+        cudart.cudaMemcpy(
             buf.data_ptr(),
             src_base_ptr + src_offset_bytes,
             num_per_worker * per_expert_bytes,
-            cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice,
-        )
-        if isinstance(err, tuple):
-            err = err[0]
-        assert err == cudart.cudaError_t.cudaSuccess, (
-            f"cudaMemcpy failed (rank={rank}): {err}"
         )
 
         typed = buf.view(dtype)

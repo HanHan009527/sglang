@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import math
 from dataclasses import dataclass, field
@@ -144,18 +145,19 @@ class DwdpLayerHandleCollector:
 
     def get_ipc_handles(self) -> Dict[str, Tuple[bytes, int]]:
         """Return (handle_bytes, offset) for each local weight tensor."""
-        from cuda import cudart
-        from cuda import cuda as cuda_driver
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cuMemGetAddressRange,
+        )
 
+        cudart = CudaRTLibrary()
         handles = {}
         for name, tensor in self.local_weights.items():
             data_ptr = tensor.data_ptr()
-            err, handle = cudart.cudaIpcGetMemHandle(data_ptr)
-            assert err == cudart.cudaError_t.cudaSuccess, f"cudaIpcGetMemHandle failed: {err}"
-            err, alloc_base, alloc_size = cuda_driver.cuMemGetAddressRange(data_ptr)
-            assert err == cuda_driver.CUresult.CUDA_SUCCESS, f"cuMemGetAddressRange failed: {err}"
-            offset = data_ptr - int(alloc_base)
-            handles[name] = (bytes(handle.reserved), offset)
+            handle = cudart.cudaIpcGetMemHandle(ctypes.c_void_p(data_ptr))
+            alloc_base, _alloc_size = cuMemGetAddressRange(data_ptr)
+            offset = data_ptr - alloc_base
+            handles[name] = (bytes(handle.internal), offset)
         return handles
 
     def open_peer_handles(
@@ -164,29 +166,29 @@ class DwdpLayerHandleCollector:
         dwdp_rank: int,
     ) -> None:
         """Open peer IPC handles and compute NVLink-accessible pointers."""
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
 
+        cudart = CudaRTLibrary()
         for peer_rank, peer_handles in enumerate(all_handles):
             if peer_rank == dwdp_rank:
                 continue
             for name, (handle_bytes, offset) in peer_handles.items():
                 # Reconstruct cudaIpcMemHandle_t from bytes
-                handle = cudart.cudaIpcMemHandle_t()
-                handle.reserved = list(handle_bytes)
-                err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                    handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                )
-                assert err == cudart.cudaError_t.cudaSuccess, (
-                    f"cudaIpcOpenMemHandle failed for peer {peer_rank} param {name}: {err}"
-                )
-                base_ptr_int = int(base_ptr)
+                handle = cudaIpcMemHandle_t()
+                handle.internal = (ctypes.c_byte * 128).from_buffer_copy(handle_bytes)
+                base_ptr = cudart.cudaIpcOpenMemHandle(handle)
+                base_ptr_int = int(base_ptr.value)
                 self._ipc_mappings.append(base_ptr_int)
                 self.peer_base_ptrs[(peer_rank, name)] = base_ptr_int + offset
 
     def cleanup(self) -> None:
         """Close all IPC memory mappings."""
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
+        cudart = CudaRTLibrary()
         for base_ptr in self._ipc_mappings:
             cudart.cudaIpcCloseMemHandle(base_ptr)
         self._ipc_mappings.clear()
@@ -238,7 +240,12 @@ class DwdpIpcHandleCache:
         If the CUDA driver limit is exceeded, closes all opened handles
         and leaves ``is_all_open = False``.
         """
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+
+        cudart = CudaRTLibrary()
 
         try:
             for layer_id, all_handles in all_handles_by_layer.items():
@@ -247,21 +254,20 @@ class DwdpIpcHandleCache:
                     if peer_rank == self.dwdp_rank:
                         continue
                     for param_name, (handle_bytes, offset) in handle_dict.items():
-                        handle = cudart.cudaIpcMemHandle_t()
-                        handle.reserved = list(handle_bytes)
-                        err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                            handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                        )
-                        if err != cudart.cudaError_t.cudaSuccess:
+                        handle = cudaIpcMemHandle_t()
+                        handle.internal = (ctypes.c_byte * 128).from_buffer_copy(handle_bytes)
+                        try:
+                            base_ptr = cudart.cudaIpcOpenMemHandle(handle)
+                            base_ptr_int = int(base_ptr.value)
+                        except RuntimeError:
                             # Exceeded limit — close everything and fall back
                             logger.warning(
                                 f"DWDP IPC cache: cudaIpcOpenMemHandle failed at "
-                                f"moe_idx={moe_idx} peer={peer_rank} param={param_name}: "
-                                f"{err}. Falling back to per-layer open/close."
+                                f"moe_idx={moe_idx} peer={peer_rank} param={param_name}. "
+                                f"Falling back to per-layer open/close."
                             )
                             self._close_all()
                             return
-                        base_ptr_int = int(base_ptr)
                         self._base_ptrs.append(base_ptr_int)
                         self._ptrs[(moe_idx, peer_rank, param_name)] = (
                             base_ptr_int + offset
@@ -281,8 +287,9 @@ class DwdpIpcHandleCache:
 
     def _close_all(self) -> None:
         """Close all cached IPC memory mappings."""
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
+        cudart = CudaRTLibrary()
         for base_ptr in self._base_ptrs:
             cudart.cudaIpcCloseMemHandle(base_ptr)
         self._base_ptrs.clear()
