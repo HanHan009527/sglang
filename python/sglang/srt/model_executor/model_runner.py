@@ -1414,7 +1414,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         from sglang.srt.distributed.parallel_state import get_dwdp_rank
 
         hf_config = self.model_config.hf_text_config
-        num_routed_experts = getattr(hf_config, "n_routed_experts", 0)
+        # Support both DeepSeek (n_routed_experts) and Qwen3 (num_experts) configs
+        num_routed_experts = getattr(
+            hf_config, "n_routed_experts", getattr(hf_config, "num_experts", 0)
+        )
         first_k_dense_replace = getattr(hf_config, "first_k_dense_replace", 0)
         total_num_layers = getattr(hf_config, "num_hidden_layers", 0)
         num_moe_layers = total_num_layers - first_k_dense_replace

@@ -275,6 +275,10 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             prefix=add_prefix("gate", prefix),
         )
 
+        from sglang.srt.layers.moe.dwdp import enable_dwdp
+
+        self._dwdp_enabled = enable_dwdp()
+
         if get_moe_a2a_backend().is_deepep():
             # TODO: we will support tp < ep in the future
             self.ep_size = get_moe_expert_parallel_world_size()
@@ -290,6 +294,15 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
+
+        # DWDP path: prefill uses prefetched peer weights.
+        # Decode falls through to forward_normal.
+        if (
+            self._dwdp_enabled
+            and forward_batch is not None
+            and not forward_batch.forward_mode.is_decode_or_idle()
+        ):
+            return self.forward_dwdp(hidden_states, forward_batch)
 
         if (
             not get_moe_a2a_backend().is_deepep()
@@ -360,6 +373,98 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
+        return final_hidden_states
+
+    def forward_dwdp(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        """DWDP forward path: all tokens stay on-rank, use prefetched weights."""
+        from sglang.srt.layers.moe.dwdp import get_global_dwdp_manager
+
+        dwdp_manager = get_global_dwdp_manager()
+
+        # IDLE rank (DP attention, 0 tokens): skip MoE but keep prefetch
+        # pipeline moving so subsequent layers don't stall.
+        if hidden_states.shape[0] == 0:
+            moe_idx = dwdp_manager._layer_id_to_moe_idx[self.layer_id]
+            buf_idx = moe_idx % 2
+            other_buf = 1 - buf_idx
+            current_stream = torch.cuda.current_stream(hidden_states.device)
+            dwdp_manager._prefetch_buffer.consume_events[other_buf].record(
+                current_stream
+            )
+            dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+            return hidden_states
+
+        # Router + top-k
+        router_logits, _ = self.gate(hidden_states)
+        topk_output = self.topk(hidden_states, router_logits)
+
+        # Get DWDP weight view (prefetched peer weights + local weights)
+        weight_view = dwdp_manager.get_weight_view(self.layer_id)
+
+        # FP8 path: assembled weights as Dict[str, Tensor]
+        # Swap expert weights with assembled full weights
+        orig_w13 = self.experts.w13_weight.data
+        orig_w2 = self.experts.w2_weight.data
+        self.experts.w13_weight.data = weight_view["w13_weight"]
+        self.experts.w2_weight.data = weight_view["w2_weight"]
+
+        # Swap FP8 scales if present
+        orig_w13_scale = None
+        orig_w2_scale = None
+        if "w13_weight_scale_inv" in weight_view:
+            orig_w13_scale = self.experts.w13_weight_scale_inv.data
+            orig_w2_scale = self.experts.w2_weight_scale_inv.data
+            self.experts.w13_weight_scale_inv.data = weight_view[
+                "w13_weight_scale_inv"
+            ]
+            self.experts.w2_weight_scale_inv.data = weight_view[
+                "w2_weight_scale_inv"
+            ]
+
+        # Patch dispatcher: identity mapping (all experts are local)
+        num_routed = self.experts.num_experts
+        orig_local_expert_mapping = self.experts.dispatcher.local_expert_mapping
+        orig_moe_ep_size = self.experts.dispatcher.moe_ep_size
+        self.experts.dispatcher.local_expert_mapping = torch.arange(
+            num_routed, dtype=torch.int32, device=hidden_states.device
+        )
+        self.experts.dispatcher.moe_ep_size = 1
+        self.experts.moe_runner_config.num_local_experts = num_routed
+        self.experts.moe_ep_size = 1
+
+        # Resize cutlass buffers for full expert count
+        quant_method = self.experts.quant_method
+        if hasattr(quant_method, "ensure_cutlass_buffers_for_experts"):
+            quant_method.ensure_cutlass_buffers_for_experts(
+                device=hidden_states.device,
+                num_experts=num_routed,
+                intermediate_size_per_partition=self.experts.intermediate_size_per_partition,
+                hidden_size=hidden_states.shape[-1],
+            )
+
+        final_hidden_states = self.experts(hidden_states, topk_output)
+
+        # Restore original weights and dispatcher state
+        self.experts.w13_weight.data = orig_w13
+        self.experts.w2_weight.data = orig_w2
+        if orig_w13_scale is not None:
+            self.experts.w13_weight_scale_inv.data = orig_w13_scale
+            self.experts.w2_weight_scale_inv.data = orig_w2_scale
+        self.experts.dispatcher.local_expert_mapping = orig_local_expert_mapping
+        self.experts.dispatcher.moe_ep_size = orig_moe_ep_size
+        self.experts.moe_runner_config.num_local_experts = (
+            self.experts.num_local_experts
+        )
+        self.experts.moe_ep_size = orig_moe_ep_size
+
+        # Record compute done + trigger next layer's prefetch
+        dwdp_manager.record_compute_and_prefetch_next(self.layer_id)
+
+        # NO all-reduce — each rank is fully independent in DWDP mode
         return final_hidden_states
 
     def op_gate(self, state):
