@@ -2768,14 +2768,15 @@ class ServerArgs:
         assert self.dwdp_size == self.tp_size, (
             f"dwdp_size ({self.dwdp_size}) must equal tp_size ({self.tp_size})"
         )
-        assert self.quantization == "modelopt_fp4", (
-            "DWDP requires modelopt_fp4 quantization"
-        )
-        assert self.moe_runner_backend in ("flashinfer_cutedsl", "auto"), (
-            "DWDP requires flashinfer_cutedsl moe_runner_backend"
-        )
-        if self.moe_runner_backend == "auto":
-            self.moe_runner_backend = "flashinfer_cutedsl"
+        # NOTE: modelopt_fp4 + flashinfer_cutedsl is the primary DWDP path
+        # (multi-B kernel via NvFp4WeightView). FP8 + Triton is also supported
+        # via param.data swap in forward_dwdp.
+        if self.quantization == "modelopt_fp4":
+            if self.moe_runner_backend == "auto":
+                self.moe_runner_backend = "flashinfer_cutedsl"
+            assert self.moe_runner_backend == "flashinfer_cutedsl", (
+                "DWDP with modelopt_fp4 requires flashinfer_cutedsl moe_runner_backend"
+            )
         assert not self.enable_eplb, "DWDP is incompatible with EPLB"
         assert self.disaggregation_mode != "decode", (
             "DWDP is not supported on decode-only instances"

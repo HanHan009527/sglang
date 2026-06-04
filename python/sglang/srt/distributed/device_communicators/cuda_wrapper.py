@@ -105,6 +105,16 @@ class CudaRTLibrary:
             cudaError_t,
             [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
         ),
+        # cudaError_t cudaIpcCloseMemHandle ( void* devPtr )
+        Function("cudaIpcCloseMemHandle", cudaError_t, [ctypes.c_void_p]),
+        # cudaError_t cudaMemcpyAsync ( void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream ) # noqa
+        Function(
+            "cudaMemcpyAsync",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind, ctypes.c_void_p],
+        ),
+        # cudaError_t cudaStreamSynchronize ( cudaStream_t stream )
+        Function("cudaStreamSynchronize", cudaError_t, [ctypes.c_void_p]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -185,3 +195,27 @@ class CudaRTLibrary:
             )
         )
         return devPtr
+
+    def cudaIpcCloseMemHandle(self, devPtr: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaIpcCloseMemHandle"](ctypes.c_void_p(devPtr)))
+
+    def cudaMemcpyAsync(
+        self,
+        dst: int,
+        src: int,
+        count: int,
+        kind: int = 4,  # cudaMemcpyDefault
+        stream: int = 0,  # 0 = default stream
+    ) -> None:
+        self.CUDART_CHECK(
+            self.funcs["cudaMemcpyAsync"](
+                ctypes.c_void_p(dst),
+                ctypes.c_void_p(src),
+                ctypes.c_size_t(count),
+                kind,
+                ctypes.c_void_p(stream),
+            )
+        )
+
+    def cudaStreamSynchronize(self, stream: int) -> None:
+        self.CUDART_CHECK(self.funcs["cudaStreamSynchronize"](ctypes.c_void_p(stream)))

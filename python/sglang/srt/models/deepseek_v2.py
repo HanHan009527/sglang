@@ -640,6 +640,12 @@ class DeepseekV2MoE(nn.Module):
 
         dwdp_manager = get_global_dwdp_manager()
 
+        # IDLE rank (DP attention, 0 tokens): skip MoE but keep prefetch
+        # pipeline moving so subsequent layers don't stall.
+        if hidden_states.shape[0] == 0:
+            dwdp_manager.handle_idle_rank(self.layer_id, hidden_states.device)
+            return hidden_states
+
         # Shared experts (same as forward_normal)
         if hidden_states.shape[0] > 0 and self.num_fused_shared_experts == 0:
             shared_output = self._forward_shared_experts(
@@ -656,14 +662,67 @@ class DeepseekV2MoE(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
-        # Get DWDP multi-B weight view (prefetched peer weights + local weights)
+        # Get DWDP weight view (prefetched peer weights + local weights)
         weight_view = dwdp_manager.get_weight_view(self.layer_id)
 
-        # Call FusedMoE.forward_dwdp() — bypasses dispatcher and uses
-        # multi-B List[Tensor] weights via CuteDSL runner
-        final_hidden_states = self.experts.forward_dwdp(
-            hidden_states, topk_output, weight_view
-        )
+        # Dispatch to the appropriate MoE kernel path based on quantization.
+        # modelopt_fp4 uses CuteDSL multi-B kernel via NvFp4WeightView.
+        # FP8 and other quantizations use param.data swap + standard MoE forward.
+        if isinstance(weight_view, dict):
+            # FP8 / non-FP4 path: assembled weights as Dict[str, Tensor]
+            # Swap expert weights with assembled full weights
+            orig_w13 = self.experts.w13_weight.data
+            orig_w2 = self.experts.w2_weight.data
+            self.experts.w13_weight.data = weight_view["w13_weight"]
+            self.experts.w2_weight.data = weight_view["w2_weight"]
+
+            # Swap FP8 scales if present
+            orig_w13_scale = None
+            orig_w2_scale = None
+            if "w13_weight_scale_inv" in weight_view:
+                orig_w13_scale = self.experts.w13_weight_scale_inv.data
+                orig_w2_scale = self.experts.w2_weight_scale_inv.data
+                self.experts.w13_weight_scale_inv.data = weight_view["w13_weight_scale_inv"]
+                self.experts.w2_weight_scale_inv.data = weight_view["w2_weight_scale_inv"]
+
+            # Patch dispatcher: identity mapping (all experts are local)
+            num_routed = self.config.n_routed_experts
+            orig_local_expert_mapping = self.experts.dispatcher.local_expert_mapping
+            orig_moe_ep_size = self.experts.dispatcher.moe_ep_size
+            self.experts.dispatcher.local_expert_mapping = torch.arange(
+                num_routed, dtype=torch.int32, device=hidden_states.device
+            )
+            self.experts.dispatcher.moe_ep_size = 1
+            self.experts.moe_runner_config.num_local_experts = num_routed
+            self.experts.moe_ep_size = 1
+
+            # Resize cutlass buffers for full expert count
+            quant_method = self.experts.quant_method
+            if hasattr(quant_method, "ensure_cutlass_buffers_for_experts"):
+                quant_method.ensure_cutlass_buffers_for_experts(
+                    device=hidden_states.device,
+                    num_experts=num_routed,
+                    intermediate_size_per_partition=self.experts.intermediate_size_per_partition,
+                    hidden_size=hidden_states.shape[-1],
+                )
+
+            final_hidden_states = self.experts(hidden_states, topk_output)
+
+            # Restore original weights and dispatcher state
+            self.experts.w13_weight.data = orig_w13
+            self.experts.w2_weight.data = orig_w2
+            if orig_w13_scale is not None:
+                self.experts.w13_weight_scale_inv.data = orig_w13_scale
+                self.experts.w2_weight_scale_inv.data = orig_w2_scale
+            self.experts.dispatcher.local_expert_mapping = orig_local_expert_mapping
+            self.experts.dispatcher.moe_ep_size = orig_moe_ep_size
+            self.experts.moe_runner_config.num_local_experts = self.experts.num_local_experts
+            self.experts.moe_ep_size = orig_moe_ep_size
+        else:
+            # FP4 path: NvFp4WeightView + CuteDSL multi-B kernel
+            final_hidden_states = self.experts.forward_dwdp(
+                hidden_states, topk_output, weight_view
+            )
 
         if (
             not _is_cuda

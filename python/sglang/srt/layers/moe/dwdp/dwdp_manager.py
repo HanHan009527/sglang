@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import math
 from dataclasses import dataclass, field
@@ -137,25 +138,30 @@ class DwdpLayerHandleCollector:
         starting at ``data_ptr()`` with experts as the outermost physical
         dim, so IPC D2D copies remain a single ``cudaMemcpyAsync`` per
         expert range.
+
+        All kwargs are stored — FP4 layers pass w13_weight_sf/w2_weight_sf/
+        w1_alpha/w2_alpha, while FP8 layers pass w13_weight_scale_inv/
+        w2_weight_scale_inv.
         """
-        for name in WEIGHT_PARAM_NAMES:
-            if name in kwargs:
-                self.local_weights[name] = kwargs[name]
+        for name, tensor in kwargs.items():
+            self.local_weights[name] = tensor
 
     def get_ipc_handles(self) -> Dict[str, Tuple[bytes, int]]:
         """Return (handle_bytes, offset) for each local weight tensor."""
-        from cuda import cudart
-        from cuda import cuda as cuda_driver
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+        )
 
+        cudart = CudaRTLibrary()
         handles = {}
         for name, tensor in self.local_weights.items():
             data_ptr = tensor.data_ptr()
-            err, handle = cudart.cudaIpcGetMemHandle(data_ptr)
-            assert err == cudart.cudaError_t.cudaSuccess, f"cudaIpcGetMemHandle failed: {err}"
-            err, alloc_base, alloc_size = cuda_driver.cuMemGetAddressRange(data_ptr)
-            assert err == cuda_driver.CUresult.CUDA_SUCCESS, f"cuMemGetAddressRange failed: {err}"
-            offset = data_ptr - int(alloc_base)
-            handles[name] = (bytes(handle.reserved), offset)
+            handle = cudart.cudaIpcGetMemHandle(ctypes.c_void_p(data_ptr))
+            # Compute offset from the start of the underlying storage allocation.
+            # This avoids needing cuMemGetAddressRange from the driver API.
+            storage_ptr = tensor.untyped_storage().data_ptr()
+            offset = data_ptr - storage_ptr
+            handles[name] = (bytes(handle.internal), offset)
         return handles
 
     def open_peer_handles(
@@ -164,33 +170,135 @@ class DwdpLayerHandleCollector:
         dwdp_rank: int,
     ) -> None:
         """Open peer IPC handles and compute NVLink-accessible pointers."""
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
 
+        cudart = CudaRTLibrary()
         for peer_rank, peer_handles in enumerate(all_handles):
             if peer_rank == dwdp_rank:
                 continue
             for name, (handle_bytes, offset) in peer_handles.items():
                 # Reconstruct cudaIpcMemHandle_t from bytes
-                handle = cudart.cudaIpcMemHandle_t()
-                handle.reserved = list(handle_bytes)
-                err, base_ptr = cudart.cudaIpcOpenMemHandle(
-                    handle, cudart.cudaIpcMemLazyEnablePeerAccess
-                )
-                assert err == cudart.cudaError_t.cudaSuccess, (
-                    f"cudaIpcOpenMemHandle failed for peer {peer_rank} param {name}: {err}"
-                )
-                base_ptr_int = int(base_ptr)
+                handle = cudaIpcMemHandle_t()
+                handle.internal = (ctypes.c_byte * 128).from_buffer_copy(handle_bytes)
+                base_ptr = cudart.cudaIpcOpenMemHandle(handle)
+                base_ptr_int = int(base_ptr.value)
                 self._ipc_mappings.append(base_ptr_int)
                 self.peer_base_ptrs[(peer_rank, name)] = base_ptr_int + offset
 
     def cleanup(self) -> None:
         """Close all IPC memory mappings."""
-        from cuda import cudart
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
+        cudart = CudaRTLibrary()
         for base_ptr in self._ipc_mappings:
             cudart.cudaIpcCloseMemHandle(base_ptr)
         self._ipc_mappings.clear()
         self.peer_base_ptrs.clear()
+
+
+# ---------------------------------------------------------------------------
+# DwdpManager — global singleton
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# IPC handle cache — keeps all handles open across layers
+# ---------------------------------------------------------------------------
+
+
+class DwdpIpcHandleCache:
+    """Cache of opened IPC memory mappings across all MoE layers.
+
+    When all layers' handles can be opened simultaneously (typical for
+    4-GPU nodes with ~348 total mappings), this eliminates per-layer
+    open/close/sync overhead (~26ms per layer on H20).
+
+    Falls back to per-layer open/close (sliding window) if the total
+    handle count exceeds the CUDA driver limit.
+    """
+
+    def __init__(self, dwdp_size: int, dwdp_rank: int):
+        self.dwdp_size = dwdp_size
+        self.dwdp_rank = dwdp_rank
+        # _ptrs[(moe_idx, peer_rank, param_name)] = mapped pointer (int)
+        self._ptrs: Dict[Tuple[int, int, str], int] = {}
+        self._base_ptrs: List[int] = []  # base ptrs to close on cleanup
+        self._is_all_open = False
+
+    @property
+    def is_all_open(self) -> bool:
+        return self._is_all_open
+
+    def open_all_handles(
+        self,
+        all_handles_by_layer: Dict[int, list],
+        layer_id_to_moe_idx: Dict[int, int],
+    ) -> None:
+        """Attempt to open all IPC handles at once.
+
+        If successful, sets ``is_all_open = True`` and subsequent
+        ``get_peer_ptr()`` calls use cached pointers directly.
+        If the CUDA driver limit is exceeded, closes all opened handles
+        and leaves ``is_all_open = False``.
+        """
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import (
+            CudaRTLibrary,
+            cudaIpcMemHandle_t,
+        )
+
+        cudart = CudaRTLibrary()
+
+        for layer_id, all_handles in all_handles_by_layer.items():
+            moe_idx = layer_id_to_moe_idx[layer_id]
+            for peer_rank, handle_dict in enumerate(all_handles):
+                if peer_rank == self.dwdp_rank:
+                    continue
+                for param_name, (handle_bytes, offset) in handle_dict.items():
+                    handle = cudaIpcMemHandle_t()
+                    handle.internal = (ctypes.c_byte * 128).from_buffer_copy(handle_bytes)
+                    try:
+                        base_ptr = cudart.cudaIpcOpenMemHandle(handle)
+                        base_ptr_int = int(base_ptr.value)
+                    except RuntimeError:
+                        # Exceeded limit — close everything and fall back
+                        logger.warning(
+                            f"DWDP IPC cache: cudaIpcOpenMemHandle failed at "
+                            f"moe_idx={moe_idx} peer={peer_rank} param={param_name}. "
+                            f"Falling back to per-layer open/close."
+                        )
+                        self._close_all()
+                        return
+                    self._base_ptrs.append(base_ptr_int)
+                    self._ptrs[(moe_idx, peer_rank, param_name)] = (
+                        base_ptr_int + offset
+                    )
+
+        self._is_all_open = True
+        logger.info(
+            f"DWDP IPC cache: all {len(self._ptrs)} handles opened successfully"
+        )
+
+    def get_peer_ptr(self, moe_idx: int, peer_rank: int, param_name: str) -> int:
+        """Return cached mapped pointer for a peer's weight tensor."""
+        return self._ptrs[(moe_idx, peer_rank, param_name)]
+
+    def _close_all(self) -> None:
+        """Close all cached IPC memory mappings."""
+        from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
+        cudart = CudaRTLibrary()
+        for base_ptr in self._base_ptrs:
+            cudart.cudaIpcCloseMemHandle(base_ptr)
+        self._base_ptrs.clear()
+        self._ptrs.clear()
+        self._is_all_open = False
+
+    def cleanup(self) -> None:
+        """Release all cached IPC handles."""
+        self._close_all()
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +342,9 @@ class DwdpManager:
         # Prefetch buffer (created after IPC exchange)
         self._prefetch_buffer = None
 
+        # IPC handle cache (created after IPC exchange)
+        self._ipc_cache: Optional[DwdpIpcHandleCache] = None
+
         # Mapping from absolute layer_id to moe_layer_index (0-based)
         self._layer_id_to_moe_idx: Dict[int, int] = {}
         moe_idx = 0
@@ -268,23 +379,38 @@ class DwdpManager:
     def exchange_ipc_handles(self) -> None:
         """AllGather IPC handles across DWDP group and store them.
 
-        IPC handles are stored as bytes and opened lazily to avoid
-        exceeding the CUDA driver's per-process IPC mapping limit.
+        After exchange, attempts to open all handles at once via
+        DwdpIpcHandleCache. If successful, prefetch_layer() can use
+        cached pointers directly without per-layer open/close/sync.
         """
         from sglang.srt.distributed.parallel_state import get_dwdp_group
 
         group = get_dwdp_group()
         self._all_handles: Dict[int, list] = {}
+        self._peer_handles_by_layer: Dict[int, Dict[int, Dict[str, tuple]]] = {}
 
         for layer_id, collector in self.layer_handles.items():
             local_handles = collector.get_ipc_handles()
             all_handles = [None] * self.dwdp_size
             dist.all_gather_object(all_handles, local_handles, group=group.cpu_group)
             self._all_handles[layer_id] = all_handles
+            # Precompute peer handles (exclude self) for fast lookup
+            self._peer_handles_by_layer[layer_id] = {
+                rank: handles
+                for rank, handles in enumerate(all_handles)
+                if rank != self.dwdp_rank
+            }
+
+        # Attempt to open all handles at once for caching
+        self._ipc_cache = DwdpIpcHandleCache(self.dwdp_size, self.dwdp_rank)
+        self._ipc_cache.open_all_handles(
+            self._all_handles, self._layer_id_to_moe_idx
+        )
 
         logger.info(
-            f"DWDP IPC handles exchanged (lazy open) for "
-            f"{len(self.layer_handles)} MoE layers"
+            f"DWDP IPC handles exchanged for "
+            f"{len(self.layer_handles)} MoE layers "
+            f"(cache={'enabled' if self._ipc_cache.is_all_open else 'disabled'})"
         )
 
     def init_prefetch_buffers(self) -> None:
@@ -310,24 +436,16 @@ class DwdpManager:
             param_full_strides=param_full_strides,
             param_dtypes=param_dtypes,
             device=next(iter(first_collector.local_weights.values())).device,
+            ipc_cache=self._ipc_cache,
         )
         logger.info("DWDP prefetch buffers allocated")
 
-    def initialize_compute_events(self) -> None:
-        """Pre-record initial compute events so the first prefetch can proceed."""
+    def initialize_events(self) -> None:
+        """Pre-record initial events so the first prefetch can proceed."""
         assert self._prefetch_buffer is not None
-        self._prefetch_buffer.initialize_compute_events()
+        self._prefetch_buffer.initialize_events()
 
     # ----- Phase 4: Forward Pass Operations -----
-
-    def _get_peer_handles(self, layer_id: int) -> Dict[int, Dict[str, tuple]]:
-        """Get peer IPC handle bytes for a layer, excluding self."""
-        all_handles = self._all_handles[layer_id]
-        peer_handles = {}
-        for rank, handles in enumerate(all_handles):
-            if rank != self.dwdp_rank:
-                peer_handles[rank] = handles
-        return peer_handles
 
     def prefetch_first_layers(self) -> None:
         """Async prefetch weights for the first 2 MoE layers.
@@ -350,12 +468,14 @@ class DwdpManager:
             if layer_id in self.layer_handles:
                 self._prefetch_buffer.prefetch_layer(
                     moe_layer_idx=moe_idx,
-                    peer_handles=self._get_peer_handles(layer_id),
+                    peer_handles=self._peer_handles_by_layer[layer_id],
                 )
 
-    def get_weight_view(self, layer_id: int) -> NvFp4WeightView:
+    def get_weight_view(self, layer_id: int):
         """Wait for prefetch to complete and return assembled weight view.
 
+        Returns NvFp4WeightView for modelopt_fp4 (multi-B CuteDSL kernel),
+        or Dict[str, Tensor] for FP8/other quantizations (param.data swap).
         Called from DeepseekV2MoE.forward_dwdp() before the MoE kernel.
         """
         moe_idx = self._layer_id_to_moe_idx[layer_id]
@@ -364,7 +484,19 @@ class DwdpManager:
         # Wait for prefetch to complete
         self._prefetch_buffer.wait_for_prefetch(moe_idx)
 
-        # Assemble weight view: local weights + prefetch buffer views
+        # Check if this is FP4 (has scale factor params) or FP8
+        has_sf = any("weight_sf" in name or "alpha" in name
+                     for name in collector.local_weights)
+
+        if has_sf:
+            # FP4 path: return NvFp4WeightView (multi-B CuteDSL kernel)
+            return self._get_fp4_weight_view(moe_idx, collector)
+        else:
+            # FP8 path: return Dict[str, Tensor] (param.data swap)
+            return self._get_assembled_weights(moe_idx, collector)
+
+    def _get_fp4_weight_view(self, moe_idx: int, collector) -> NvFp4WeightView:
+        """Build NvFp4WeightView for CuteDSL multi-B kernel."""
         buffer_views = self._prefetch_buffer.get_buffer_views(moe_idx)
 
         def _build_weight_list(param_name: str) -> List[torch.Tensor]:
@@ -385,15 +517,66 @@ class DwdpManager:
             w2_alphas=_build_weight_list("w2_alpha"),
         )
 
+    def _get_assembled_weights(self, moe_idx: int, collector) -> Dict[str, torch.Tensor]:
+        """Build Dict[str, Tensor] for FP8 param.data swap path.
+
+        Assembles a [num_routed_experts, ...] tensor per parameter by
+        placing each rank's expert weights at their correct positions.
+        Local weights are already in the right place; prefetched peer
+        weights fill in the gaps.
+        """
+        import torch
+
+        buffer_views = self._prefetch_buffer.get_buffer_views(moe_idx)
+        layout = self.layout
+        num_routed = layout.num_routed_experts
+
+        assembled = {}
+        for param_name, local_tensor in collector.local_weights.items():
+            # Create output tensor with same dtype/device, sized for all experts
+            full_shape = list(local_tensor.shape)
+            full_shape[0] = num_routed
+            result = torch.empty(full_shape, dtype=local_tensor.dtype, device=local_tensor.device)
+
+            # Place local experts at their correct positions
+            local_start = layout.local_expert_start
+            local_end = layout.local_expert_end
+            result[local_start:local_end].copy_(local_tensor)
+
+            # Place prefetched peer experts at their correct positions
+            for peer_rank in range(layout.dwdp_size):
+                if peer_rank == layout.dwdp_rank:
+                    continue
+                peer_start, peer_end = layout.peer_expert_range(peer_rank)
+                # The prefetched view contains the experts we need from this peer
+                result[peer_start:peer_end].copy_(buffer_views[param_name][peer_rank])
+
+            assembled[param_name] = result
+
+        return assembled
+
+    def handle_idle_rank(self, layer_id: int, device: torch.device) -> None:
+        """Handle an IDLE rank (0 tokens) for the given MoE layer.
+
+        Records consume_events for the OTHER buffer slot so the next
+        prefetch into that slot doesn't deadlock, then triggers the
+        prefetch pipeline for subsequent layers.
+
+        Called from model forward_dwdp() when hidden_states.shape[0] == 0.
+        """
+        moe_idx = self._layer_id_to_moe_idx[layer_id]
+        buf_idx = moe_idx % 2
+        other_buf = 1 - buf_idx
+        current_stream = torch.cuda.current_stream(device)
+        self._prefetch_buffer.consume_events[other_buf].record(current_stream)
+        self.record_compute_and_prefetch_next(layer_id)
+
     def record_compute_and_prefetch_next(self, layer_id: int) -> None:
         """Record compute done event and trigger prefetch for layer_id + 2.
 
         Called from DeepseekV2MoE.forward_dwdp() after the MoE kernel.
         """
         moe_idx = self._layer_id_to_moe_idx[layer_id]
-
-        # Record compute done on default stream
-        self._prefetch_buffer.record_compute_done(moe_idx)
 
         # Trigger prefetch for moe_idx + 2 (same buffer slot)
         next_moe_idx = moe_idx + 2
@@ -402,7 +585,7 @@ class DwdpManager:
             if next_layer_id in self.layer_handles:
                 self._prefetch_buffer.prefetch_layer(
                     moe_layer_idx=next_moe_idx,
-                    peer_handles=self._get_peer_handles(next_layer_id),
+                    peer_handles=self._peer_handles_by_layer[next_layer_id],
                 )
 
     # ----- Phase 5: Cleanup -----
@@ -412,6 +595,9 @@ class DwdpManager:
         if self._prefetch_buffer is not None:
             self._prefetch_buffer.cleanup()
             self._prefetch_buffer = None
+        if self._ipc_cache is not None:
+            self._ipc_cache.cleanup()
+            self._ipc_cache = None
         for collector in self.layer_handles.values():
             collector.cleanup()
         self.layer_handles.clear()

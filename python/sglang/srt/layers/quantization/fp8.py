@@ -1415,6 +1415,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if hasattr(layer, "dispatcher"):
             layer.dispatcher.set_quant_config({"weight_dtype": layer.w13_weight.dtype})
 
+        # Register weights with DWDP manager for IPC handle exchange (FP8 path)
+        from sglang.srt.layers.moe.dwdp import enable_dwdp, get_global_dwdp_manager
+
+        if enable_dwdp():
+            weight_kwargs = {
+                "w13_weight": layer.w13_weight,
+                "w2_weight": layer.w2_weight,
+            }
+            if hasattr(layer, "w13_weight_scale_inv"):
+                weight_kwargs["w13_weight_scale_inv"] = layer.w13_weight_scale_inv
+                weight_kwargs["w2_weight_scale_inv"] = layer.w2_weight_scale_inv
+            elif hasattr(layer, "w13_weight_scale"):
+                weight_kwargs["w13_weight_scale"] = layer.w13_weight_scale
+                weight_kwargs["w2_weight_scale"] = layer.w2_weight_scale
+            get_global_dwdp_manager().register_layer_weights(
+                layer_id=layer.layer_id,
+                **weight_kwargs,
+            )
+
     def process_weights_hip_int4(self, layer: Module):
         # TODO: _use_aiter: add after triton kernel added
         # INT4-FP8 (INT4 MoE Weight, FP8 Compute)
