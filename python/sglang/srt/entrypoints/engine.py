@@ -829,12 +829,9 @@ class Engine(EngineScoreMixin, EngineBase):
             )
 
             scheduler_init_result.wait_for_completion()
-            return (
-                None,
-                None,
-                port_args,
-                scheduler_init_result,
-                None,
+            raise RuntimeError(
+                "Non-zero node rank scheduler terminated; "
+                "not starting the HTTP server over the dummy health endpoint."
             )
 
         # Launch detokenizer process(es) — optionally fronted by a router when

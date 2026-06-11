@@ -2330,7 +2330,11 @@ def _setup_and_run_http_server(
         if server_args.tokenizer_worker_num > 1:
             if multi_tokenizer_args_shm is not None:
                 multi_tokenizer_args_shm.unlink()
-            if _global_state is not None:
+            if (
+                _global_state is not None
+                and _global_state.tokenizer_manager is not None
+                and hasattr(_global_state.tokenizer_manager, "socket_mapping")
+            ):
                 _global_state.tokenizer_manager.socket_mapping.clear_all_sockets()
 
 
@@ -2370,6 +2374,9 @@ def launch_server(
         run_scheduler_process_func=run_scheduler_process_func,
         run_detokenizer_process_func=run_detokenizer_process_func,
     )
+
+    if tokenizer_manager is None:
+        return
 
     _setup_and_run_http_server(
         server_args,
