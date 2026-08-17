@@ -7,6 +7,7 @@ from sglang.test.test_utils import maybe_stub_sgl_kernel
 maybe_stub_sgl_kernel()
 
 from sglang.srt.managers.scheduler_components.dp_attn import (  # noqa: E402
+    _force_cpu_mlp_sync_transport,
     _use_device_mlp_sync_transport,
 )
 
@@ -14,6 +15,26 @@ register_cpu_ci(est_time=1, suite="base-a-test-cpu")
 
 
 class TestDPAttnMLPSyncTransport(unittest.TestCase):
+    def test_pp_pd_stages_force_cpu_transport(self):
+        for mode in ("prefill", "decode"):
+            with self.subTest(mode=mode):
+                self.assertTrue(
+                    _force_cpu_mlp_sync_transport(
+                        pp_size=2,
+                        disaggregation_mode=mode,
+                    )
+                )
+
+    def test_non_pp_or_non_pd_keeps_default_transport_policy(self):
+        for pp_size, mode in ((1, "decode"), (2, "null"), (2, "")):
+            with self.subTest(pp_size=pp_size, mode=mode):
+                self.assertFalse(
+                    _force_cpu_mlp_sync_transport(
+                        pp_size=pp_size,
+                        disaggregation_mode=mode,
+                    )
+                )
+
     def test_pp_pd_prefill_forces_cpu_transport(self):
         with patch(
             "sglang.srt.managers.scheduler_components.dp_attn.envs."

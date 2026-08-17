@@ -43,6 +43,18 @@ _spec_diag_sync_logs = 0
 _MLP_SYNC_TRANSPORT_LOGGED = False
 
 
+def _force_cpu_mlp_sync_transport(*, pp_size: int, disaggregation_mode: str) -> bool:
+    """Keep PP-disaggregated scheduler metadata off the device group.
+
+    Both prefill and decode stages have PP communication in flight around this
+    metadata exchange.  A separate NCCL all-gather can therefore form a launch
+    ordering cycle with the pipeline send/receive path.  The metadata contains
+    only seven int64 values per rank, so use the existing Gloo group whenever a
+    disaggregated stage spans more than one pipeline rank.
+    """
+    return pp_size > 1 and disaggregation_mode in ("prefill", "decode")
+
+
 def _use_device_mlp_sync_transport(
     *,
     disable_overlap_schedule: bool,
@@ -51,10 +63,10 @@ def _use_device_mlp_sync_transport(
 ) -> bool:
     """Return whether scheduler metadata may use the TP device group.
 
-    PP prefill under PD disaggregation posts pipeline receives after this
-    metadata exchange.  Using a second NCCL communicator here can form a launch
-    ordering cycle with an earlier pipeline send, so that topology explicitly
-    stays on the existing Gloo transport.
+    PP stages under PD disaggregation can have pipeline communication in flight
+    around this metadata exchange. Using a second NCCL communicator here can
+    form a launch-ordering cycle, so those topologies explicitly stay on the
+    existing Gloo transport.
     """
     return (
         not force_cpu_mlp_sync
@@ -535,9 +547,9 @@ class SchedulerDPAttnAdapter:
             require_mlp_tp_gather=require_mlp_tp_gather(self.server_args),
             disable_overlap_schedule=get_schedule().disable_overlap_schedule,
             offload_tags=self.offload_tags,
-            force_cpu_mlp_sync=(
-                self.ps.pp_size > 1
-                and self.server_args.disaggregation_mode == "prefill"
+            force_cpu_mlp_sync=_force_cpu_mlp_sync_transport(
+                pp_size=self.ps.pp_size,
+                disaggregation_mode=self.server_args.disaggregation_mode,
             ),
             dwdp=get_parallel().dwdp_size > 1,
         )
