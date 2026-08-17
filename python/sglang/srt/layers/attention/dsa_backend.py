@@ -1482,7 +1482,15 @@ class DeepseekSparseAttnBackend(
                 out_cache_loc,
                 actual_forward_mode,
             )
-            return
+            # Building a graph bucket only allocates and initializes its metadata
+            # buffers. On CUDA, continue through the fused refresh below so the
+            # Triton module is loaded during graph setup instead of on the first
+            # real replay. This call still runs before the graph capture context;
+            # the graph backend synchronizes and barriers before its warmup
+            # forwards. HIP/CPU keep the existing build-only behavior because
+            # they do not use the CUDA fused metadata kernels.
+            if not is_cuda() or _is_hip:
+                return
 
         self.set_dsa_prefill_impl(forward_batch=None)
 
