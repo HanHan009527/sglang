@@ -186,13 +186,8 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
         self.assertTrue(verify_input.is_verify_input())
         self.assertEqual(verify_input.draft_token_num, 4)
 
-    def test_pp_idle_draft_discards_raw_relay_and_builds_verify_input(self):
-        pp_raw_relay = (
-            torch.empty((0,), dtype=torch.int64),
-            torch.empty((0,), dtype=torch.int64),
-            torch.empty((0,), dtype=torch.int64),
-        )
-        draft = Mock(return_value=pp_raw_relay)
+    def test_non_pp_idle_draft_participates_and_builds_verify_input(self):
+        draft = Mock()
         draft_worker = SimpleNamespace(
             draft=draft,
             draft_runner=SimpleNamespace(tp_group=object()),
@@ -210,6 +205,7 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
             target_worker=SimpleNamespace(
                 model_config=SimpleNamespace(vocab_size=1024)
             ),
+            _pp_enabled=False,
         )
         batch = SimpleNamespace(
             global_num_tokens=torch.tensor([0, 1], dtype=torch.int64),
@@ -244,6 +240,26 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
         self.assertTrue(verify_input.is_verify_input())
         self.assertEqual(verify_input.draft_token_num, 4)
 
+    def test_pp_last_idle_skips_head_draft_and_builds_verify_input(self):
+        draft = Mock()
+        draft_worker = SimpleNamespace(draft=draft)
+        worker = SimpleNamespace(
+            _draft_worker=draft_worker,
+            draft_worker=draft_worker,
+            _pp_enabled=True,
+            topk=1,
+            speculative_num_steps=3,
+            speculative_num_draft_tokens=4,
+            device="cpu",
+        )
+
+        verify_input = EAGLEWorkerV2._build_idle_verify_input(worker, SimpleNamespace())
+
+        draft.assert_not_called()
+        self.assertIsInstance(verify_input, EagleVerifyInput)
+        self.assertTrue(verify_input.is_verify_input())
+        self.assertEqual(verify_input.draft_token_num, 4)
+
     def test_idle_without_symmetric_moe_skips_draft(self):
         draft = Mock()
         draft_worker = SimpleNamespace(
@@ -263,6 +279,7 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
             target_worker=SimpleNamespace(
                 model_config=SimpleNamespace(vocab_size=1024)
             ),
+            _pp_enabled=False,
         )
         batch = SimpleNamespace(
             global_num_tokens=torch.tensor([0, 0], dtype=torch.int64),

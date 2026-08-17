@@ -1487,9 +1487,21 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 device=self.device,
             )
 
-        # A sparse DP batch on a draft-owning rank must still run the draft
-        # model when the speculative MoE backend requires symmetric dispatch
-        # generations.
+        if self._pp_enabled:
+            # PP active ranks consume the raw tree relayed from the previous
+            # iteration and therefore do not draft before target verify. Keep
+            # idle ranks in the same phase: every last-stage rank drafts once,
+            # after verify, to produce the next iteration's relay tree.
+            return EagleVerifyInput.create_idle_input(
+                self.topk,
+                self.speculative_num_steps,
+                self.speculative_num_draft_tokens,
+                device=self.device,
+            )
+
+        # Without PP, active DP peers draft before target verify. A sparse idle
+        # peer must participate in that same draft phase when the speculative
+        # MoE backend requires symmetric dispatch generations.
         capture_mode = (
             CaptureHiddenMode.NULL
             if self.speculative_algorithm.is_standalone()
@@ -1522,10 +1534,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 speculative_moe_a2a_backend_context(),
                 spec_stage_span("draft"),
             ):
-                # Draft participation is required here only to keep MoE
-                # collectives in lockstep with active DP peers. Under PP the
-                # draft return value is a raw relay tuple, not an
-                # EagleVerifyInput, so never forward it to target verify.
+                # The result is intentionally discarded: participation keeps
+                # MoE collectives in lockstep, while target verify still needs
+                # an explicit idle EagleVerifyInput.
                 self.draft_worker.draft(batch)
 
         return EagleVerifyInput.create_idle_input(
