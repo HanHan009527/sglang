@@ -16,7 +16,11 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.runtime_context import get_context
 from sglang.srt.speculative.adaptive_runtime_state import SpecRuntimeState
 from sglang.srt.speculative.eagle_utils import organize_draft_results
-from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker, EAGLEWorkerV2
+from sglang.srt.speculative.eagle_worker_v2 import (
+    EagleDraftWorker,
+    EAGLEWorkerV2,
+    _slice_draft_output_to_local_tokens,
+)
 from sglang.test.ci.ci_register import (
     register_amd_ci,
     register_cpu_ci,
@@ -148,7 +152,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
         override.install()
         self.addCleanup(override.restore)
 
-    def test_missing_seed_keeps_cuda_graph_ranks_aligned(self):
+    def test_missing_seed_uses_rank_consistent_eager_without_zero_seed(self):
         graph_result = (
             [],
             torch.zeros((1, 1), dtype=torch.long, device=DEVICE),
@@ -165,7 +169,7 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
         )
 
         for seed_enabled, seed_present, expect_graph in (
-            (True, False, True),
+            (True, False, False),
             (True, True, True),
             (False, False, True),
         ):
@@ -188,7 +192,13 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
                 worker.seed_dsa_topk_from_draft_extend = seed_enabled
                 worker.index_share_for_mtp_iteration = True
                 worker.dsa_index_topk = 4
-                forward_batch = SimpleNamespace(forward_mode=ForwardMode.DECODE)
+                forward_batch = SimpleNamespace(
+                    forward_mode=ForwardMode.DECODE,
+                    batch_size=1,
+                    can_run_dp_cuda_graph=True,
+                    can_run_dp_draft_cuda_graph=expect_graph,
+                    original_global_num_tokens_cpu=None,
+                )
                 worker.draft_forward = MagicMock(return_value=graph_result)
                 attn_backend = SimpleNamespace(
                     verify_mask=None,
@@ -218,20 +228,54 @@ class TestEagleWorkerV2BackendFallback(CustomTestCase):
                     return_value=tree_result,
                 ), patch(
                     "sglang.srt.speculative.eagle_worker_v2.prepare_for_draft",
-                    return_value=(forward_batch, True),
+                    return_value=(forward_batch, expect_graph),
                 ):
                     worker.draft(batch)
 
                 self.assertEqual(worker.cuda_graph_runner.execute.called, expect_graph)
                 self.assertEqual(worker.draft_forward.called, not expect_graph)
                 if seed_enabled and not seed_present:
-                    self.assertEqual(
-                        tuple(draft_input.dsa_topk_indices.shape), (1, 4)
-                    )
-                    self.assertEqual(draft_input.dsa_topk_indices.dtype, torch.int32)
-                    self.assertEqual(
-                        torch.count_nonzero(draft_input.dsa_topk_indices).item(), 0
-                    )
+                    self.assertIsNone(draft_input.dsa_topk_indices)
+
+    def test_eager_draft_discards_dp_padding_rows(self):
+        logits = torch.arange(24, dtype=torch.float32).reshape(3, 8)
+        hidden_states = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        positions = torch.tensor([7, 100, 100])
+
+        local_logits, local_hidden_states, local_positions = (
+            _slice_draft_output_to_local_tokens(
+                logits, hidden_states, positions, num_local_tokens=1
+            )
+        )
+
+        self.assertEqual(local_logits.shape, (1, 8))
+        self.assertEqual(local_hidden_states.shape, (1, 4))
+        self.assertEqual(local_positions.tolist(), [7])
+        local_positions.add_(1)
+        self.assertEqual(positions.tolist(), [8, 100, 100])
+
+    def test_idle_eager_draft_discards_all_dp_padding_rows(self):
+        local_logits, local_hidden_states, local_positions = (
+            _slice_draft_output_to_local_tokens(
+                torch.empty((2, 8)),
+                torch.empty((2, 4)),
+                torch.tensor([100, 100]),
+                num_local_tokens=0,
+            )
+        )
+
+        self.assertEqual(local_logits.shape, (0, 8))
+        self.assertEqual(local_hidden_states.shape, (0, 4))
+        self.assertEqual(local_positions.shape, (0,))
+
+    def test_eager_draft_rejects_missing_local_rows(self):
+        with self.assertRaisesRegex(RuntimeError, "next_token_logits has 0 rows"):
+            _slice_draft_output_to_local_tokens(
+                torch.empty((0, 8)),
+                torch.empty((1, 4)),
+                torch.tensor([7]),
+                num_local_tokens=1,
+            )
 
     def test_preserves_initialized_backend_when_draft_extend_backend_is_unset(self):
         worker = object.__new__(EagleDraftWorker)

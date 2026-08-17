@@ -131,6 +131,31 @@ _is_xpu = is_xpu()
 logger = logging.getLogger(__name__)
 
 
+def _slice_draft_output_to_local_tokens(
+    next_token_logits: torch.Tensor,
+    hidden_states: Optional[torch.Tensor],
+    positions: torch.Tensor,
+    num_local_tokens: int,
+) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """Discard DP-attention padding rows before eager draft postprocessing."""
+    for name, tensor in (
+        ("next_token_logits", next_token_logits),
+        ("hidden_states", hidden_states),
+        ("positions", positions),
+    ):
+        if tensor is not None and tensor.shape[0] < num_local_tokens:
+            raise RuntimeError(
+                f"EAGLE draft {name} has {tensor.shape[0]} rows, "
+                f"but {num_local_tokens} local tokens need postprocessing"
+            )
+
+    return (
+        next_token_logits[:num_local_tokens],
+        hidden_states[:num_local_tokens] if hidden_states is not None else None,
+        positions[:num_local_tokens],
+    )
+
+
 class EagleDraftWorker(EagleDraftWorkerBase):
     def __init__(
         self,
@@ -545,34 +570,16 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         if self._spec_diag_draft_logs < 8:
             logger.warning(
                 "GLM52_SPEC_DIAG draft mode=%s raw_bs=%s graph=%s "
-                "dp_graph=%s seed=%s spec_compatible=%s global_tokens=%s",
+                "dp_graph=%s dp_draft_graph=%s seed=%s global_tokens=%s",
                 forward_batch.forward_mode.name,
                 forward_batch.batch_size,
                 can_run_decode_cuda_graph,
                 forward_batch.can_run_dp_cuda_graph,
+                forward_batch.can_run_dp_draft_cuda_graph,
                 draft_input.dsa_topk_indices is not None,
-                draft_input.cuda_graph_compatible,
                 forward_batch.original_global_num_tokens_cpu,
             )
             self._spec_diag_draft_logs += 1
-        if (
-            can_run_decode_cuda_graph
-            and not forward_batch.forward_mode.is_idle()
-            and self.seed_dsa_topk_from_draft_extend
-            and draft_input.dsa_topk_indices is None
-        ):
-            # PD prefill does not run the draft model, so the first decode step
-            # has no DSA seed.  Falling back to eager only on the non-idle DP
-            # ranks would diverge from idle ranks that remain on the captured
-            # path, and the differently padded MoE collectives can deadlock.
-            # Keep every rank on the same graph path; the graph's zero seed is
-            # the existing representation for an absent first-step seed.
-            draft_input.dsa_topk_indices = torch.zeros(
-                (draft_input.hidden_states.shape[0], self.dsa_index_topk),
-                dtype=torch.int32,
-                device=draft_input.hidden_states.device,
-            )
-
         n_inner = self.speculative_num_steps - 1
         canary_outside_ctx = (
             c.with_ops_outside_graph(
@@ -718,6 +725,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 break
 
             # Set inputs
+            num_local_tokens = input_ids.shape[0]
             forward_batch.input_ids = input_ids
             # Qwen3-MoE MTP uses a fused RoPE + KV-store path whose cache_loc
             # argument must be contiguous.
@@ -746,47 +754,53 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 canary_index_ctx,
             ):
                 logits_output = self.draft_runner.forward(forward_batch).logits_output
-            maybe_detect_nan(logits_output.next_token_logits, f"draft_forward step {i}")
-            maybe_detect_inf(logits_output.next_token_logits, f"draft_forward step {i}")
+            next_token_logits, next_hidden_states, local_positions = (
+                _slice_draft_output_to_local_tokens(
+                    logits_output.next_token_logits,
+                    logits_output.hidden_states,
+                    forward_batch.positions,
+                    num_local_tokens,
+                )
+            )
+            maybe_detect_nan(next_token_logits, f"draft_forward step {i}")
+            maybe_detect_inf(next_token_logits, f"draft_forward step {i}")
             if get_spec().speculative_use_rejection_sampling:
                 probs, topk_p, topk_index = sample_draft_proposal(
-                    logits_output.next_token_logits,
+                    next_token_logits,
                     forward_batch.sampling_info.temperatures,
                 )
                 draft_probs_list.append(probs)
-                forward_batch.positions.add_(1)
+                local_positions.add_(1)
             elif self.topk == 1 and not _is_hip:
                 if _is_cuda:
                     # The positions advance is fused into the kernel.
                     topk_p, topk_index = draft_topk1_postprocess(
-                        logits_output.next_token_logits,
-                        forward_batch.positions,
+                        next_token_logits,
+                        local_positions,
                         draft_tokens_topk1,
                         i + 1,
                     )
                 else:
-                    topk_index = torch.argmax(
-                        logits_output.next_token_logits, dim=-1, keepdim=True
-                    )
+                    topk_index = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                     topk_p = torch.ones_like(topk_index, dtype=torch.float32)
-                    forward_batch.positions.add_(1)
+                    local_positions.add_(1)
             else:
                 probs = renorm_draft_probs(
-                    logits_output.next_token_logits,
+                    next_token_logits,
                     forward_batch.sampling_info,
                     get_spec().speculative_use_rejection_sampling,
                 )
                 topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
-                forward_batch.positions.add_(1)
+                local_positions.add_(1)
             maybe_detect_oob(
                 topk_index,
                 0,
-                logits_output.next_token_logits.shape[-1],
-                f"draft_forward step {i}: topk_index OOB vs vocab_size={logits_output.next_token_logits.shape[-1]}",
+                next_token_logits.shape[-1],
+                f"draft_forward step {i}: topk_index OOB vs vocab_size={next_token_logits.shape[-1]}",
             )
             if self.hot_token_id is not None:
                 topk_index = self.hot_token_id[topk_index]
-            hidden_states = logits_output.hidden_states
+            hidden_states = next_hidden_states
 
         if self.index_share_for_mtp_iteration:
             spec_info.dsa_topk_indices = None
@@ -1197,6 +1211,30 @@ class EAGLEWorkerV2(BaseSpecWorker):
         if self._draft_worker is None:
             return self._target_worker.model_runner
         return self._draft_worker.draft_runner
+
+    def requires_dp_attention_eager_forward(self, batch: ScheduleBatch) -> bool:
+        """Keep seedless GLM MTP draft fallback rank-consistent under DP attention."""
+        # Non-last PP stages do not own or execute the draft model, so their
+        # stage-local DP vote must remain permissive.
+        if (
+            self._draft_worker is None
+            or not self._draft_worker.seed_dsa_topk_from_draft_extend
+        ):
+            return False
+
+        draft_input = batch.spec_info
+        if draft_input is None:
+            return False
+
+        # Under overlap scheduling, FutureMap resolves the inputs after this
+        # scheduler-side graph vote. The current tensor may be stale after a
+        # seeded running batch merges a seedless prebuilt batch, while the
+        # future flag already reflects the merged batch.
+        if getattr(draft_input, "future_indices", None) is not None:
+            has_seed = getattr(draft_input, "future_dsa_topk_indices_available", False)
+        else:
+            has_seed = getattr(draft_input, "dsa_topk_indices", None) is not None
+        return not has_seed
 
     @property
     def spec_v2_attn_backends(self) -> tuple:

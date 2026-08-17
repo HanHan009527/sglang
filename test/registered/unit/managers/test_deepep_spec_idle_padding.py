@@ -30,6 +30,7 @@ def _sync_info(global_num_tokens):
         global_forward_mode=None,
         can_run_decode_cuda_graph=False,
         can_run_prefill_cuda_graph=False,
+        can_run_draft_cuda_graph=True,
     )
 
 

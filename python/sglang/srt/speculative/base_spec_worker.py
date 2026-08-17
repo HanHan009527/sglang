@@ -232,6 +232,15 @@ class BaseSpecWorker(ABC):
         """
         pass
 
+    def requires_dp_attention_eager_forward(self, batch) -> bool:
+        """Whether this rank needs the speculative draft forward to run eagerly.
+
+        DP attention folds this rank-local decision into its metadata
+        all-gather so every participating MLP/EP rank chooses the same draft
+        graph-or-eager path.
+        """
+        return False
+
     def activate_step_by_batch(self, batch_size: int) -> None:
         """Activate the optimal adaptive step for the current batch size.
 

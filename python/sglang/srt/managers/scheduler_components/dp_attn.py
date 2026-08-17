@@ -78,23 +78,6 @@ def _use_device_mlp_sync_transport(
     )
 
 
-def _spec_input_cuda_graph_compatible(local_batch: Optional[ScheduleBatch]) -> bool:
-    """Return the local spec-input graph admission bit.
-
-    None/idle/prebuilt inputs stay permissive so an active rank with complete
-    runtime state can still use graphs. Any active incompatible input is
-    min-reduced by ``MLPSyncBatchInfo`` and forces every DP rank eager.
-    """
-    if (
-        local_batch is None
-        or local_batch.forward_mode.is_idle()
-        or local_batch.forward_mode.is_prebuilt()
-    ):
-        return True
-    spec_info = local_batch.spec_info
-    return spec_info is None or spec_info.cuda_graph_compatible
-
-
 def _resolve_elastic_world_dp_size(
     dp_size: int,
     *,
@@ -142,6 +125,7 @@ class MLPSyncBatchInfo:
     num_tokens_for_logprob: int
     can_run_decode_cuda_graph: bool
     can_run_prefill_cuda_graph: bool
+    can_run_draft_cuda_graph: bool
     is_extend_in_batch: bool
     local_can_run_tbo: bool
     local_forward_mode: int
@@ -164,6 +148,7 @@ class MLPSyncBatchInfo:
                 int(self.local_can_run_tbo),
                 self.local_forward_mode,
                 int(self.can_run_prefill_cuda_graph),
+                int(self.can_run_draft_cuda_graph),
             ],
             device=device,
             dtype=dtype,
@@ -179,6 +164,7 @@ class MLPSyncBatchInfo:
                 1,  # local_can_run_tbo
                 ForwardMode.IDLE.value,  # local_forward_mode
                 0,  # can_run_prefill_cuda_graph
+                1,  # can_run_draft_cuda_graph
             ],
             device=device,
             dtype=dtype,
@@ -246,6 +232,7 @@ class MLPSyncBatchInfo:
         self.can_run_decode_cuda_graph = bool(tp0_info_cpu[:, 2].min())
         self.is_extend_in_batch = bool(tp0_info_cpu[:, 3].max())
         self.can_run_prefill_cuda_graph = bool(tp0_info_cpu[:, 6].min())
+        self.can_run_draft_cuda_graph = bool(tp0_info_cpu[:, 7].min())
         if _ENABLE_METRICS_DP_ATTENTION:
             self.dp_cooperation_info = DPCooperationInfo.create(
                 tp0_info_cpu[:, 5].tolist()
@@ -322,6 +309,7 @@ def _update_gather_batch(
 
     # Check forward mode for cuda graph
     batch.can_run_dp_cuda_graph = mlp_sync_info.can_run_decode_cuda_graph
+    batch.can_run_dp_draft_cuda_graph = mlp_sync_info.can_run_draft_cuda_graph
     batch.can_run_dp_breakable_cuda_graph = mlp_sync_info.can_run_prefill_cuda_graph
 
 
@@ -373,8 +361,9 @@ def prepare_mlp_sync_batch_raw(
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
     ) and not disable_cuda_graph
-    can_run_decode_cuda_graph = (
-        can_run_decode_cuda_graph and _spec_input_cuda_graph_compatible(local_batch)
+    can_run_draft_cuda_graph = not (
+        local_batch is not None
+        and getattr(local_batch, "force_disable_draft_cuda_graph", False)
     )
     breakable_prefill = check_cuda_graph_backend(Phase.PREFILL, Backend.BREAKABLE)
     prefill_graph_runner = (
@@ -447,6 +436,7 @@ def prepare_mlp_sync_batch_raw(
         num_tokens_for_logprob=num_tokens_for_logprob,
         can_run_decode_cuda_graph=can_run_decode_cuda_graph,
         can_run_prefill_cuda_graph=can_run_prefill_cuda_graph,
+        can_run_draft_cuda_graph=can_run_draft_cuda_graph,
         is_extend_in_batch=is_extend_in_batch,
         local_can_run_tbo=local_can_run_tbo,
         local_forward_mode=local_forward_mode,
@@ -494,13 +484,13 @@ def prepare_mlp_sync_batch_raw(
         if _spec_diag_sync_logs < 8:
             logger.warning(
                 "GLM52_SPEC_DIAG sync local_mode=%s emitted_mode=%s "
-                "local_tokens=%s global_tokens=%s graph=%s spec_compatible=%s",
+                "local_tokens=%s global_tokens=%s graph=%s draft_graph=%s",
                 None if local_batch is None else local_batch.forward_mode.name,
                 batch_to_gather.forward_mode.name,
                 num_tokens,
                 mlp_sync_info.global_num_tokens,
                 mlp_sync_info.can_run_decode_cuda_graph,
-                _spec_input_cuda_graph_compatible(local_batch),
+                mlp_sync_info.can_run_draft_cuda_graph,
             )
             _spec_diag_sync_logs += 1
 
