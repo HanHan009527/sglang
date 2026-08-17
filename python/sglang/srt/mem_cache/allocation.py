@@ -688,7 +688,13 @@ def alloc_for_spec_decode(
         if tree_cache.token_to_kv_pool_allocator.page_size == 1:
             out_cache_loc = alloc_token_slots(tree_cache, num_needed_tokens)
         else:
-            last_loc = get_last_loc(
+            # Speculative decode runs this allocation while PP/DP schedulers are
+            # in lockstep.  Lazy-loading a Triton module on just one scheduler
+            # rank can keep that rank out of the following DP metadata
+            # collective and deadlock the whole pipeline.  The equivalent
+            # torch gather has no per-rank JIT/module-load boundary and this
+            # path is only reached when a new page must be allocated.
+            last_loc = get_last_loc_torch(
                 req_to_token_pool.req_to_token, req_pool_indices, cur_kv_lens
             )
             device_type = getattr(
