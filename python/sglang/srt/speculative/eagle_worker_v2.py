@@ -167,6 +167,51 @@ def _pp_tail_draft_forward_mode(forward_mode: ForwardMode) -> ForwardMode:
     return forward_mode if forward_mode.is_idle() else ForwardMode.DECODE
 
 
+def _materialize_symmetric_idle_dsa_seed(draft_input: EagleDraftInput) -> None:
+    """Give a materialized idle draft the seed row expected by graph replay.
+
+    Draft-extend produces an empty ``[0, index_topk]`` seed on an idle DP rank.
+    Symmetric speculative MoE padding later turns that rank into one dummy
+    request, so the draft graph runner validates it with ``raw_bs == 1``.  A
+    zero seed follows the community-proposed dummy-row contract (#32527) and
+    the pinned baseline, keeping the graph input shape aligned with active peers.
+    """
+    seed = draft_input.dsa_topk_indices
+    if seed is not None and seed.shape[0] == 0:
+        draft_input.dsa_topk_indices = seed.new_zeros((1, *seed.shape[1:]))
+
+
+def _require_pp_tail_dsa_seed_for_graph(
+    *,
+    pp_size: int,
+    can_run_decode_cuda_graph: bool,
+    forward_mode: ForwardMode,
+    seed_dsa_topk_from_draft_extend: bool,
+    draft_input: EagleDraftInput,
+) -> None:
+    """Fail closed if an active PP tail loses its post-extend DSA seed.
+
+    The scheduler-side DP vote runs before PP verify and draft-extend, so it
+    cannot inspect the input that the tail draft will actually consume.  A
+    successful draft-extend must publish a seed tensor for every active rank;
+    falling back to eager here on only one rank would split DP/MegaMoE
+    collectives, while silently zeroing a missing active seed would hide a
+    broken phase contract.
+    """
+    if (
+        pp_size > 1
+        and can_run_decode_cuda_graph
+        and not forward_mode.is_idle()
+        and seed_dsa_topk_from_draft_extend
+        and draft_input.dsa_topk_indices is None
+    ):
+        raise RuntimeError(
+            "PP tail draft selected CUDA Graph after draft-extend without "
+            "dsa_topk_indices; refusing a rank-local eager fallback or an "
+            "implicit zero seed"
+        )
+
+
 class EagleDraftWorker(EagleDraftWorkerBase):
     def __init__(
         self,
@@ -551,6 +596,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             self.topk,
             self.speculative_num_steps,
         )
+        _require_pp_tail_dsa_seed_for_graph(
+            pp_size=self.server_args.pp_size,
+            can_run_decode_cuda_graph=can_run_decode_cuda_graph,
+            forward_mode=forward_batch.forward_mode,
+            seed_dsa_topk_from_draft_extend=self.seed_dsa_topk_from_draft_extend,
+            draft_input=draft_input,
+        )
         if (
             forward_batch.forward_mode.is_idle()
             and forward_batch.original_global_num_tokens_cpu is not None
@@ -576,6 +628,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             if forward_batch.num_token_non_padded is not None:
                 forward_batch.num_token_non_padded.fill_(1)
             forward_batch.num_token_non_padded_cpu = 1
+            _materialize_symmetric_idle_dsa_seed(draft_input)
         if not hasattr(self, "_spec_diag_draft_logs"):
             self._spec_diag_draft_logs = 0
         if self._spec_diag_draft_logs < 8:
@@ -1231,6 +1284,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
             self._draft_worker is None
             or not self._draft_worker.seed_dsa_topk_from_draft_extend
         ):
+            return False
+
+        # Under PP the last stage does not draft from this pre-forward
+        # ``spec_info``.  It first verifies the relayed raw tree, then
+        # draft-extend publishes a fresh EagleDraftInput and only then runs the
+        # tail draft.  Applying the non-PP seed test here therefore votes on
+        # the previous phase and can force a seeded tail draft into eager mode.
+        # Keep the scheduler-side vote permissive; mixed-idle tail drafts get a
+        # shape-valid zero seed when their symmetric dummy row is materialized.
+        if self._pp_enabled:
             return False
 
         draft_input = batch.spec_info
