@@ -32,6 +32,7 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
         runner.is_encoder_decoder = False
         runner.capture_hidden_mode = CaptureHiddenMode.NULL
         runner.enable_two_batch_overlap = False
+        runner.ragged_verify_mode = False
         runner.model_runner = SimpleNamespace(
             spec_algorithm=SimpleNamespace(is_ngram=lambda: False)
         )
@@ -51,7 +52,10 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
             # explicit runtime sequence-depth fields above.
             out_cache_loc=torch.tensor([999_999], dtype=torch.int64),
             capture_hidden_mode=CaptureHiddenMode.NULL,
-            spec_info=SimpleNamespace(capture_hidden_mode=None),
+            spec_info=SimpleNamespace(
+                capture_hidden_mode=None,
+                num_tokens_per_req=-1,
+            ),
             input_ids=torch.tensor([1], dtype=torch.int64),
         )
 
@@ -66,12 +70,8 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
 
         for threshold, sequence_depth, expected in cases:
             with self.subTest(threshold=threshold, sequence_depth=sequence_depth):
-                runner = self._build_runner(
-                    disable_graph_max_seq_len=threshold
-                )
-                forward_batch = self._build_forward_batch(
-                    sequence_depth=sequence_depth
-                )
+                runner = self._build_runner(disable_graph_max_seq_len=threshold)
+                forward_batch = self._build_forward_batch(sequence_depth=sequence_depth)
 
                 self.assertIs(runner.can_run_graph(forward_batch), expected)
 

@@ -41,7 +41,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
     ForwardBatch,
     ForwardMode,
-    _should_force_symmetric_spec_deepep_padding,
+    _should_force_symmetric_spec_moe_padding,
 )
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.model_executor.runner import (
@@ -554,7 +554,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         if (
             forward_batch.forward_mode.is_idle()
             and forward_batch.original_global_num_tokens_cpu is not None
-            and _should_force_symmetric_spec_deepep_padding(
+            and _should_force_symmetric_spec_moe_padding(
                 spec_algorithm=forward_batch.spec_algorithm,
                 spec_info=forward_batch.spec_info,
                 is_extend_in_batch=forward_batch.is_extend_in_batch,
@@ -567,7 +567,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             # query just like an active DP rank.
             forward_batch._original_forward_mode = forward_batch.forward_mode
             forward_batch.forward_mode = ForwardMode.DECODE
-            forward_batch.symmetric_spec_deepep_dummy = True
+            forward_batch.symmetric_spec_moe_dummy = True
             forward_batch.batch_size = 1
             forward_batch._pad_inputs_to_size(self.draft_runner, 1, 1)
             forward_batch.out_cache_loc = forward_batch.out_cache_loc.new_zeros(
@@ -1506,7 +1506,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             vocab_size=self.target_worker.model_config.vocab_size,
         )
         if batch.global_num_tokens is not None and (
-            _should_force_symmetric_spec_deepep_padding(
+            _should_force_symmetric_spec_moe_padding(
                 spec_algorithm=batch.spec_algorithm,
                 spec_info=batch.spec_info,
                 is_extend_in_batch=batch.is_extend_in_batch,

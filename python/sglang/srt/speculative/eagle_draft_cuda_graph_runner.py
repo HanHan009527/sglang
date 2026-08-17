@@ -334,6 +334,9 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
     # can_run_graph
     # -----------------------------------------------------------------
     def can_run_graph(self, forward_batch: ForwardBatch):
+        if self._is_long_context_cuda_graph_disabled(forward_batch):
+            return False
+
         # Uniform-width replay invariant: the batch's actual per-request width
         # must match this runner's capture width; anything else falls back to
         # eager. (Unset widths pass: not every path fills the field yet.)
@@ -550,6 +553,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
 
         raw_bs = forward_batch.batch_size
         raw_num_token = raw_bs * self.captured_req_width
+        self._validate_dsa_seed_topk(forward_batch, raw_bs)
 
         # Pad to nearest captured shape
         if self.require_mlp_tp_gather:

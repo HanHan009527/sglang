@@ -222,6 +222,7 @@ class TestEagleDraftCudaGraphRunner(CustomTestCase):
         runner.deepep_adapter = SimpleNamespace(replay=lambda: None)
         runner.capture_bs = [1, CAPTURE_BS]
         runner.num_tokens_per_bs = tokens_per_req
+        runner.captured_req_width = tokens_per_req
         runner.seq_len_fill_value = SEQ_LEN_FILL_VALUE
         runner.require_mlp_tp_gather = False
         runner.require_gathered_buffer = False

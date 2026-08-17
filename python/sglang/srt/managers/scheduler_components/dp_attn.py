@@ -276,25 +276,25 @@ def _update_gather_batch(
     skip_all_gather=False,
 ):
     # TODO: handle the case when moe_dense_tp_size != 1
-    # DeepEP low-latency normally accepts rank-local token counts, so the
-    # scattered DP path intentionally avoids publishing the full list here.
-    # EAGLE target verification is the exception when some DP ranks are idle:
-    # an empty rank can finish low_latency_dispatch locally while active peers
-    # are still waiting for its device-side handshake.  Keep the all-gathered
-    # counts for that mixed active/idle round so ForwardBatch can materialize a
-    # symmetric dummy verify row on the idle ranks.
-    from sglang.srt.layers.moe.utils import get_deepep_mode, get_moe_a2a_backend
+    # The scattered DP path normally publishes only the rank-local count.
+    # Sparse EAGLE rounds are the exception for symmetric MoE collectives:
+    # ForwardBatch needs the peer census to choose one MAX_LEN geometry and
+    # materialize idle ranks. This is deliberately narrower than setting
+    # require_mlp_tp_gather=True, which would also change gathered-buffer and
+    # CUDA-graph semantics for every MegaMoE forward.
+    from sglang.srt.layers.moe.utils import (
+        moe_a2a_requires_symmetric_spec_padding,
+    )
 
-    keep_peer_counts_for_spec_deepep = (
+    keep_peer_counts_for_symmetric_spec_moe = (
         not require_mlp_tp_gather
-        and get_moe_a2a_backend().is_deepep()
-        and get_deepep_mode().resolve(mlp_sync_info.is_extend_in_batch).is_low_latency()
+        and moe_a2a_requires_symmetric_spec_padding(mlp_sync_info.is_extend_in_batch)
         and batch.spec_algorithm is not None
         and batch.spec_algorithm.is_eagle()
         and min(mlp_sync_info.global_num_tokens) == 0
         and max(mlp_sync_info.global_num_tokens) > 0
     )
-    if not require_mlp_tp_gather and not keep_peer_counts_for_spec_deepep:
+    if not require_mlp_tp_gather and not keep_peer_counts_for_symmetric_spec_moe:
         batch.global_num_tokens = [mlp_sync_info.num_tokens]
         batch.global_num_tokens_for_logprob = [mlp_sync_info.num_tokens_for_logprob]
     else:

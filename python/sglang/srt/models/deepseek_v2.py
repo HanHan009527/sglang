@@ -2093,9 +2093,9 @@ class DeepseekV2AttentionMLA(
         llama_4_scaling: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
     ):
-        if forward_batch.symmetric_spec_deepep_dummy:
+        if forward_batch.symmetric_spec_moe_dummy:
             # This row exists only to keep sparse EAGLE ranks in the same
-            # DeepEP MoE generations. There is no real request KV to attend;
+            # symmetric MoE generations. There is no real request KV to attend;
             # forwarding the activation preserves the layer/collective shape
             # without asking DSA and FlashMLA to plan a synthetic cache row.
             if isinstance(hidden_states, tuple):
