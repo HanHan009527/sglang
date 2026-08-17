@@ -136,9 +136,10 @@ def get_last_loc_torch(
     req_pool_indices_tensor: torch.Tensor,
     prefix_lens_tensor: torch.Tensor,
 ) -> torch.Tensor:
+    last_token_indices = prefix_lens_tensor.clamp_min(1) - 1
     return torch.where(
         prefix_lens_tensor > 0,
-        req_to_token[req_pool_indices_tensor, prefix_lens_tensor - 1],
+        req_to_token[req_pool_indices_tensor, last_token_indices],
         torch.full_like(prefix_lens_tensor, -1),
     )
 
@@ -657,6 +658,28 @@ def assign_req_to_token_pool_func(
     )
 
 
+def assign_req_to_token_pool_torch(
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    start_offset: torch.Tensor,
+    end_offset: torch.Tensor,
+    out_cache_loc: torch.Tensor,
+) -> None:
+    """Update speculative request bookkeeping without a lazy Triton launch."""
+    lengths = end_offset - start_offset
+    segment_offsets = torch.cumsum(lengths, dim=0) - lengths
+    output_size = out_cache_loc.shape[0]
+    row_indices = torch.repeat_interleave(
+        req_pool_indices, lengths, output_size=output_size
+    )
+    column_indices = torch.arange(
+        output_size, device=out_cache_loc.device, dtype=start_offset.dtype
+    ) + torch.repeat_interleave(
+        start_offset - segment_offsets, lengths, output_size=output_size
+    )
+    req_to_token[row_indices, column_indices] = out_cache_loc
+
+
 def _alloc_paged_token_slots_extend_npu(*args, **kwargs):
     from sglang.srt.hardware_backend.npu.dsv4.dsv4_allocator import (
         alloc_paged_token_slots_extend_npu,
@@ -712,14 +735,14 @@ def alloc_for_spec_decode(
                 batch=batch,
             )
         # Updating req_to_token is a write to a shared tensor: it must not overlap
-        # with the previous batch's forward, which also reads req_to_token.
-        assign_req_to_token_pool_func(
+        # with the previous batch's forward, which also reads req_to_token. Keep
+        # this lockstep PP/DP path free of per-rank lazy Triton module loads too.
+        assign_req_to_token_pool_torch(
             req_pool_indices,
             req_to_token_pool.req_to_token,
             cur_kv_lens,
             nxt_kv_lens,
             out_cache_loc,
-            len(reqs),
         )
 
     for i, req in enumerate(reqs):
