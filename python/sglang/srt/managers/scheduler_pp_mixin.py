@@ -39,7 +39,7 @@ from sglang.srt.observability.req_time_stats import set_time_batch
 from sglang.srt.runtime_context import get_disagg, get_parallel
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.utils import DynamicGradMode, broadcast_pyobj, point_to_point_pyobj
-from sglang.srt.utils.common import get_device_module, is_xpu
+from sglang.srt.utils.common import get_device_module
 
 logger = logging.getLogger(__name__)
 
@@ -1364,8 +1364,8 @@ class SchedulerPPMixin:
                 **logprob_dict,
             }
 
-        # PP + spec decode: the last PP rank serializes the draft tree so
-        # non-last ranks can rebuild EagleVerifyInput on the next iteration.
+        # PP + spec decode: nested raw-tree tensors are flattened by
+        # _split_tensor_dict and relayed over the device channel.
         if result.pp_verify_input_raw:
             tensor_dict.update(result.pp_verify_input_raw.to_tensor_dict())
 
@@ -1556,9 +1556,7 @@ class SchedulerPPMixin:
         )
 
         if isinstance(batch.spec_info, EaglePPVerifyInputRaw):
-            output_result.accept_lens = torch.tensor(
-                batch.spec_info.accept_lens, dtype=torch.int64
-            )
+            output_result.accept_lens = batch.spec_info.accept_lens.to(torch.int64)
             output_result.speculative_num_draft_tokens = (
                 self.server_args.speculative_num_draft_tokens
             )
@@ -1768,18 +1766,10 @@ class SchedulerPPMixin:
         batch_result = None
         send_output_work = []
 
-        # On CUDA, isend is async: it enqueues to the stream and returns,
-        # so every rank can send first safely. On some backends isend is
-        # effectively blocking and does not return until the peer posts a
-        # matching recv; if every PP rank sends first, all ranks block
-        # waiting for a receiver and the ring deadlocks. Order send/recv
-        # by pp_rank parity (even: send->recv, odd: recv->send) so each
-        # adjacent pair has one sender and one receiver posted at the
-        # same time.
-
-        # CUDA: send first
-        # XPU: even ranks send first, odd ranks recv first.
-        send_first = (not is_xpu()) or ((self.ps.pp_rank % 2) == 0)
+        # isend only makes the CPU call asynchronous. Device P2P work remains
+        # stream ordered, so all stages enqueueing several sends before any
+        # recv can form a ring wait. Pair adjacent stages by rank parity.
+        send_first = (self.ps.pp_rank % 2) == 0
 
         def _do_send():
             return self._pp_send_output_to_next_stage(

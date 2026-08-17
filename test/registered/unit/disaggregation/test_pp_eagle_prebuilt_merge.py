@@ -56,21 +56,25 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
 
         self.assertTrue(torch.equal(batch.input_ids, bonus_tokens))
         self.assertIsInstance(batch.spec_info, EaglePPVerifyInputRaw)
-        self.assertEqual(
-            batch.spec_info.draft_tokens,
-            [[101, 101, 101, 101], [202, 202, 202, 202]],
+        self.assertTrue(
+            torch.equal(
+                batch.spec_info.draft_tokens,
+                torch.tensor([[101, 101, 101, 101], [202, 202, 202, 202]]),
+            )
         )
 
         running_raw = EaglePPVerifyInputRaw(
-            draft_tokens=[[11, 12, 13, 14]],
-            bonus_tokens=[11],
-            top_scores_index=[[0, 1, 2]],
-            parent_list=[[-1, 0, 1]],
-            accept_lens=[2],
+            draft_tokens=torch.tensor([[11, 12, 13, 14]]),
+            bonus_tokens=torch.tensor([11]),
+            top_scores_index=torch.tensor([[0, 1, 2]]),
+            parent_list=torch.tensor([[-1, 0, 1]]),
+            accept_lens=torch.tensor([2]),
         )
         running_raw.merge_batch(batch.spec_info)
-        self.assertEqual(len(running_raw.draft_tokens), 3)
-        self.assertEqual(running_raw.bonus_tokens, [11, 101, 202])
+        self.assertEqual(running_raw.draft_tokens.shape[0], 3)
+        self.assertTrue(
+            torch.equal(running_raw.bonus_tokens, torch.tensor([11, 101, 202]))
+        )
 
     def test_non_pp_keeps_eagle_draft_input(self):
         bonus_tokens = torch.tensor([303], dtype=torch.int64)
@@ -103,11 +107,50 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
             torch.tensor([7, 9], dtype=torch.int64), num_draft=4
         )
 
-        self.assertEqual(raw.draft_tokens, [[7, 7, 7, 7], [9, 9, 9, 9]])
-        self.assertEqual(raw.parent_list, [[-1, 0, 1], [-1, 0, 1]])
-        self.assertEqual(raw.top_scores_index, [[0, 1, 2], [0, 1, 2]])
-        self.assertEqual(raw.accept_lens, [1, 1])
+        self.assertTrue(
+            torch.equal(raw.draft_tokens, torch.tensor([[7, 7, 7, 7], [9, 9, 9, 9]]))
+        )
+        self.assertTrue(
+            torch.equal(raw.parent_list, torch.tensor([[-1, 0, 1], [-1, 0, 1]]))
+        )
+        self.assertTrue(
+            torch.equal(raw.top_scores_index, torch.tensor([[0, 1, 2], [0, 1, 2]]))
+        )
+        self.assertTrue(torch.equal(raw.accept_lens, torch.tensor([1, 1])))
         self.assertIsNone(raw.accept_index)
+
+    def test_raw_tree_filter_and_merge_preserve_tensor_order(self):
+        raw = EaglePPVerifyInputRaw(
+            draft_tokens=torch.tensor(
+                [[10, 11, 12, 13], [20, 21, 22, 23], [30, 31, 32, 33]]
+            ),
+            bonus_tokens=torch.tensor([10, 20, 30]),
+            top_scores_index=torch.tensor([[0, 1, 2]] * 3),
+            parent_list=torch.tensor([[-1, 0, 1]] * 3),
+            accept_lens=torch.tensor([1, 2, 3]),
+            accept_index=torch.tensor([[0, 1], [2, 3], [4, 5]]),
+        )
+        raw.filter_batch(torch.tensor([2, 0]))
+
+        self.assertTrue(torch.equal(raw.bonus_tokens, torch.tensor([30, 10])))
+        self.assertTrue(torch.equal(raw.accept_lens, torch.tensor([3, 1])))
+        self.assertTrue(torch.equal(raw.accept_index, torch.tensor([[4, 5], [0, 1]])))
+
+        other = EaglePPVerifyInputRaw(
+            draft_tokens=torch.tensor([[40, 41, 42, 43]]),
+            bonus_tokens=torch.tensor([40]),
+            top_scores_index=torch.tensor([[0, 1, 2]]),
+            parent_list=torch.tensor([[-1, 0, 1]]),
+            accept_lens=torch.tensor([4]),
+            accept_index=torch.tensor([[6, 7]]),
+        )
+        raw.merge_batch(other)
+
+        self.assertTrue(torch.equal(raw.bonus_tokens, torch.tensor([30, 10, 40])))
+        self.assertTrue(torch.equal(raw.accept_lens, torch.tensor([3, 1, 4])))
+        self.assertTrue(
+            torch.equal(raw.accept_index, torch.tensor([[4, 5], [0, 1], [6, 7]]))
+        )
 
     def test_worker_fallback_normalizes_direct_pd_handoff(self):
         bonus_tokens = torch.tensor([401, 402], dtype=torch.int64)
@@ -121,9 +164,11 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
 
         self.assertTrue(torch.equal(batch.input_ids, bonus_tokens))
         self.assertIsInstance(batch.spec_info, EaglePPVerifyInputRaw)
-        self.assertEqual(
-            batch.spec_info.draft_tokens,
-            [[401, 401, 401, 401], [402, 402, 402, 402]],
+        self.assertTrue(
+            torch.equal(
+                batch.spec_info.draft_tokens,
+                torch.tensor([[401, 401, 401, 401], [402, 402, 402, 402]]),
+            )
         )
 
     def test_pp_non_last_idle_does_not_require_draft_worker(self):
@@ -142,11 +187,11 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
 
     def test_pp_raw_rebuild_uses_current_verify_mask_contract(self):
         raw = EaglePPVerifyInputRaw(
-            draft_tokens=[[10, 11, 12, 13], [20, 21, 22, 23]],
-            bonus_tokens=[10, 20],
-            top_scores_index=[[0, 1, 2], [0, 1, 2]],
-            parent_list=[[-1, 0, 1], [-1, 0, 1]],
-            accept_lens=[2, 3],
+            draft_tokens=torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]]),
+            bonus_tokens=torch.tensor([10, 20]),
+            top_scores_index=torch.tensor([[0, 1, 2], [0, 1, 2]]),
+            parent_list=torch.tensor([[-1, 0, 1], [-1, 0, 1]]),
+            accept_lens=torch.tensor([2, 3]),
         )
         mask_buffer = torch.empty(32, dtype=torch.bool)
         verify_mask = SimpleNamespace(

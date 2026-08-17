@@ -116,12 +116,16 @@ class P2PWork:
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+    tensor_dict: Dict[str, Union[torch.Tensor, Any]], prefix: str = ""
 ) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
+
+    Nested tensor keys are flattened with ``%`` so their payloads also use the
+    device channel instead of being pickled as part of a Python dictionary.
+    ``_update_nested_dict`` reverses this transformation on receive.
     """
     metadata_list: List[Tuple[str, Any]] = []
     tensor_list: List[torch.Tensor] = []
@@ -133,12 +137,29 @@ def _split_tensor_dict(
             # receiving side will set the device index.
             device = value.device.type
             metadata_list.append(
-                (key, TensorMetadata(device, value.dtype, value.size()))
+                (prefix + key, TensorMetadata(device, value.dtype, value.size()))
             )
             tensor_list.append(value)
+        elif isinstance(value, dict):
+            if not value:
+                metadata_list.append((prefix + key, value))
+            inner_metadata, inner_tensors = _split_tensor_dict(
+                value, prefix + key + "%"
+            )
+            metadata_list.extend(inner_metadata)
+            tensor_list.extend(inner_tensors)
         else:
-            metadata_list.append((key, value))
+            metadata_list.append((prefix + key, value))
     return metadata_list, tensor_list
+
+
+def _update_nested_dict(nested_dict: Dict[str, Any], flattened_key: str, value: Any):
+    """Rebuild a nested dictionary from a key flattened by _split_tensor_dict."""
+    key_parts = flattened_key.split("%")
+    current = nested_dict
+    for key in key_parts[:-1]:
+        current = current.setdefault(key, {})
+    current[key_parts[-1]] = value
 
 
 _group_name_counter: Dict[str, int] = {}
@@ -1605,7 +1626,7 @@ class GroupCoordinator:
                     )
                     if tensor.numel() == 0:
                         # Skip broadcasting empty tensors.
-                        tensor_dict[key] = tensor
+                        _update_nested_dict(tensor_dict, key, tensor)
                         continue
                     if tensor.is_cpu:
                         # use metadata_group for CPU tensors
@@ -1621,9 +1642,9 @@ class GroupCoordinator:
                             tensor, src=self.ranks[src], group=group, async_op=True
                         )
                     async_handles.append(handle)
-                    tensor_dict[key] = tensor
+                    _update_nested_dict(tensor_dict, key, tensor)
                 else:
-                    tensor_dict[key] = value
+                    _update_nested_dict(tensor_dict, key, value)
             for async_handle in async_handles:
                 async_handle.wait()
         return tensor_dict
@@ -1713,8 +1734,8 @@ class GroupCoordinator:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
                 if tensor.numel() == 0:
-                    # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
+                    # Skip receiving empty tensors.
+                    _update_nested_dict(tensor_dict, key, tensor)
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
@@ -1738,9 +1759,9 @@ class GroupCoordinator:
                     tensor = all_gather_group.all_gather(tensor, dim=0)
                     tensor = tensor.reshape(orig_shape)
 
-                tensor_dict[key] = tensor
+                _update_nested_dict(tensor_dict, key, tensor)
             else:
-                tensor_dict[key] = value
+                _update_nested_dict(tensor_dict, key, value)
         return tensor_dict
 
     def barrier(self):

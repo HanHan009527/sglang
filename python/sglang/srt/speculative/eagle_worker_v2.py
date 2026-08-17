@@ -1396,20 +1396,22 @@ class EAGLEWorkerV2(BaseSpecWorker):
                         self.draft_worker.draft(batch)
                     )
 
-        # PP last rank: serialize the draft tree for PP relay.
+        # PP last rank: keep the draft tree on device for PP relay.
         if self._pp_enabled and self._pp_is_last_rank:
             batch_output.pp_verify_input_raw = EaglePPVerifyInputRaw(
                 draft_tokens=pp_draft_tokens.reshape(
                     batch.batch_size(), self.speculative_num_draft_tokens
-                ).tolist(),
+                ).to(self.device, torch.int64),
                 bonus_tokens=batch_output.next_draft_input.bonus_tokens.to(
-                    torch.int64
-                ).tolist(),
-                top_scores_index=pp_top_scores_index.tolist(),
-                parent_list=pp_parent_list.tolist(),
-                accept_lens=batch_output.accept_lens.tolist(),
+                    self.device, torch.int64
+                ),
+                top_scores_index=pp_top_scores_index.to(self.device, torch.int64),
+                parent_list=pp_parent_list.to(self.device, torch.int64),
+                accept_lens=batch_output.accept_lens.to(self.device, torch.int64),
                 accept_index=(
-                    batch_output.accept_index.tolist() if self.topk > 1 else None
+                    batch_output.accept_index.to(self.device, torch.int64)
+                    if self.topk > 1
+                    else None
                 ),
             )
 
@@ -1487,18 +1489,14 @@ class EAGLEWorkerV2(BaseSpecWorker):
         attention backend buffers here.
         """
         raw: EaglePPVerifyInputRaw = batch.spec_info
-        device = batch.seq_lens.device
-
         topk = self.topk
         spec_steps = self.speculative_num_steps
         num_draft = self.speculative_num_draft_tokens
 
-        bonus_tokens = torch.tensor(raw.bonus_tokens, dtype=torch.long, device=device)
-        draft_tokens = torch.tensor(raw.draft_tokens, dtype=torch.long, device=device)
-        parent_list = torch.tensor(raw.parent_list, dtype=torch.long, device=device)
-        top_scores_index = torch.tensor(
-            raw.top_scores_index, dtype=torch.long, device=device
-        )
+        bonus_tokens = raw.bonus_tokens.to(torch.long)
+        draft_tokens = raw.draft_tokens.to(torch.long)
+        parent_list = raw.parent_list.to(torch.long)
+        top_scores_index = raw.top_scores_index.to(torch.long)
 
         # draft_tokens is [bs, num_draft_tokens] with bonus as col 0.
         # build_tree_kernel_efficient expects draft_tokens without bonus.

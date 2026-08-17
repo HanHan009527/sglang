@@ -20,6 +20,9 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_utils import (
     get_draft_recurrent_hidden_state_spec_from_config,
 )
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class _SpecAlgorithm:
@@ -352,6 +355,7 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
         synchronize=Mock(side_effect=lambda: events.append("sync"))
     )
     scheduler = SimpleNamespace(
+        ps=SimpleNamespace(pp_rank=0),
         pp_group=SimpleNamespace(is_last_rank=False),
         copy_stream_ctx=nullcontext(),
         copy_stream=SimpleNamespace(
@@ -416,6 +420,7 @@ def test_pp_disagg_output_ring_last_stage_starts_relay_chain():
     target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
     recorded_event = Mock()
     scheduler = SimpleNamespace(
+        ps=SimpleNamespace(pp_rank=1),
         pp_group=SimpleNamespace(is_last_rank=True),
         copy_stream_ctx=nullcontext(),
         copy_stream=SimpleNamespace(wait_stream=Mock()),
@@ -460,6 +465,7 @@ def test_pp_disagg_output_origin_send_survives_empty_return_slot():
     send_work = [object()]
     origin_target = object()
     scheduler = SimpleNamespace(
+        ps=SimpleNamespace(pp_rank=1),
         pp_group=SimpleNamespace(is_last_rank=True),
         _pp_send_output_to_next_stage=Mock(return_value=send_work),
         _pp_recv_dict_from_prev_stage=Mock(),
@@ -481,6 +487,49 @@ def test_pp_disagg_output_origin_send_survives_empty_return_slot():
     scheduler._pp_send_output_to_next_stage.assert_called_once()
     scheduler._pp_recv_dict_from_prev_stage.assert_not_called()
     scheduler._pp_commit_comm_work.assert_not_called()
+
+
+def test_pp_output_ring_uses_rank_parity_for_send_recv_order():
+    target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
+
+    for pp_rank, expected_order in ((0, ["send", "recv"]), (1, ["recv", "send"])):
+        events = []
+        scheduler = SimpleNamespace(
+            ps=SimpleNamespace(pp_rank=pp_rank),
+            pp_group=SimpleNamespace(is_last_rank=pp_rank == 1),
+            copy_stream_ctx=nullcontext(),
+            copy_stream=SimpleNamespace(wait_stream=Mock()),
+            schedule_stream=object(),
+            device_module=SimpleNamespace(
+                Event=Mock(return_value=Mock()),
+                current_stream=Mock(return_value=object()),
+            ),
+            _pp_send_output_to_next_stage=Mock(
+                side_effect=lambda *_args: events.append("send") or []
+            ),
+            _pp_recv_dict_from_prev_stage=Mock(
+                side_effect=lambda: events.append("recv")
+                or {"next_token_ids": object()}
+            ),
+            _pp_prep_batch_result=Mock(return_value=object()),
+        )
+
+        with patch(
+            "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+            return_value=False,
+        ):
+            SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+                scheduler,
+                next_first_rank_mb_id=0,
+                next_mb_id=0,
+                mbs=[target],
+                mb_metadata=[object()],
+                last_rank_comm_queue=deque(),
+                pp_outputs=None,
+                relay_output_immediately=False,
+            )
+
+        assert events == expected_order
 
 
 def test_pp_prefill_rebuilds_one_authoritative_draft_input():
@@ -543,11 +592,11 @@ def test_pp_spec_decode_copies_cpu_bound_result_before_processing():
         {
             "next_token_ids": bonus_tokens,
             "pp_spec_output": {
-                "draft_tokens": [[11, 2, 3, 4], [13, 5, 6, 7]],
-                "bonus_tokens": [11, 13],
-                "top_scores_index": [[0, 1, 2], [0, 1, 2]],
-                "parent_list": [[-1, 0, 1], [-1, 0, 1]],
-                "accept_lens": [3, 2],
+                "draft_tokens": torch.tensor([[11, 2, 3, 4], [13, 5, 6, 7]]),
+                "bonus_tokens": bonus_tokens,
+                "top_scores_index": torch.tensor([[0, 1, 2], [0, 1, 2]]),
+                "parent_list": torch.tensor([[-1, 0, 1], [-1, 0, 1]]),
+                "accept_lens": torch.tensor([3, 2]),
                 "accept_index": None,
             },
         }
