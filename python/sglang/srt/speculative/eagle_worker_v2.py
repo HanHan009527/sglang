@@ -156,6 +156,17 @@ def _slice_draft_output_to_local_tokens(
     )
 
 
+def _pp_tail_draft_forward_mode(forward_mode: ForwardMode) -> ForwardMode:
+    """Preserve idle semantics while preparing the PP tail draft.
+
+    Idle DP ranks still enter ``draft()`` so zero-token MegaMoE collectives stay
+    aligned with active peers, but they must not be reclassified as ordinary
+    decode batches.  The latter would make eager DSA metadata consume empty
+    request metadata as if it described a real decode batch.
+    """
+    return forward_mode if forward_mode.is_idle() else ForwardMode.DECODE
+
+
 class EagleDraftWorker(EagleDraftWorkerBase):
     def __init__(
         self,
@@ -1425,7 +1436,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
                 # PP last rank: produce next-iter draft raw for cross-rank relay.
                 if self._pp_enabled and self._pp_is_last_rank:
-                    batch.forward_mode = ForwardMode.DECODE
+                    batch.forward_mode = _pp_tail_draft_forward_mode(batch.forward_mode)
                     batch.spec_info = batch_output.next_draft_input
                     # Use post-accept seq_lens so draft/draft_extend write KV
                     # at the correct slots.

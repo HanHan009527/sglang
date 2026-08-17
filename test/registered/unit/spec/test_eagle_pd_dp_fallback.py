@@ -8,7 +8,10 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
 )
-from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorkerV2
+from sglang.srt.speculative.eagle_worker_v2 import (
+    EAGLEWorkerV2,
+    _pp_tail_draft_forward_mode,
+)
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -99,6 +102,18 @@ class TestEaglePDDPFallback(CustomTestCase):
             worker.requires_dp_attention_eager_forward(
                 SimpleNamespace(spec_info=SimpleNamespace(dsa_topk_indices=None))
             )
+        )
+
+    def test_pp_tail_draft_preserves_idle_mode(self):
+        self.assertEqual(
+            _pp_tail_draft_forward_mode(ForwardMode.IDLE), ForwardMode.IDLE
+        )
+        self.assertEqual(
+            _pp_tail_draft_forward_mode(ForwardMode.DECODE), ForwardMode.DECODE
+        )
+        self.assertEqual(
+            _pp_tail_draft_forward_mode(ForwardMode.TARGET_VERIFY),
+            ForwardMode.DECODE,
         )
 
 
