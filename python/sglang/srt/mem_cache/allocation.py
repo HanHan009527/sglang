@@ -677,7 +677,9 @@ def assign_req_to_token_pool_torch(
     ) + torch.repeat_interleave(
         start_offset - segment_offsets, lengths, output_size=output_size
     )
-    req_to_token[row_indices, column_indices] = out_cache_loc
+    req_to_token[row_indices, column_indices] = out_cache_loc.to(
+        dtype=req_to_token.dtype
+    )
 
 
 def _alloc_paged_token_slots_extend_npu(*args, **kwargs):
