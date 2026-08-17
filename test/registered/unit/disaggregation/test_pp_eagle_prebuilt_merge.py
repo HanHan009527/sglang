@@ -1,7 +1,7 @@
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -11,6 +11,7 @@ from sglang.srt.disaggregation.decode_schedule_batch_mixin import (
 from sglang.srt.speculative.eagle_info import (
     EagleDraftInput,
     EaglePPVerifyInputRaw,
+    EagleVerifyInput,
 )
 from sglang.srt.speculative.eagle_utils import TreeMaskMode
 from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorkerV2
@@ -184,6 +185,107 @@ class TestPPEaglePrebuiltMerge(unittest.TestCase):
 
         self.assertTrue(verify_input.is_verify_input())
         self.assertEqual(verify_input.draft_token_num, 4)
+
+    def test_pp_idle_draft_discards_raw_relay_and_builds_verify_input(self):
+        pp_raw_relay = (
+            torch.empty((0,), dtype=torch.int64),
+            torch.empty((0,), dtype=torch.int64),
+            torch.empty((0,), dtype=torch.int64),
+        )
+        draft = Mock(return_value=pp_raw_relay)
+        draft_worker = SimpleNamespace(
+            draft=draft,
+            draft_runner=SimpleNamespace(tp_group=object()),
+            draft_tp_context=lambda _group: nullcontext(),
+        )
+        spec_algorithm = SimpleNamespace(is_standalone=lambda: False)
+        worker = SimpleNamespace(
+            _draft_worker=draft_worker,
+            draft_worker=draft_worker,
+            topk=1,
+            speculative_num_steps=3,
+            speculative_num_draft_tokens=4,
+            device="cpu",
+            speculative_algorithm=spec_algorithm,
+            target_worker=SimpleNamespace(
+                model_config=SimpleNamespace(vocab_size=1024)
+            ),
+        )
+        batch = SimpleNamespace(
+            global_num_tokens=torch.tensor([0, 1], dtype=torch.int64),
+            spec_algorithm=spec_algorithm,
+            spec_info=None,
+            is_extend_in_batch=False,
+        )
+
+        with patch(
+            "sglang.srt.speculative.eagle_worker_v2.get_draft_recurrent_hidden_state_spec",
+            return_value=(4, torch.float32),
+        ), patch(
+            "sglang.srt.speculative.eagle_info.get_spec",
+            return_value=SimpleNamespace(speculative_use_rejection_sampling=False),
+        ), patch(
+            "sglang.srt.speculative.eagle_worker_v2._should_force_symmetric_spec_moe_padding",
+            return_value=True,
+        ), patch(
+            "sglang.srt.speculative.eagle_worker_v2.speculative_moe_backend_context",
+            side_effect=nullcontext,
+        ), patch(
+            "sglang.srt.speculative.eagle_worker_v2.speculative_moe_a2a_backend_context",
+            side_effect=nullcontext,
+        ), patch(
+            "sglang.srt.speculative.eagle_worker_v2.spec_stage_span",
+            side_effect=lambda _name: nullcontext(),
+        ):
+            verify_input = EAGLEWorkerV2._build_idle_verify_input(worker, batch)
+
+        draft.assert_called_once_with(batch)
+        self.assertIsInstance(verify_input, EagleVerifyInput)
+        self.assertTrue(verify_input.is_verify_input())
+        self.assertEqual(verify_input.draft_token_num, 4)
+
+    def test_idle_without_symmetric_moe_skips_draft(self):
+        draft = Mock()
+        draft_worker = SimpleNamespace(
+            draft=draft,
+            draft_runner=SimpleNamespace(tp_group=object()),
+            draft_tp_context=lambda _group: nullcontext(),
+        )
+        spec_algorithm = SimpleNamespace(is_standalone=lambda: False)
+        worker = SimpleNamespace(
+            _draft_worker=draft_worker,
+            draft_worker=draft_worker,
+            topk=1,
+            speculative_num_steps=3,
+            speculative_num_draft_tokens=4,
+            device="cpu",
+            speculative_algorithm=spec_algorithm,
+            target_worker=SimpleNamespace(
+                model_config=SimpleNamespace(vocab_size=1024)
+            ),
+        )
+        batch = SimpleNamespace(
+            global_num_tokens=torch.tensor([0, 0], dtype=torch.int64),
+            spec_algorithm=spec_algorithm,
+            spec_info=None,
+            is_extend_in_batch=False,
+        )
+
+        with patch(
+            "sglang.srt.speculative.eagle_worker_v2.get_draft_recurrent_hidden_state_spec",
+            return_value=(4, torch.float32),
+        ), patch(
+            "sglang.srt.speculative.eagle_info.get_spec",
+            return_value=SimpleNamespace(speculative_use_rejection_sampling=False),
+        ), patch(
+            "sglang.srt.speculative.eagle_worker_v2._should_force_symmetric_spec_moe_padding",
+            return_value=False,
+        ):
+            verify_input = EAGLEWorkerV2._build_idle_verify_input(worker, batch)
+
+        draft.assert_not_called()
+        self.assertIsInstance(verify_input, EagleVerifyInput)
+        self.assertTrue(verify_input.is_verify_input())
 
     def test_pp_raw_rebuild_uses_current_verify_mask_contract(self):
         raw = EaglePPVerifyInputRaw(

@@ -1488,7 +1488,8 @@ class EAGLEWorkerV2(BaseSpecWorker):
             )
 
         # A sparse DP batch on a draft-owning rank must still run the draft
-        # model when DeepEP requires symmetric dispatch generations.
+        # model when the speculative MoE backend requires symmetric dispatch
+        # generations.
         capture_mode = (
             CaptureHiddenMode.NULL
             if self.speculative_algorithm.is_standalone()
@@ -1521,7 +1522,11 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 speculative_moe_a2a_backend_context(),
                 spec_stage_span("draft"),
             ):
-                return self.draft_worker.draft(batch)
+                # Draft participation is required here only to keep MoE
+                # collectives in lockstep with active DP peers. Under PP the
+                # draft return value is a raw relay tuple, not an
+                # EagleVerifyInput, so never forward it to target verify.
+                self.draft_worker.draft(batch)
 
         return EagleVerifyInput.create_idle_input(
             self.topk,
