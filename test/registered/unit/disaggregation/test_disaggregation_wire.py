@@ -21,6 +21,11 @@ from sglang.srt.disaggregation.utils import (
     setup_state_kv_args,
     summarize_pd_bootstrap_tensor,
 )
+from sglang.srt.environ import envs
+from sglang.srt.layers.attention.dsa.utils import (
+    should_remap_pd_dsa_seed_to_local_slots,
+    should_use_dsa_fused_topk,
+)
 from sglang.srt.managers.overlap_utils import FutureMap, RelayPayload
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.speculative.eagle_disaggregation import (
@@ -226,6 +231,7 @@ class TestEagleDsaSeedTransfer(unittest.TestCase):
             speculative_eagle_topk=1,
             speculative_num_steps=5,
             enable_multi_layer_eagle=False,
+            disaggregation_mode="null",
         )
         last_tokens = torch.tensor([11, 12], dtype=torch.int64)
 
@@ -252,6 +258,189 @@ class TestEagleDsaSeedTransfer(unittest.TestCase):
         )
         self.assertIsNone(draft_input.dsa_topk_indices)
         self.assertTrue(draft_input.cuda_graph_compatible)
+
+    def test_pd_decode_remaps_requests_and_invalid_rows_fail_closed(self):
+        req_to_token = torch.tensor(
+            [
+                [0, 0, 0, 0],
+                [700, 801, 902, 990],
+                [410, 420, 430, 440],
+                [101, 205, 309, 450],
+            ],
+            dtype=torch.int32,
+        )
+        batch = SimpleNamespace(
+            reqs=[
+                self._make_req(torch.tensor([2, 0, -1], dtype=torch.int32))
+                for _ in range(2)
+            ],
+            device="cpu",
+            enable_overlap=False,
+            req_pool_indices=torch.tensor([3, 1], dtype=torch.int64),
+            req_to_token_pool=SimpleNamespace(req_to_token=req_to_token),
+            seq_lens=torch.tensor([3, 4], dtype=torch.int32),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    index_share_for_mtp_iteration=True, index_topk=2048
+                )
+            ),
+        )
+        args = SimpleNamespace(
+            speculative_eagle_topk=1,
+            speculative_num_steps=5,
+            enable_multi_layer_eagle=False,
+            disaggregation_mode="decode",
+            enable_hisparse=False,
+            dcp_size=1,
+        )
+        with envs.SGLANG_DSA_FUSE_TOPK.override(True), patch(
+            "sglang.srt.layers.attention.dsa.utils.is_cuda", return_value=True
+        ):
+            draft = build_eagle_disagg_draft_input(
+                batch, args, torch.tensor([11, 12]), None
+            )
+        self.assertEqual(
+            draft.dsa_topk_indices.tolist(),
+            [[309, 101, -1], [902, 700, -1]],
+        )
+        self.assertTrue(draft.cuda_graph_compatible)
+
+        invalid_cases = (
+            (torch.tensor([-2, 0, -1]), 3, False),  # below the sentinel
+            (torch.tensor([3, 0, -1]), 3, False),  # at/above seq_len
+            (torch.tensor([4, 0, -1]), 5, False),  # at/above table width only
+            (torch.tensor([0, 0, -1]), 3, True),  # request slot 0 has no allocation
+        )
+        for seed, seq_len, zero_slot_case in invalid_cases:
+            batch.reqs[0].output_dsa_topk_indices = seed
+            batch.reqs[1].output_dsa_topk_indices = torch.tensor([2, 0, -1])
+            batch.req_pool_indices[0] = 0 if zero_slot_case else 3
+            batch.seq_lens[0] = seq_len
+            with envs.SGLANG_DSA_FUSE_TOPK.override(True), patch(
+                "sglang.srt.layers.attention.dsa.utils.is_cuda", return_value=True
+            ):
+                draft = build_eagle_disagg_draft_input(
+                    batch, args, torch.tensor([11, 12]), None
+                )
+            self.assertIsNone(draft.dsa_topk_indices)
+            self.assertFalse(draft.cuda_graph_compatible)
+
+    def test_pd_decode_seedless_fake_input_stays_incompatible(self):
+        batch = SimpleNamespace(
+            reqs=[self._make_req(None)],
+            device="cpu",
+            enable_overlap=False,
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    index_share_for_mtp_iteration=True, index_topk=2048
+                )
+            ),
+        )
+        args = SimpleNamespace(
+            speculative_eagle_topk=1,
+            speculative_num_steps=5,
+            enable_multi_layer_eagle=False,
+            disaggregation_mode="decode",
+            enable_hisparse=False,
+            dcp_size=1,
+        )
+        with envs.SGLANG_DSA_FUSE_TOPK.override(True), patch(
+            "sglang.srt.layers.attention.dsa.utils.is_cuda", return_value=True
+        ):
+            draft = build_eagle_disagg_draft_input(
+                batch, args, torch.tensor([11]), None
+            )
+        self.assertIsNone(draft.dsa_topk_indices)
+        self.assertFalse(draft.cuda_graph_compatible)
+
+    def test_pd_seed_remap_exclusions_preserve_wire_positions(self):
+        wire_seed = torch.tensor([2, 0, -1], dtype=torch.int32)
+        batch = SimpleNamespace(
+            reqs=[self._make_req(wire_seed)],
+            device="cpu",
+            enable_overlap=False,
+            req_pool_indices=torch.tensor([1], dtype=torch.int64),
+            req_to_token_pool=SimpleNamespace(
+                req_to_token=torch.tensor(
+                    [[0, 0, 0], [101, 205, 309]], dtype=torch.int32
+                )
+            ),
+            seq_lens=torch.tensor([3], dtype=torch.int32),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    index_share_for_mtp_iteration=True, index_topk=2048
+                )
+            ),
+        )
+        args = SimpleNamespace(
+            speculative_eagle_topk=1,
+            speculative_num_steps=5,
+            enable_multi_layer_eagle=False,
+            disaggregation_mode="decode",
+            enable_hisparse=False,
+            dcp_size=1,
+        )
+        cases = (
+            (False, True, "decode", False, 1),
+            (True, False, "decode", False, 1),
+            (True, True, "prefill", False, 1),
+            (True, True, "decode", True, 1),
+            (True, True, "decode", False, 2),
+        )
+        for fuse, cuda, mode, hisparse, dcp in cases:
+            args.disaggregation_mode = mode
+            args.enable_hisparse = hisparse
+            args.dcp_size = dcp
+            with envs.SGLANG_DSA_FUSE_TOPK.override(fuse), patch(
+                "sglang.srt.layers.attention.dsa.utils.is_cuda", return_value=cuda
+            ):
+                draft = build_eagle_disagg_draft_input(
+                    batch, args, torch.tensor([11]), None
+                )
+            with self.subTest(
+                fuse=fuse,
+                cuda=cuda,
+                mode=mode,
+                hisparse=hisparse,
+                dcp=dcp,
+            ):
+                self.assertTrue(torch.equal(draft.dsa_topk_indices[0], wire_seed))
+                self.assertTrue(draft.cuda_graph_compatible)
+
+    def test_pd_decode_fused_topk_gate_matrix(self):
+        args = SimpleNamespace(
+            disaggregation_mode="decode", enable_hisparse=False, dcp_size=1
+        )
+        cases = (
+            # fuse, cuda, mode, hisparse, dcp, remap, use_fused_topk
+            (True, True, "decode", False, 1, True, True),
+            (False, True, "decode", False, 1, False, False),
+            (True, False, "decode", False, 1, False, False),
+            (True, True, "prefill", False, 1, False, False),
+            (True, True, "decode", True, 1, False, False),
+            (True, True, "decode", False, 2, False, False),
+            (True, True, "null", False, 1, False, True),
+        )
+        for fuse, cuda, mode, hisparse, dcp, expected_remap, expected_fused in cases:
+            args.disaggregation_mode = mode
+            args.enable_hisparse = hisparse
+            args.dcp_size = dcp
+            with envs.SGLANG_DSA_FUSE_TOPK.override(fuse), patch(
+                "sglang.srt.layers.attention.dsa.utils.is_cuda", return_value=cuda
+            ):
+                with self.subTest(
+                    fuse=fuse,
+                    cuda=cuda,
+                    mode=mode,
+                    hisparse=hisparse,
+                    dcp=dcp,
+                ):
+                    self.assertEqual(
+                        should_remap_pd_dsa_seed_to_local_slots(args), expected_remap
+                    )
+                    self.assertEqual(
+                        should_use_dsa_fused_topk(args, True), expected_fused
+                    )
 
     def test_future_map_initializes_seed_buffer_after_seedless_payload(self):
         future_map = object.__new__(FutureMap)
