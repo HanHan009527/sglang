@@ -87,6 +87,7 @@ class DSATopKBackend(Enum):
         row_starts: Optional[torch.Tensor] = None,
         batch_idx_list: Optional[List[int]] = None,
         force_unfused_topk: bool = False,
+        diagnostic_page_capacity: Optional[int] = None,
     ) -> torch.Tensor:
         if not envs.SGLANG_DSA_FUSE_TOPK.get() or force_unfused_topk:
             return self.topk_func(logits, lengths, topk, row_starts=row_starts)
@@ -112,7 +113,13 @@ class DSATopKBackend(Enum):
             == logits.shape[0]
             == attn_metadata.real_page_table.shape[0]
         ):
-            return _topk_transform_v2_paged(logits, lengths, topk, attn_metadata)
+            return _topk_transform_v2_paged(
+                logits,
+                lengths,
+                topk,
+                attn_metadata,
+                diagnostic_page_capacity=diagnostic_page_capacity,
+            )
 
         # The legacy transforms below read attn_metadata.page_table_1 (page_size=1),
         # which is always present here: the fold only drops it for the decode case
@@ -263,6 +270,7 @@ def _topk_transform_v2_paged(
     lengths: torch.Tensor,
     topk: int,
     attn_metadata,
+    diagnostic_page_capacity: Optional[int] = None,
 ) -> torch.Tensor:
     """Fused top-k + page-table transform via the DeepSeek-V4 v2 JIT kernel.
 
@@ -322,8 +330,114 @@ def _topk_transform_v2_paged(
 
     page_size = attn_metadata.page_size
     out = logits.new_full((num_rows, topk), -1, dtype=torch.int32)
-    topk_transform_512_v2(logits, lengths_i32, page_table, out, page_size, plan)
+
+    diagnostic_enabled = envs.SGLANG_ENABLE_ASYNC_ASSERT.get()
+    raw_out = None
+    if diagnostic_enabled:
+        if diagnostic_page_capacity is None:
+            raise ValueError(
+                "DSA top-k v2 diagnostic requires the active index-K page capacity"
+            )
+        _probe_topk_v2_inputs(
+            lengths=lengths_i32,
+            score_width=logits.shape[1],
+            page_table=page_table,
+            page_size=page_size,
+            page_capacity=diagnostic_page_capacity,
+        )
+        # Use #26788's optional output from this exact fused launch. Initializing
+        # to an otherwise-invalid value also detects an output slot the kernel
+        # failed to write; no second top-k selection is launched.
+        raw_out = logits.new_full((num_rows, topk), -2, dtype=torch.int32)
+
+    if diagnostic_enabled:
+        topk_transform_512_v2(
+            logits, lengths_i32, page_table, out, page_size, plan, raw_out
+        )
+        _probe_topk_v2_raw_output(
+            raw_indices=raw_out,
+            transformed_indices=out,
+            lengths=lengths_i32,
+        )
+    else:
+        # Preserve the original production call exactly when diagnostics are off.
+        topk_transform_512_v2(logits, lengths_i32, page_table, out, page_size, plan)
     return out
+
+
+def _probe_topk_v2_inputs(
+    *,
+    lengths: torch.Tensor,
+    score_width: int,
+    page_table: torch.Tensor,
+    page_size: int,
+    page_capacity: int,
+) -> None:
+    """Queue fixed-shape input checks before the fused v2 top-k launch.
+
+    The compact table tail may be stale, so only entries below each row's
+    ``ceil(length / page_size)`` live prefix are checked. This function never
+    indexes the table with an untrusted raw top-k result.
+    """
+    context = "DSA top-k v2 producer input"
+    torch._assert_async(
+        (lengths >= 0).all(),
+        f"negative sequence length: {context}",
+    )
+    torch._assert_async(
+        (lengths <= score_width).all(),
+        f"sequence length exceeds score width {score_width}: {context}",
+    )
+
+    live_pages = torch.div(lengths + page_size - 1, page_size, rounding_mode="floor")
+    torch._assert_async(
+        (live_pages <= page_table.shape[1]).all(),
+        f"live page count exceeds compact table width {page_table.shape[1]}: {context}",
+    )
+
+    page_columns = torch.arange(
+        page_table.shape[1], dtype=lengths.dtype, device=lengths.device
+    ).unsqueeze(0)
+    live_mask = page_columns < live_pages.unsqueeze(1)
+    torch._assert_async(
+        ((~live_mask) | (page_table >= 1)).all(),
+        f"live page id < 1 (padding/stale page in live prefix): {context}",
+    )
+    torch._assert_async(
+        ((~live_mask) | (page_table < page_capacity)).all(),
+        f"live page id >= {page_capacity} (outside index-K buffer): {context}",
+    )
+
+
+def _probe_topk_v2_raw_output(
+    *,
+    raw_indices: torch.Tensor,
+    transformed_indices: torch.Tensor,
+    lengths: torch.Tensor,
+) -> None:
+    """Queue fixed-shape checks for #26788's pre-transform output."""
+    context = "DSA top-k v2 raw output"
+    output_columns = torch.arange(
+        raw_indices.shape[1], dtype=lengths.dtype, device=lengths.device
+    ).unsqueeze(0)
+    selected_mask = output_columns < lengths.unsqueeze(1)
+
+    torch._assert_async(
+        ((~selected_mask) | (raw_indices >= 0)).all(),
+        f"selected raw index is negative/unwritten: {context}",
+    )
+    torch._assert_async(
+        ((~selected_mask) | (raw_indices < lengths.unsqueeze(1))).all(),
+        f"selected raw index exceeds live sequence prefix: {context}",
+    )
+    torch._assert_async(
+        (selected_mask | (raw_indices == -1)).all(),
+        f"raw padding slot is not -1: {context}",
+    )
+    torch._assert_async(
+        ((raw_indices == -1) == (transformed_indices == -1)).all(),
+        f"raw/transformed sentinel mismatch: {context}",
+    )
 
 
 def _build_flashinfer_paged_args(

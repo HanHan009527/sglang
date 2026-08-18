@@ -181,6 +181,26 @@ def _broadcast_indexer_topk_from_rank0(
     return topk_indices
 
 
+def _topk_transform_with_diagnostic_capacity(
+    *,
+    metadata: BaseIndexerMetadata,
+    logits: torch.Tensor,
+    topk: int,
+    page_capacity: int,
+) -> torch.Tensor:
+    """Pass the active paged-MQA buffer's page axis only under diagnostics.
+
+    Keeping the branch here preserves the original metadata call exactly when
+    async assertions are disabled and avoids rediscovering composite or
+    layer-split pool internals in the top-k backend.
+    """
+    if envs.SGLANG_ENABLE_ASYNC_ASSERT.get():
+        return metadata.topk_transform(
+            logits, topk, diagnostic_page_capacity=page_capacity
+        )
+    return metadata.topk_transform(logits, topk)
+
+
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     # from sgl_kernel import hadamard_transform
     if _is_hip:
@@ -884,7 +904,12 @@ class Indexer(DSANPUIndexerMixin, MultiPlatformOp):
 
         # NOTE(dark): logits should be cleaned in topk_transform
         self._mask_init_and_local_tokens(logits, seqlens_32)
-        topk_result = metadata.topk_transform(logits, self.index_topk)
+        topk_result = _topk_transform_with_diagnostic_capacity(
+            metadata=metadata,
+            logits=logits,
+            topk=self.index_topk,
+            page_capacity=kv_cache_fp8.shape[0],
+        )
         # Restore possible padding exist in the hidden states.
         if not _is_hip and q_offset < q_fp8.shape[0]:
             pad_len = q_fp8.shape[0] - q_offset
