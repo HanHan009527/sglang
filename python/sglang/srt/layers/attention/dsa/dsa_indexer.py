@@ -181,6 +181,33 @@ def _broadcast_indexer_topk_from_rank0(
     return topk_indices
 
 
+def _make_eager_idle_topk_result(
+    x: torch.Tensor, index_topk: int, return_indices: bool
+) -> Optional[torch.Tensor]:
+    if not return_indices:
+        return None
+    return torch.full(
+        (x.shape[0], index_topk),
+        -1,
+        dtype=torch.int32,
+        device=x.device,
+    )
+
+
+def _is_logical_eager_idle(forward_batch: ForwardBatch) -> bool:
+    current_mode = forward_batch.forward_mode
+    if current_mode.is_idle():
+        return True
+
+    original_mode = getattr(forward_batch, "_original_forward_mode", None)
+    return (
+        getattr(forward_batch, "symmetric_spec_moe_dummy", False)
+        and original_mode is not None
+        and original_mode.is_idle()
+        and (current_mode.is_decode() or current_mode.is_target_verify())
+    )
+
+
 def _topk_transform_with_diagnostic_capacity(
     *,
     metadata: BaseIndexerMetadata,
@@ -1508,6 +1535,26 @@ class Indexer(DSANPUIndexerMixin, MultiPlatformOp):
         layer_id: int,
         return_indices: bool = True,
     ) -> Optional[torch.Tensor]:
+        # Fused FP8 RMSNorm+quant may pass (x_fp8, x_scale[, y]). Only the
+        # physical padded row axis and device are needed by the idle result.
+        x_meta = x[0] if isinstance(x, tuple) else x
+
+        # An eager DP-attention idle rank participates in symmetric MLP/EP
+        # collectives through physical dummy rows, but owns no request or KV
+        # rows. Do not run its indexer over the empty req/page table: normalize
+        # every discarded row to the canonical -1 top-k padding instead. CUDA
+        # graph capture keeps its existing graph-shaped metadata path.
+        if (
+            _is_cuda
+            and _is_logical_eager_idle(forward_batch)
+            and not get_is_capture_mode()
+        ):
+            topk_result = _make_eager_idle_topk_result(
+                x_meta, self.index_topk, return_indices
+            )
+            topk_result = _broadcast_indexer_topk_from_rank0(topk_result)
+            return maybe_capture_indexer_topk(layer_id, topk_result)
+
         if _is_hip:
             from sglang.kernels.ops.attention.dsa.tilelang_kernel import act_quant
         elif not _is_npu:
@@ -1515,10 +1562,6 @@ class Indexer(DSANPUIndexerMixin, MultiPlatformOp):
 
         if TYPE_CHECKING:
             assert isinstance(get_token_to_kv_pool(), DSATokenToKVPool)
-
-        # When upstream uses fused FP8 RMSNorm+quant, activations may be passed as
-        # a tuple like (x_fp8, x_scale[, y]). Use `x_meta` for shape/device queries.
-        x_meta = x[0] if isinstance(x, tuple) else x
 
         in_piecewise_or_breakable_cuda_graph = (
             _is_in_piecewise_or_breakable_cuda_graph()
