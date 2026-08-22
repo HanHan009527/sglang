@@ -195,14 +195,17 @@ def _make_eager_idle_topk_result(
 
 
 def _is_logical_eager_idle(forward_batch: ForwardBatch) -> bool:
+    # DP/MLP synchronization materializes an idle speculative rank as a
+    # decode-shaped batch before the model forward.  The draft-only
+    # symmetric_spec_moe_dummy flag cannot identify target-verify padding; the
+    # saved original mode is the common ownership signal for both phases.
     current_mode = forward_batch.forward_mode
     if current_mode.is_idle():
         return True
 
     original_mode = getattr(forward_batch, "_original_forward_mode", None)
     return (
-        getattr(forward_batch, "symmetric_spec_moe_dummy", False)
-        and original_mode is not None
+        original_mode is not None
         and original_mode.is_idle()
         and (current_mode.is_decode() or current_mode.is_target_verify())
     )

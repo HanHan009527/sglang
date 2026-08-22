@@ -6,7 +6,6 @@ import torch
 
 from sglang.srt.layers.attention.dsa.dsa_indexer import (
     Indexer,
-    _is_logical_eager_idle,
     _make_eager_idle_topk_result,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
@@ -99,25 +98,39 @@ class TestDSAIndexerIdle(unittest.TestCase):
     def test_eager_idle_without_index_consumer_returns_none(self):
         self.assertIsNone(self._run_eager_idle(return_indices=False))
 
-    def test_rewritten_target_verify_dummy_short_circuits(self):
+    def test_rewritten_target_verify_idle_short_circuits_without_draft_flag(self):
         result = self._run_eager_idle(
             forward_mode=ForwardMode.TARGET_VERIFY,
             original_forward_mode=ForwardMode.IDLE,
-            symmetric_spec_moe_dummy=True,
+            # Target-verify padding is materialized before the model forward,
+            # but unlike draft padding it is not tagged as an attention-bypass
+            # row.  The original mode is the authoritative idle marker here.
+            symmetric_spec_moe_dummy=False,
         )
         self.assertTrue(torch.all(result == -1))
 
-    def test_rewritten_decode_dummy_short_circuits(self):
+    def test_rewritten_decode_idle_short_circuits_without_draft_flag(self):
         result = self._run_eager_idle(
             forward_mode=ForwardMode.DECODE,
             original_forward_mode=ForwardMode.IDLE,
-            symmetric_spec_moe_dummy=True,
+            symmetric_spec_moe_dummy=False,
         )
         self.assertTrue(torch.all(result == -1))
 
-    def _assert_existing_metadata_path(self, *, forward_mode, capture_mode):
+    def _assert_existing_metadata_path(
+        self,
+        *,
+        forward_mode,
+        capture_mode,
+        original_forward_mode=None,
+        symmetric_spec_moe_dummy=False,
+    ):
         indexer = SimpleNamespace(index_topk=8)
-        batch = SimpleNamespace(forward_mode=forward_mode)
+        batch = SimpleNamespace(
+            forward_mode=forward_mode,
+            _original_forward_mode=original_forward_mode,
+            symmetric_spec_moe_dummy=symmetric_spec_moe_dummy,
+        )
 
         with (
             patch(f"{_INDEXER}._is_cuda", True),
@@ -152,20 +165,28 @@ class TestDSAIndexerIdle(unittest.TestCase):
         )
 
     def test_active_target_verify_is_not_logical_idle(self):
-        batch = SimpleNamespace(
+        self._assert_existing_metadata_path(
             forward_mode=ForwardMode.TARGET_VERIFY,
-            _original_forward_mode=None,
+            capture_mode=False,
+            original_forward_mode=None,
             symmetric_spec_moe_dummy=False,
         )
-        self.assertFalse(_is_logical_eager_idle(batch))
 
     def test_rewritten_extend_is_not_logical_idle(self):
-        batch = SimpleNamespace(
+        self._assert_existing_metadata_path(
             forward_mode=ForwardMode.EXTEND,
-            _original_forward_mode=ForwardMode.IDLE,
+            capture_mode=False,
+            original_forward_mode=ForwardMode.IDLE,
             symmetric_spec_moe_dummy=True,
         )
-        self.assertFalse(_is_logical_eager_idle(batch))
+
+    def test_rewritten_target_verify_capture_keeps_existing_metadata_path(self):
+        self._assert_existing_metadata_path(
+            forward_mode=ForwardMode.TARGET_VERIFY,
+            capture_mode=True,
+            original_forward_mode=ForwardMode.IDLE,
+            symmetric_spec_moe_dummy=False,
+        )
 
     def test_non_cuda_idle_keeps_existing_metadata_path(self):
         indexer = SimpleNamespace(index_topk=8)

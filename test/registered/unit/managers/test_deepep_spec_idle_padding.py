@@ -6,6 +6,10 @@ from unittest.mock import patch
 
 import torch
 
+from sglang.srt.layers.attention.dsa.dsa_indexer import (
+    Indexer,
+    _is_logical_eager_idle,
+)
 from sglang.srt.layers.dp_attention import DpPaddingMode
 from sglang.srt.managers.scheduler_components.dp_attn import _update_gather_batch
 from sglang.srt.model_executor.forward_batch_info import (
@@ -312,6 +316,124 @@ class TestSymmetricMoeSpecIdlePadding(CustomTestCase):
         self.assertEqual(forward_batch.positions.numel(), 0)
         self.assertEqual(logits_output.next_token_logits.shape[0], 0)
         self.assertEqual(logits_output.hidden_states.shape[0], 0)
+
+    def test_idle_megamoe_verify_preserves_logical_idle_marker(self):
+        spec_info = SimpleNamespace(
+            is_draft_input=lambda: False,
+            num_tokens_per_req=4,
+            draft_token_num=4,
+        )
+        forward_batch = ForwardBatch(
+            forward_mode=ForwardMode.IDLE,
+            batch_size=0,
+            input_ids=torch.empty(0, dtype=torch.int64),
+            req_pool_indices=torch.empty(0, dtype=torch.int64),
+            seq_lens=torch.empty(0, dtype=torch.int64),
+            out_cache_loc=torch.empty(0, dtype=torch.int64),
+            seq_lens_sum=0,
+            positions=torch.empty(0, dtype=torch.int64),
+            seq_lens_cpu=torch.empty(0, dtype=torch.int64),
+            lora_ids=[],
+            spec_info=spec_info,
+            spec_algorithm=SimpleNamespace(is_eagle=lambda: True),
+            is_extend_in_batch=False,
+            original_global_num_tokens_cpu=[1, 1, 1, 1, 0, 1, 1, 0],
+            global_num_tokens_cpu=[4, 4, 4, 4, 0, 4, 4, 0],
+            global_num_tokens_for_logprob_cpu=[4, 4, 4, 4, 0, 4, 4, 0],
+            global_num_tokens_gpu=torch.zeros(8, dtype=torch.int64),
+            num_token_non_padded=torch.tensor(0, dtype=torch.int32),
+            num_token_non_padded_cpu=0,
+        )
+        model_runner = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(mtp_hybrid_override_pattern=None)
+            ),
+            is_draft_worker=False,
+            server_args=SimpleNamespace(
+                cuda_graph_config=SimpleNamespace(
+                    prefill=SimpleNamespace(bs=[]),
+                )
+            ),
+            attn_backend=SimpleNamespace(
+                get_cuda_graph_seq_len_fill_value=lambda: 1,
+            ),
+        )
+        parallel = SimpleNamespace(attn_tp_size=1, attn_dp_rank=4)
+        backend_patch, mode_patch = _symmetric_backend_patches("megamoe")
+
+        with (
+            backend_patch,
+            mode_patch,
+            patch(
+                "sglang.srt.model_executor.forward_batch_info.get_parallel",
+                return_value=parallel,
+            ),
+            patch(
+                "sglang.srt.model_executor.forward_batch_info.mambaish_config",
+                return_value=None,
+            ),
+            patch(
+                "sglang.srt.layers.dp_attention.get_attention_dp_size",
+                return_value=8,
+            ),
+            patch("sglang.srt.layers.cp.utils.enable_cp_v2", return_value=True),
+            patch("sglang.srt.model_executor.forward_batch_info.set_dp_buffer_len"),
+            patch(
+                "sglang.srt.model_executor.forward_batch_info.set_is_extend_in_batch"
+            ),
+            patch(
+                "sglang.srt.batch_overlap.two_batch_overlap.TboForwardBatchPreparer.prepare"
+            ),
+        ):
+            forward_batch.prepare_mlp_sync_batch(model_runner)
+
+        self.assertEqual(forward_batch._original_forward_mode, ForwardMode.IDLE)
+        self.assertEqual(forward_batch.forward_mode, ForwardMode.TARGET_VERIFY)
+        self.assertEqual(forward_batch.batch_size, 1)
+        self.assertEqual(forward_batch.input_ids.numel(), 4)
+        self.assertEqual(forward_batch.num_token_non_padded_cpu, 4)
+        self.assertEqual(forward_batch.num_token_non_padded.item(), 4)
+        self.assertEqual(forward_batch.global_num_tokens_cpu, [4] * 8)
+        self.assertTrue(forward_batch.dp_padding_mode.is_max_len())
+        # This flag is intentionally draft-only: verify rows still run target
+        # model MLP/MoE and only the DSA indexer uses _original_forward_mode
+        # to recognize that they do not own request/KV rows.
+        self.assertFalse(forward_batch.symmetric_spec_moe_dummy)
+        self.assertTrue(_is_logical_eager_idle(forward_batch))
+
+        indexer = SimpleNamespace(index_topk=8)
+        with (
+            patch("sglang.srt.layers.attention.dsa.dsa_indexer._is_cuda", True),
+            patch(
+                "sglang.srt.layers.attention.dsa.dsa_indexer.get_is_capture_mode",
+                return_value=False,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsa.dsa_indexer._broadcast_indexer_topk_from_rank0",
+                side_effect=lambda result: result,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsa.dsa_indexer.maybe_capture_indexer_topk",
+                side_effect=lambda _layer_id, result: result,
+            ),
+            patch(
+                "sglang.srt.layers.attention.dsa.dsa_indexer.get_attn_backend",
+                side_effect=AssertionError(
+                    "logical idle verify must not fetch DSA metadata"
+                ),
+            ),
+        ):
+            topk_result = Indexer.forward_cuda(
+                indexer,
+                x=torch.empty((4, 16)),
+                q_lora=torch.empty((4, 16)),
+                positions=forward_batch.positions,
+                forward_batch=forward_batch,
+                layer_id=0,
+            )
+
+        self.assertEqual(topk_result.shape, (4, 8))
+        self.assertTrue(torch.all(topk_result == -1))
 
     def test_only_mixed_active_idle_spec_requires_lockstep(self):
         shared = dict(
