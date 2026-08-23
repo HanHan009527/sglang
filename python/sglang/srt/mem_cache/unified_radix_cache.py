@@ -348,6 +348,7 @@ class UnifiedRadixCache(BasePrefixCache):
             if self.supports_swa():
                 swa = self.components[ComponentType.SWA]
                 self.tree_core.has_swa_host_pool = swa._swa_kv_pool_host is not None
+        self._init_hicache_pp_sync_mode(server_args, params)
 
         # State initialization
         self.write_through_threshold = (
@@ -371,6 +372,102 @@ class UnifiedRadixCache(BasePrefixCache):
                 enable_storage_metrics=self._enable_metrics_flag,
                 extra_metric_labels=self.extra_metric_labels,
             )
+
+    def _init_hicache_pp_sync_mode(
+        self, server_args: ServerArgs, params: CacheInitParams
+    ) -> None:
+        mode = envs.SGLANG_HICACHE_PP_SYNC_MODE.get().strip().lower()
+        if mode not in {"legacy", "batched"}:
+            raise ValueError(
+                "SGLANG_HICACHE_PP_SYNC_MODE must be 'legacy' or 'batched', "
+                f"got {mode!r}."
+            )
+
+        self._hicache_pp_sync_mode = mode
+        if mode == "legacy":
+            return
+
+        from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+            DeepSeekV4TokenToKVPool,
+        )
+
+        checks = (
+            (
+                isinstance(
+                    params.token_to_kv_pool_allocator.get_kvcache(),
+                    DeepSeekV4TokenToKVPool,
+                ),
+                "non-DSV4 KV pool",
+            ),
+            (self.pp_size > 1, "PP size <= 1"),
+            (server_args.hicache_storage_backend is None, "L3 enabled"),
+            (
+                server_args.hicache_write_policy == "write_through",
+                f"write policy {server_args.hicache_write_policy!r}",
+            ),
+            (not server_args.enable_dp_attention, "DP attention enabled"),
+            (server_args.dp_size == 1, f"DP size {server_args.dp_size}"),
+        )
+        unsupported_reasons = [reason for supported, reason in checks if not supported]
+        if unsupported_reasons:
+            raise ValueError(
+                "SGLANG_HICACHE_PP_SYNC_MODE=batched requires DSV4, PP>1, "
+                "DP=1 and L2-only write-through HiCache: "
+                + "; ".join(unsupported_reasons)
+            )
+
+        self._hicache_pp_sync_counts = torch.zeros(2, dtype=torch.int32, device="cpu")
+        logger.info(
+            "Using batched HiCache completion synchronization across %d PP stages",
+            self.pp_size,
+        )
+
+    def _uses_batched_hicache_pp_sync(self) -> bool:
+        return getattr(self, "_hicache_pp_sync_mode", "legacy") == "batched"
+
+    def _sync_hicache_completion_counts(self) -> tuple[int, int]:
+        """Reduce write/load ACK prefixes once, then propagate along PP."""
+        cc = self.cache_controller
+        if cc is None:
+            raise RuntimeError(
+                "Batched HiCache PP synchronization lost its cache controller"
+            )
+
+        counts = self._hicache_pp_sync_counts
+        counts.zero_()
+        if self.pp_rank == 0:
+            counts[0] = self._count_ready_acks(cc.ack_write_queue)
+            counts[1] = self._count_ready_acks(cc.ack_load_queue)
+        self._all_reduce(counts, torch.distributed.ReduceOp.MIN)
+        return int(counts[0].item()), int(counts[1].item())
+
+    def _validated_hicache_acks(
+        self, queue, ongoing: dict, finish_count: int, *, kind: str
+    ) -> list:
+        if len(queue) < finish_count:
+            raise RuntimeError(
+                f"HiCache {kind} ACK queue diverged: pp_rank={self.pp_rank}, "
+                f"count={finish_count}, queue={len(queue)}, ongoing={len(ongoing)}"
+            )
+
+        ready_acks = queue[:finish_count]
+        ack_ids = [ack_id for ack in ready_acks for ack_id in ack.node_ids]
+        duplicate_ids = sorted(
+            ack_id for ack_id in set(ack_ids) if ack_ids.count(ack_id) > 1
+        )
+        if duplicate_ids:
+            raise RuntimeError(
+                f"HiCache {kind} ACK IDs repeated: pp_rank={self.pp_rank}, "
+                f"duplicate_ids={duplicate_ids}, ongoing={len(ongoing)}"
+            )
+
+        missing_ids = [ack_id for ack_id in ack_ids if ack_id not in ongoing]
+        if missing_ids:
+            raise RuntimeError(
+                f"HiCache {kind} ACK IDs diverged: pp_rank={self.pp_rank}, "
+                f"missing_ids={missing_ids}, ongoing={len(ongoing)}"
+            )
+        return ready_acks
 
     def register_sidecar_pool(self, spec: SidecarPoolSpec) -> None:
         self.sidecar_pool_specs.append(spec)
@@ -1936,7 +2033,27 @@ class UnifiedRadixCache(BasePrefixCache):
         # Reap the previous round's PP-sync sends before issuing new ones.
         self._drain_async_work()
 
-        if self.pp_size != 1:
+        if self._uses_batched_hicache_pp_sync():
+            write_count, load_count = self._sync_hicache_completion_counts()
+            cc = self.cache_controller
+            assert cc is not None
+            self._validated_hicache_acks(
+                cc.ack_write_queue,
+                self.ongoing_write_through,
+                write_count,
+                kind="write",
+            )
+            self._validated_hicache_acks(
+                cc.ack_load_queue,
+                self.ongoing_load_back,
+                load_count,
+                kind="load",
+            )
+            # The existing completion methods preserve TreeCore publication,
+            # local CUDA-event waits, lock release, and load-back metrics.
+            self.writing_check(finish_count=write_count)
+            self.loading_check(finish_count=load_count)
+        elif self.pp_size != 1:
             self.writing_check()
             self.loading_check()
             if self.enable_storage:

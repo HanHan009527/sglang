@@ -503,6 +503,9 @@ class Envs:
     SGLANG_EXA_INCLUDE_HIGHLIGHTS = EnvBool(True)
 
     # Hi-Cache
+    # Batch PP write/load completion synchronization for the narrow DSV4
+    # PP + L2 write-through path. Keep legacy as the safe default.
+    SGLANG_HICACHE_PP_SYNC_MODE = EnvStr("legacy")
     SGLANG_HICACHE_HF3FS_CONFIG_PATH = EnvStr(None)
     SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE = EnvInt(None)
     SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR = EnvStr(None)
