@@ -9,6 +9,10 @@ import torch
 
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
+from sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
+    BatchedPPSyncCapability,
+)
+from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
 from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -92,6 +96,7 @@ class TestUnifiedRadixCachePPSyncCurrent(unittest.TestCase):
     def test_batched_gate_is_narrow_and_does_not_create_group(self):
         holder = _Holder()
         holder.pp_size = 2
+        holder._hicache_pp_sync_capability = BatchedPPSyncCapability.DEEPSEEK_V4
         params = SimpleNamespace(
             token_to_kv_pool_allocator=SimpleNamespace(
                 get_kvcache=mock.Mock(
@@ -108,10 +113,29 @@ class TestUnifiedRadixCachePPSyncCurrent(unittest.TestCase):
         self.assertEqual(holder._hicache_pp_sync_counts.dtype, torch.int32)
         self.assertEqual(holder._hicache_pp_sync_counts.device.type, "cpu")
 
+    def test_batched_gate_accepts_regular_dsa_stack_capability(self):
+        holder = _Holder()
+        holder.pp_size = 2
+        holder._hicache_pp_sync_capability = BatchedPPSyncCapability.DSA_KV_INDEXER
+        params = SimpleNamespace(
+            token_to_kv_pool_allocator=SimpleNamespace(
+                get_kvcache=mock.Mock(return_value=object.__new__(DSATokenToKVPool))
+            )
+        )
+
+        with envs.SGLANG_HICACHE_PP_SYNC_MODE.override("batched"):
+            UnifiedRadixCache._init_hicache_pp_sync_mode(holder, self._args(), params)
+
+        self.assertEqual(holder._hicache_pp_sync_mode, "batched")
+        self.assertIs(
+            holder._hicache_pp_sync_capability,
+            BatchedPPSyncCapability.DSA_KV_INDEXER,
+        )
+
     def test_batched_gate_rejects_every_other_unsupported_dimension(self):
         unsupported = (
             ("bad", self._args()),
-            ("non-DSV4 KV pool", self._args()),
+            ("unsupported HiCache stack for object", self._args()),
             ("PP size <= 1", self._args()),
             ("L3 enabled", self._args(hicache_storage_backend="eic")),
             ("write policy", self._args(hicache_write_policy="write_back")),
@@ -128,10 +152,12 @@ class TestUnifiedRadixCachePPSyncCurrent(unittest.TestCase):
             )
             holder = _Holder()
             holder.pp_size = 2
+            holder._hicache_pp_sync_capability = BatchedPPSyncCapability.DEEPSEEK_V4
             if reason == "PP size <= 1":
                 holder.pp_size = 1
-            if reason == "non-DSV4 KV pool":
+            if reason == "unsupported HiCache stack for object":
                 params.token_to_kv_pool_allocator.get_kvcache.return_value = object()
+                holder._hicache_pp_sync_capability = None
             mode = "bad" if reason == "bad" else "batched"
             expected = "legacy.*batched" if reason == "bad" else reason
             with self.subTest(reason=reason), envs.SGLANG_HICACHE_PP_SYNC_MODE.override(

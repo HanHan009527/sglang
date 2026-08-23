@@ -5,6 +5,7 @@ from sglang.srt.mem_cache.hicache_storage import PoolName, SidecarPoolSpec
 from sglang.srt.mem_cache.hybrid_cache import hybrid_pool_assembler
 from sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
     _STRATEGIES,
+    BatchedPPSyncCapability,
     StackBuildResult,
     StackStrategy,
     _apply_stack_result,
@@ -51,6 +52,42 @@ class TestUnifiedRadixHiCacheDispatch(unittest.TestCase):
         strategy = _select_strategy(kvcache, {FULL, SWA})
         self.assertIsInstance(strategy, _DeepSeekV4Strategy)
 
+    def test_deepseek_v4_build_marks_batched_pp_sync_capable(self):
+        from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
+            DeepSeekV4TokenToKVPool,
+        )
+
+        kvcache = object.__new__(DeepSeekV4TokenToKVPool)
+        kvcache.start_layer = 4
+        kvcache.end_layer = 12
+        host_pool_group = MagicMock()
+        full_host_pool = object()
+        swa_host_pool = object()
+        host_pool_group.get_pool.side_effect = {
+            PoolName.KV: full_host_pool,
+            PoolName.SWA: swa_host_pool,
+        }.__getitem__
+        host_pool_group.entry_map = {PoolName.KV: object(), PoolName.SWA: object()}
+        cache_controller = MagicMock()
+
+        with patch.object(
+            hybrid_pool_assembler,
+            "build_deepseek_v4_hicache_stack",
+            return_value=(host_pool_group, cache_controller),
+        ):
+            result = _DeepSeekV4Strategy().build(
+                cache=MagicMock(),
+                kvcache=kvcache,
+                params=MagicMock(),
+                server_args=MagicMock(),
+                load_cache_event=object(),
+            )
+
+        self.assertIs(
+            result.batched_pp_sync_capability,
+            BatchedPPSyncCapability.DEEPSEEK_V4,
+        )
+
     def test_mamba(self):
         from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
 
@@ -71,6 +108,44 @@ class TestUnifiedRadixHiCacheDispatch(unittest.TestCase):
         kvcache = _mock_kvcache(DSATokenToKVPool)
         strategy = _select_strategy(kvcache, {FULL})
         self.assertIsInstance(strategy, _DsaStrategy)
+
+    def test_dsa_build_marks_only_exact_pool_batched_pp_sync_capable(self):
+        from sglang.srt.mem_cache.dsa_cache_layer_split import (
+            LayerSplitDSATokenToKVPool,
+        )
+        from sglang.srt.mem_cache.hisparse_memory_pool import (
+            HiSparseDSATokenToKVPool,
+        )
+        from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+
+        host_pool_group = MagicMock()
+        host_pool_group.get_pool.return_value = object()
+        cache_controller = MagicMock()
+
+        def build(pool_cls):
+            kvcache = object.__new__(pool_cls)
+            kvcache.layer_num = 8
+            kvcache.indexer_layer_ids = None
+            kvcache.kv_cache_dim = 192
+            with patch.object(
+                hybrid_pool_assembler,
+                "build_anchor_sidecar_stack",
+                return_value=(host_pool_group, cache_controller),
+            ):
+                return _DsaStrategy().build(
+                    cache=MagicMock(),
+                    kvcache=kvcache,
+                    params=MagicMock(),
+                    server_args=MagicMock(),
+                    load_cache_event=object(),
+                )
+
+        self.assertIs(
+            build(DSATokenToKVPool).batched_pp_sync_capability,
+            BatchedPPSyncCapability.DSA_KV_INDEXER,
+        )
+        self.assertIsNone(build(HiSparseDSATokenToKVPool).batched_pp_sync_capability)
+        self.assertIsNone(build(LayerSplitDSATokenToKVPool).batched_pp_sync_capability)
 
     def test_minimax_sparse(self):
         from sglang.srt.mem_cache.memory_pool import MiniMaxSparseKVPool
@@ -228,6 +303,25 @@ class TestApplyStackResult(unittest.TestCase):
         kvcache.register_layer_transfer_counter.assert_called_once()
         params.req_to_token_pool.register_layer_transfer_counter.assert_not_called()
         cache.register_sidecar_pool.assert_not_called()
+        self.assertIsNone(cache._hicache_pp_sync_capability)
+
+    def test_apply_stack_result_propagates_batched_pp_sync_capability(self):
+        cache = self._fake_cache([FULL])
+        kvcache = MagicMock()
+        params = MagicMock()
+        result = StackBuildResult(
+            host_pool_group=MagicMock(),
+            cache_controller=MagicMock(),
+            component_host_pools={FULL: MagicMock()},
+            batched_pp_sync_capability=BatchedPPSyncCapability.DSA_KV_INDEXER,
+        )
+
+        _apply_stack_result(cache, kvcache, params, result)
+
+        self.assertIs(
+            cache._hicache_pp_sync_capability,
+            BatchedPPSyncCapability.DSA_KV_INDEXER,
+        )
 
 
 if __name__ == "__main__":

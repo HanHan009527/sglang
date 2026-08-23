@@ -206,6 +206,7 @@ class UnifiedRadixCache(BasePrefixCache):
         # HiCache D↔H defaults (overridden by init_hicache)
         self.cache_controller: Optional[HybridCacheController] = None
         self.host_pool_group = None  # set by attach_hybrid_pool_to_unified_cache
+        self._hicache_pp_sync_capability = None
         self.prefetch_stop_policy = "best_effort"
         self.prefetch_threshold = 256
         self.prefetch_timeout_base = 1.0
@@ -387,17 +388,16 @@ class UnifiedRadixCache(BasePrefixCache):
         if mode == "legacy":
             return
 
-        from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
-            DeepSeekV4TokenToKVPool,
+        from sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler import (
+            BatchedPPSyncCapability,
         )
 
+        kvcache = params.token_to_kv_pool_allocator.get_kvcache()
+        capability = self._hicache_pp_sync_capability
         checks = (
             (
-                isinstance(
-                    params.token_to_kv_pool_allocator.get_kvcache(),
-                    DeepSeekV4TokenToKVPool,
-                ),
-                "non-DSV4 KV pool",
+                isinstance(capability, BatchedPPSyncCapability),
+                "unsupported HiCache stack for " + type(kvcache).__name__,
             ),
             (self.pp_size > 1, "PP size <= 1"),
             (server_args.hicache_storage_backend is None, "L3 enabled"),
@@ -411,15 +411,17 @@ class UnifiedRadixCache(BasePrefixCache):
         unsupported_reasons = [reason for supported, reason in checks if not supported]
         if unsupported_reasons:
             raise ValueError(
-                "SGLANG_HICACHE_PP_SYNC_MODE=batched requires DSV4, PP>1, "
-                "DP=1 and L2-only write-through HiCache: "
+                "SGLANG_HICACHE_PP_SYNC_MODE=batched requires a supported "
+                "HiCache stack, PP>1, DP=1 and L2-only write-through HiCache: "
                 + "; ".join(unsupported_reasons)
             )
 
         self._hicache_pp_sync_counts = torch.zeros(2, dtype=torch.int32, device="cpu")
         logger.info(
-            "Using batched HiCache completion synchronization across %d PP stages",
+            "Using batched HiCache completion synchronization across %d PP "
+            "stages (capability=%s)",
             self.pp_size,
+            capability.value,
         )
 
     def _uses_batched_hicache_pp_sync(self) -> bool:

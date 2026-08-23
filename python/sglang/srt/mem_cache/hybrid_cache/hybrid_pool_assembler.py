@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from sglang.srt.mem_cache.hicache_storage import (
@@ -819,6 +820,11 @@ _COMPONENT_HOST_ATTR: dict[ComponentType, tuple[str, str]] = {
 }
 
 
+class BatchedPPSyncCapability(Enum):
+    DEEPSEEK_V4 = "deepseek_v4"
+    DSA_KV_INDEXER = "dsa_kv_indexer"
+
+
 @dataclass
 class StackBuildResult:
     host_pool_group: HostPoolGroup
@@ -830,6 +836,11 @@ class StackBuildResult:
     register_req_to_token_counter: bool = False
     transfer_layer_num: int = 0
     pools_desc: str = ""
+    # Non-empty only when this exact stack has been validated to use the
+    # UnifiedRadixCache batched PP write/load completion protocol. Keep this
+    # fail-closed: subclasses with different allocation or transfer semantics
+    # must opt in independently.
+    batched_pp_sync_capability: Optional[BatchedPPSyncCapability] = None
 
 
 class StackStrategy:
@@ -928,6 +939,7 @@ class _DeepSeekV4Strategy(StackStrategy):
             sidecars=sidecars,
             transfer_layer_num=kvcache.end_layer - kvcache.start_layer,
             pools_desc="KV + SWA + DeepSeekV4 sidecars",
+            batched_pp_sync_capability=BatchedPPSyncCapability.DEEPSEEK_V4,
         )
 
 
@@ -1152,7 +1164,10 @@ class _DsaStrategy(StackStrategy):
         model_name=None,
         enable_storage_metrics=False,
     ):
-        from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
+        from sglang.srt.mem_cache.memory_pool import (
+            DSATokenToKVPool,
+            MLATokenToKVPool,
+        )
 
         full_kv_pool = kvcache
         use_mla = isinstance(kvcache, MLATokenToKVPool)
@@ -1199,6 +1214,16 @@ class _DsaStrategy(StackStrategy):
             ],
             transfer_layer_num=len(full_layer_mapping),
             pools_desc="KV + INDEXER",
+            # The regular DSA pool uses one controller ACK whose completion
+            # event covers both the anchor KV transfer and its INDEXER sidecar.
+            # HiSparse and CP layer-split subclasses have different allocation
+            # and transfer semantics and remain fail-closed pending their own
+            # PP validation.
+            batched_pp_sync_capability=(
+                BatchedPPSyncCapability.DSA_KV_INDEXER
+                if type(kvcache) is DSATokenToKVPool
+                else None
+            ),
         )
 
 
@@ -1361,6 +1386,7 @@ def _apply_stack_result(
 ) -> None:
     cache.host_pool_group = result.host_pool_group
     cache.cache_controller = result.cache_controller
+    cache._hicache_pp_sync_capability = result.batched_pp_sync_capability
 
     for ct, host_pool in result.component_host_pools.items():
         cache_attr, component_attr = _COMPONENT_HOST_ATTR[ct]
