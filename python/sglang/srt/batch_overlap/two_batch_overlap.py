@@ -724,6 +724,7 @@ class TboForwardBatchPreparer:
             "is_extend_in_batch",
             "return_logprob",
             "can_run_dp_cuda_graph",
+            "can_run_dp_draft_cuda_graph",
             "can_run_dp_breakable_cuda_graph",
             "dp_padding_mode",
             "global_forward_mode",
@@ -734,6 +735,7 @@ class TboForwardBatchPreparer:
             "orig_seq_lens",  # only used by qwen-1m, thus not care
             "return_pooled_hidden_states",
             "reuse_dsa_topk_indices",  # forward-level flag, inherited by both child batches
+            "symmetric_spec_moe_dummy",
         ]:
             output_dict[key] = getattr(batch, key)
 

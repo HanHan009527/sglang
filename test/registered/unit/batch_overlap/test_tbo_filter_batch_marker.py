@@ -77,6 +77,12 @@ class TestTboFilterBatchMarker(CustomTestCase):
         self.assertFalse(child.forward_metadata_ready)
         self.assertFalse(child.forward_metadata_replan_equivalent)
 
+    def test_filter_batch_preserves_draft_graph_vote(self):
+        parent = _make_target_verify_batch(8)
+        parent.can_run_dp_draft_cuda_graph = False
+        child = _filter(parent, lo=0, hi=4)
+        self.assertFalse(child.can_run_dp_draft_cuda_graph)
+
 
 def _make_valued_batch(bs: int) -> ForwardBatch:
     # Distinct per-position values so a filtered slice is unambiguous.

@@ -43,6 +43,20 @@ _spec_diag_sync_logs = 0
 _MLP_SYNC_TRANSPORT_LOGGED = False
 
 
+def _spec_input_cuda_graph_compatible(local_batch: Optional[ScheduleBatch]) -> bool:
+    """Return whether this rank's EAGLE draft input may use a CUDA graph."""
+    if (
+        local_batch is None
+        or local_batch.forward_mode.is_idle()
+        or local_batch.forward_mode.is_prebuilt()
+    ):
+        return True
+    if getattr(local_batch, "force_disable_draft_cuda_graph", False):
+        return False
+    spec_info = local_batch.spec_info
+    return spec_info is None or spec_info.cuda_graph_compatible
+
+
 def _force_cpu_mlp_sync_transport(*, pp_size: int, disaggregation_mode: str) -> bool:
     """Keep PP-disaggregated scheduler metadata off the device group.
 
@@ -361,10 +375,7 @@ def prepare_mlp_sync_batch_raw(
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
     ) and not disable_cuda_graph
-    can_run_draft_cuda_graph = not (
-        local_batch is not None
-        and getattr(local_batch, "force_disable_draft_cuda_graph", False)
-    )
+    can_run_draft_cuda_graph = _spec_input_cuda_graph_compatible(local_batch)
     breakable_prefill = check_cuda_graph_backend(Phase.PREFILL, Backend.BREAKABLE)
     prefill_graph_runner = (
         model_runner.prefill_cuda_graph_runner if breakable_prefill else None

@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import torch
 
-from sglang.srt.managers.scheduler_components.dp_attn import MLPSyncBatchInfo
+from sglang.srt.managers.scheduler_components.dp_attn import (
+    MLPSyncBatchInfo,
+    _spec_input_cuda_graph_compatible,
+)
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
@@ -22,6 +25,42 @@ register_cpu_ci(est_time=20, suite="base-a-test-cpu")
 
 
 class TestEaglePDDPFallback(CustomTestCase):
+    def test_spec_input_graph_compatibility_preserves_force_override(self):
+        idle = SimpleNamespace(
+            forward_mode=ForwardMode.IDLE,
+            force_disable_draft_cuda_graph=True,
+            spec_info=SimpleNamespace(cuda_graph_compatible=False),
+        )
+        self.assertTrue(_spec_input_cuda_graph_compatible(idle))
+        self.assertTrue(_spec_input_cuda_graph_compatible(None))
+        self.assertFalse(
+            _spec_input_cuda_graph_compatible(
+                SimpleNamespace(
+                    forward_mode=ForwardMode.DECODE,
+                    force_disable_draft_cuda_graph=True,
+                    spec_info=SimpleNamespace(cuda_graph_compatible=True),
+                )
+            )
+        )
+        self.assertFalse(
+            _spec_input_cuda_graph_compatible(
+                SimpleNamespace(
+                    forward_mode=ForwardMode.DECODE,
+                    force_disable_draft_cuda_graph=False,
+                    spec_info=SimpleNamespace(cuda_graph_compatible=False),
+                )
+            )
+        )
+        self.assertTrue(
+            _spec_input_cuda_graph_compatible(
+                SimpleNamespace(
+                    forward_mode=ForwardMode.DECODE,
+                    force_disable_draft_cuda_graph=False,
+                    spec_info=SimpleNamespace(cuda_graph_compatible=True),
+                )
+            )
+        )
+
     def test_draft_graph_gate_has_independent_dp_vote(self):
         sync_info = MLPSyncBatchInfo(
             dp_size=1,
@@ -30,8 +69,8 @@ class TestEaglePDDPFallback(CustomTestCase):
             num_tokens=1,
             num_tokens_for_logprob=1,
             can_run_decode_cuda_graph=True,
-            can_run_prefill_cuda_graph=False,
             can_run_draft_cuda_graph=False,
+            can_run_prefill_cuda_graph=False,
             is_extend_in_batch=False,
             local_can_run_tbo=True,
             local_forward_mode=ForwardMode.DECODE.value,
