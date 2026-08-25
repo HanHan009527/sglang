@@ -460,6 +460,10 @@ class Envs:
     # wait_event(q_event).  Must not change ordering, collective count,
     # or shape; default off.
     SGLANG_DEBUG_PP_OUTPUT_PRODUCER_SYNC = EnvBool(False)
+    # Diagnostic only: synchronize the current device stream after each EAGLE
+    # producer stage has returned. This attributes asynchronous CUDA failures to
+    # target verify, draft extend, or tail draft without entering graph capture.
+    SGLANG_DEBUG_EAGLE_PRODUCER_STAGE_SYNC = EnvBool(False)
     SGLANG_REQ_RUNNING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL = EnvInt(120)
     # Decode batches between SWA out-of-window evictions.

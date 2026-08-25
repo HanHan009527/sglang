@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import time
+from collections import deque
 from dataclasses import replace
 from typing import List, Optional
 
@@ -129,6 +130,107 @@ _is_xpu = is_xpu()
 
 
 logger = logging.getLogger(__name__)
+
+_EAGLE_PRODUCER_STAGE_SYNC_RING_SIZE = 32
+_EAGLE_PRODUCER_STAGE_SYNC_LOG_FIRST = 8
+_EAGLE_PRODUCER_STAGE_SYNC_LOG_EVERY = 128
+
+
+def _debug_eagle_producer_stage_sync(
+    worker,
+    *,
+    stage: str,
+    batch: ScheduleBatch,
+    cuda_graph: Optional[bool],
+) -> None:
+    """Attribute asynchronous CUDA failures to one completed EAGLE stage.
+
+    The helper is deliberately called only after the producer forward or graph
+    replay has returned. Its default-off stream synchronization therefore never
+    becomes part of a CUDA graph capture body and does not change the production
+    path when the diagnostic flag is unset. The ring contains host metadata only;
+    it must not materialize or format device tensors while handling a broken CUDA
+    context.
+    """
+    if not envs.SGLANG_DEBUG_EAGLE_PRODUCER_STAGE_SYNC.get():
+        return
+
+    state = getattr(worker, "_eagle_producer_stage_sync_state", None)
+    if state is None:
+        state = {
+            "sequence": 0,
+            "ring": deque(maxlen=_EAGLE_PRODUCER_STAGE_SYNC_RING_SIZE),
+        }
+        worker._eagle_producer_stage_sync_state = state
+
+    state["sequence"] += 1
+    sequence = state["sequence"]
+    ps = worker.ps
+    batch_size_attr = getattr(batch, "batch_size", None)
+    batch_size = batch_size_attr() if callable(batch_size_attr) else batch_size_attr
+    forward_mode = getattr(batch, "forward_mode", None)
+    forward_mode_name = getattr(forward_mode, "name", str(forward_mode))
+    record = {
+        "sequence": sequence,
+        "stage": stage,
+        "status": "syncing",
+        "pp_rank": ps.pp_rank,
+        "dp_rank": ps.dp_rank,
+        "attn_dp_rank": ps.attn_dp_rank,
+        "tp_rank": ps.tp_rank,
+        "gpu_id": worker.gpu_id,
+        "batch_size": batch_size,
+        "forward_mode": forward_mode_name,
+        "cuda_graph": cuda_graph,
+    }
+    state["ring"].append(record)
+
+    started_ns = time.monotonic_ns()
+    try:
+        torch.get_device_module(worker.device).current_stream().synchronize()
+    except Exception as exc:
+        record["status"] = "error"
+        record["error_type"] = type(exc).__name__
+        record["elapsed_us"] = (time.monotonic_ns() - started_ns) // 1_000
+        logger.exception(
+            "EAGLE_PRODUCER_STAGE_SYNC_ERROR stage=%s pp_rank=%s "
+            "dp_rank=%s attn_dp_rank=%s tp_rank=%s gpu_id=%s batch_size=%s "
+            "forward_mode=%s cuda_graph=%s recent=%s",
+            stage,
+            ps.pp_rank,
+            ps.dp_rank,
+            ps.attn_dp_rank,
+            ps.tp_rank,
+            worker.gpu_id,
+            batch_size,
+            forward_mode_name,
+            cuda_graph,
+            list(state["ring"]),
+        )
+        raise
+
+    record["status"] = "complete"
+    record["elapsed_us"] = (time.monotonic_ns() - started_ns) // 1_000
+    if (
+        sequence <= _EAGLE_PRODUCER_STAGE_SYNC_LOG_FIRST
+        or sequence % _EAGLE_PRODUCER_STAGE_SYNC_LOG_EVERY == 0
+    ):
+        logger.warning(
+            "EAGLE_PRODUCER_STAGE_SYNC_COMPLETE stage=%s sequence=%s "
+            "pp_rank=%s dp_rank=%s attn_dp_rank=%s tp_rank=%s gpu_id=%s "
+            "batch_size=%s forward_mode=%s cuda_graph=%s elapsed_us=%s",
+            stage,
+            sequence,
+            ps.pp_rank,
+            ps.dp_rank,
+            ps.attn_dp_rank,
+            ps.tp_rank,
+            worker.gpu_id,
+            batch_size,
+            forward_mode_name,
+            cuda_graph,
+            record["elapsed_us"],
+        )
 
 
 def _slice_draft_output_to_local_tokens(
@@ -672,6 +774,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 parent_list, top_scores_index, draft_tokens, draft_probs = (
                     self.draft_forward(forward_batch)
                 )
+        if envs.SGLANG_DEBUG_EAGLE_PRODUCER_STAGE_SYNC.get():
+            self._debug_last_draft_used_cuda_graph = bool(can_run_decode_cuda_graph)
 
         if self.server_args.pp_size > 1:
             # PP path: return the raw draft tree (flattened draft_tokens with
@@ -1106,6 +1210,10 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 draft_logits_output = self.draft_runner.forward(
                     forward_batch
                 ).logits_output
+        if envs.SGLANG_DEBUG_EAGLE_PRODUCER_STAGE_SYNC.get():
+            self._debug_last_draft_extend_used_cuda_graph = bool(
+                can_run_decode_cuda_graph
+            )
 
         maybe_detect_nan(
             draft_logits_output.next_token_logits,
@@ -1469,6 +1577,12 @@ class EAGLEWorkerV2(BaseSpecWorker):
         batch_output = self.verify(
             batch, grammar_barrier=grammar_barrier, pp_proxy_tensors=pp_proxy_tensors
         )
+        _debug_eagle_producer_stage_sync(
+            self,
+            stage="target_verify_complete",
+            batch=batch,
+            cuda_graph=getattr(batch_output, "can_run_cuda_graph", None),
+        )
 
         # Non-last PP ranks only relay the target verify forward upstream.
         if self._pp_enabled and not self._pp_is_last_rank:
@@ -1496,6 +1610,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 spec_stage_span("draft_extend"),
             ):
                 self.draft_worker._draft_extend_for_decode(batch, batch_output)
+                _debug_eagle_producer_stage_sync(
+                    self,
+                    stage="draft_extend_complete",
+                    batch=batch,
+                    cuda_graph=getattr(
+                        self.draft_worker,
+                        "_debug_last_draft_extend_used_cuda_graph",
+                        None,
+                    ),
+                )
 
                 # PP last rank: produce next-iter draft raw for cross-rank relay.
                 if self._pp_enabled and self._pp_is_last_rank:
@@ -1506,6 +1630,16 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     batch.seq_lens = batch_output.new_seq_lens
                     pp_draft_tokens, pp_parent_list, pp_top_scores_index = (
                         self.draft_worker.draft(batch)
+                    )
+                    _debug_eagle_producer_stage_sync(
+                        self,
+                        stage="tail_draft_complete",
+                        batch=batch,
+                        cuda_graph=getattr(
+                            self.draft_worker,
+                            "_debug_last_draft_used_cuda_graph",
+                            None,
+                        ),
                     )
 
         # PP last rank: keep the draft tree on device for PP relay.
