@@ -74,6 +74,20 @@ class TestPPSpecDecodeBuffers(unittest.TestCase):
         )
         self._assert_token_major_proxy(buffers.pp_proxy_tensors)
 
+    def test_custom_mask_covers_maximum_verify_shape_without_reallocation(self):
+        buffers = DecodeInputBuffers.create(
+            next_token_logits_buffer=torch.zeros(
+                (self._MAX_NUM_TOKEN, 32), dtype=torch.float32
+            ),
+            **self._common_kwargs(),
+        )
+
+        expected_numel = (
+            self._MAX_BS * self._common_kwargs()["seq_len_fill_value"]
+            + 2 * self._MAX_NUM_TOKEN
+        ) * self._common_kwargs()["num_tokens_per_req"]
+        self.assertEqual(buffers.custom_mask.numel(), expected_numel)
+
 
 if __name__ == "__main__":
     unittest.main()
