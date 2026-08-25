@@ -445,6 +445,11 @@ class Scheduler(
         self.enable_hisparse = server_args.enable_hisparse
         self.enable_dp_attention = server_args.enable_dp_attention
         self.enable_unified_memory = server_args.enable_unified_memory
+        # Diagnostic only: when True, PP last rank synchronizes the popped
+        # q_event before wait_event and emits phase-trace markers.
+        self.debug_pp_output_producer_sync = (
+            envs.SGLANG_DEBUG_PP_OUTPUT_PRODUCER_SYNC.get()
+        )
 
         # Distributed rank info
         attn_tp_rank, attn_tp_size, attn_dp_rank, attn_dp_size = (

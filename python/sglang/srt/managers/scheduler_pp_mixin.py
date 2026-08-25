@@ -1733,6 +1733,28 @@ class SchedulerPPMixin:
                     not target.forward_mode.is_prebuilt()
                     and not _pp_can_skip_output_comm(target)
                 ):
+                    if self.debug_pp_output_producer_sync:
+                        if phase_tracer.enabled:
+                            phase_tracer.emit(
+                                "pp_producer_sync_before",
+                                device=str(getattr(self.ps, "gpu_id", "unknown")),
+                                stream=hex(id(self.device_module.current_stream())),
+                            )
+                        try:
+                            q_event.synchronize()
+                        except Exception as exc:
+                            if phase_tracer.enabled:
+                                phase_tracer.emit(
+                                    "pp_producer_sync_error",
+                                    error_type=type(exc).__name__,
+                                )
+                            raise
+                        if phase_tracer.enabled:
+                            phase_tracer.emit(
+                                "pp_producer_sync_after",
+                                device=str(getattr(self.ps, "gpu_id", "unknown")),
+                                stream=hex(id(self.device_module.current_stream())),
+                            )
                     self.device_module.current_stream().wait_event(q_event)
                     with torch.profiler.record_function("send_res_dict_to_next_stage"):
                         send_output_work = self._pp_send_dict_to_next_stage(

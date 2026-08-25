@@ -455,6 +455,11 @@ class Envs:
     SGLANG_DEBUG_PP_DP_PHASE_TRACE_MAX_EVENTS = EnvInt(4096)
     SGLANG_DEBUG_PP_DP_PHASE_TRACE_EVERY_N = EnvInt(8)
     SGLANG_DEBUG_PP_DP_PHASE_TRACE_RING_SIZE = EnvInt(256)
+    # Diagnostic only: when PP last rank pops a q_event from the output
+    # comm queue, synchronize that event on the current stream before
+    # wait_event(q_event).  Must not change ordering, collective count,
+    # or shape; default off.
+    SGLANG_DEBUG_PP_OUTPUT_PRODUCER_SYNC = EnvBool(False)
     SGLANG_REQ_RUNNING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL = EnvInt(120)
     # Decode batches between SWA out-of-window evictions.
