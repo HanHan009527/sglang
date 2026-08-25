@@ -448,6 +448,13 @@ class Envs:
     SGLANG_DATA_PARALLEL_BUDGET_INTERVAL = EnvInt(1)
     SGLANG_REQ_WAITING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_NCCL_ALL_GATHER_IN_OVERLAP_SCHEDULER_SYNC_BATCH = EnvBool(False)
+    # Diagnostic only: emit bounded, structured PP relay and DP metadata-sync
+    # phase events. This must not change communication ordering or materialize
+    # device tensors.
+    SGLANG_DEBUG_PP_DP_PHASE_TRACE = EnvBool(False)
+    SGLANG_DEBUG_PP_DP_PHASE_TRACE_MAX_EVENTS = EnvInt(4096)
+    SGLANG_DEBUG_PP_DP_PHASE_TRACE_EVERY_N = EnvInt(8)
+    SGLANG_DEBUG_PP_DP_PHASE_TRACE_RING_SIZE = EnvInt(256)
     SGLANG_REQ_RUNNING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL = EnvInt(120)
     # Decode batches between SWA out-of-window evictions.

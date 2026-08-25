@@ -24,6 +24,11 @@ from sglang.srt.layers.dp_attention import (
     set_is_extend_in_batch,
 )
 from sglang.srt.managers.overlap_utils import RelayPayload
+from sglang.srt.managers.phase_trace import (
+    batch_phase_fields,
+    describe_process_group,
+    phase_tracer,
+)
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, Req, ScheduleBatch
 from sglang.srt.managers.utils import (
     GenerationBatchResult,
@@ -1765,6 +1770,39 @@ class SchedulerPPMixin:
         d2h_event = None
         batch_result = None
         send_output_work = []
+        trace = None
+        if phase_tracer.enabled:
+
+            def trace(event: str, batch=None, **fields):
+                def collect_trace_fields():
+                    output_group = self.pp_output_group
+                    return {
+                        "component": "pp_output_relay",
+                        "global_rank": getattr(output_group, "rank", None),
+                        "pp_rank": self.ps.pp_rank,
+                        "dp_rank": self.ps.attn_dp_rank,
+                        "microbatch_id": next_mb_id,
+                        "origin_microbatch_id": next_first_rank_mb_id,
+                        "relay_immediately": relay_output_immediately,
+                        "device": str(getattr(self.ps, "gpu_id", "unknown")),
+                        "stream": hex(id(self.schedule_stream)),
+                        **batch_phase_fields(batch),
+                        **describe_process_group(
+                            getattr(output_group, "device_group", None),
+                            dist=torch.distributed,
+                            known_members=getattr(output_group, "ranks", None),
+                            known_rank=getattr(output_group, "rank_in_group", None),
+                            allow_introspection=(
+                                phase_tracer.allow_process_group_introspection
+                            ),
+                        ),
+                        **fields,
+                    }
+
+                phase_tracer.emit(
+                    event,
+                    collect=collect_trace_fields,
+                )
 
         # isend only makes the CPU call asynchronous. Device P2P work remains
         # stream ordered, so all stages enqueueing several sends before any
@@ -1789,8 +1827,12 @@ class SchedulerPPMixin:
                     self._pp_make_skip_output_result(target, mb_metadata[next_mb_id])
                 )
                 return
+            if trace is not None:
+                trace("pp_recv_before", target)
             with torch.profiler.record_function("recv_res_dict_from_prev_stage"):
                 next_pp_outputs = PPProxyTensors(self._pp_recv_dict_from_prev_stage())
+            if trace is not None:
+                trace("pp_recv_complete", target)
             with self.copy_stream_ctx:
                 self.copy_stream.wait_stream(self.schedule_stream)
                 batch_result = self._pp_prep_batch_result(
@@ -1828,13 +1870,32 @@ class SchedulerPPMixin:
                 # every tensor in the incoming dictionary must be complete before
                 # the first reverse send is enqueued.  Otherwise the two peers can
                 # assign opposite-direction sends to the same NCCL P2P sequence.
+                if trace is not None:
+                    trace("pp_fence_before", mbs[next_mb_id])
                 self.schedule_stream.synchronize()
+                if trace is not None:
+                    trace("pp_fence_after", mbs[next_mb_id])
+                    trace("pp_reverse_send_before", mbs[next_mb_id])
                 send_output_work = self._pp_send_dict_to_next_stage(
                     next_pp_outputs.tensors,
                     async_send=True,
                     msg_type="output",
                 )
+                if trace is not None:
+                    trace(
+                        "pp_reverse_send_after",
+                        mbs[next_mb_id],
+                        work_count=len(send_output_work),
+                    )
+            if trace is not None:
+                trace(
+                    "pp_commit_before",
+                    mbs[next_mb_id],
+                    work_count=len(send_output_work),
+                )
             self._pp_commit_comm_work(send_output_work)
+            if trace is not None:
+                trace("pp_commit_after", mbs[next_mb_id], work_count=0)
             send_output_work = []
         elif send_first:
             send_output_work = _do_send()

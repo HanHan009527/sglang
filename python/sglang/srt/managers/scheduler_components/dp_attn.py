@@ -12,6 +12,11 @@ from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import world_dp_gather_enabled
+from sglang.srt.managers.phase_trace import (
+    batch_phase_fields,
+    describe_process_group,
+    phase_tracer,
+)
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler_components.recv_skipper import (
     SchedulerRecvSkipper,
@@ -341,6 +346,7 @@ def prepare_mlp_sync_batch_raw(
     offload_tags: set[str],
     force_cpu_mlp_sync: bool = False,
     dwdp: bool = False,
+    phase_trace_context: Optional[Callable[[], dict]] = None,
 ):
     global _spec_diag_sync_logs
     # Check if other DP workers have running batches
@@ -454,6 +460,53 @@ def prepare_mlp_sync_batch_raw(
     )
 
     if not skip_all_gather:
+        phase_trace_fields = None
+        if phase_tracer.enabled:
+
+            def collect_phase_trace_fields():
+                context = phase_trace_context() if phase_trace_context else {}
+                return {
+                    "component": "dp_mlp_sync",
+                    **context,
+                    "global_rank": context.get(
+                        "global_rank", getattr(tp_group, "rank", None)
+                    ),
+                    "transport": group_kind,
+                    "device": str(device),
+                    "collective": ("all_reduce" if use_world_group else "all_gather"),
+                }
+
+            phase_trace_fields = collect_phase_trace_fields
+            phase_tracer.emit(
+                "dp_all_gather_enter",
+                collect=lambda: {
+                    **phase_trace_fields(),
+                    **batch_phase_fields(local_batch),
+                    **describe_process_group(
+                        group,
+                        dist=torch.distributed,
+                        known_members=(
+                            None
+                            if use_world_group
+                            else getattr(tp_group, "ranks", None)
+                        ),
+                        known_rank=(
+                            None
+                            if use_world_group
+                            else getattr(tp_group, "rank_in_group", None)
+                        ),
+                        allow_introspection=(
+                            phase_tracer.allow_process_group_introspection
+                        ),
+                    ),
+                    "local_tokens": num_tokens,
+                    "local_logprob_tokens": num_tokens_for_logprob,
+                    "local_forward_mode": local_forward_mode,
+                    "local_decode_graph_vote": can_run_decode_cuda_graph,
+                    "local_prefill_graph_vote": can_run_prefill_cuda_graph,
+                    "local_draft_graph_vote": can_run_draft_cuda_graph,
+                },
+            )
         _log_mlp_sync_transport_once(
             group=group,
             group_kind=group_kind,
@@ -466,6 +519,44 @@ def prepare_mlp_sync_batch_raw(
             group=group,
             use_all_reduce=use_world_group,
         )
+        if phase_trace_fields is not None:
+            phase_tracer.emit(
+                "dp_all_gather_exit",
+                collect=lambda: {
+                    **phase_trace_fields(),
+                    **batch_phase_fields(local_batch),
+                    **describe_process_group(
+                        group,
+                        dist=torch.distributed,
+                        known_members=(
+                            None
+                            if use_world_group
+                            else getattr(tp_group, "ranks", None)
+                        ),
+                        known_rank=(
+                            None
+                            if use_world_group
+                            else getattr(tp_group, "rank_in_group", None)
+                        ),
+                        allow_introspection=(
+                            phase_tracer.allow_process_group_introspection
+                        ),
+                    ),
+                    "local_tokens": num_tokens,
+                    "global_tokens": mlp_sync_info.global_num_tokens,
+                    "global_logprob_tokens": (
+                        mlp_sync_info.global_num_tokens_for_logprob
+                    ),
+                    "local_forward_mode": local_forward_mode,
+                    "global_decode_graph_vote": (
+                        mlp_sync_info.can_run_decode_cuda_graph
+                    ),
+                    "global_prefill_graph_vote": (
+                        mlp_sync_info.can_run_prefill_cuda_graph
+                    ),
+                    "global_draft_graph_vote": (mlp_sync_info.can_run_draft_cuda_graph),
+                },
+            )
 
         mlp_sync_info.tbo_split_seq_index, mlp_sync_info.global_forward_mode = (
             tbo_preparer.compute_output(
@@ -553,6 +644,17 @@ class SchedulerDPAttnAdapter:
                 disaggregation_mode=self.server_args.disaggregation_mode,
             ),
             dwdp=get_parallel().dwdp_size > 1,
+            phase_trace_context=(
+                lambda: (
+                    {
+                        "global_rank": self.tp_group.rank,
+                        "pp_rank": self.ps.pp_rank,
+                        "dp_rank": self.ps.attn_dp_rank,
+                    }
+                    if phase_tracer.enabled
+                    else None
+                )
+            ),
         )
 
     def maybe_prepare_mlp_sync_batch(

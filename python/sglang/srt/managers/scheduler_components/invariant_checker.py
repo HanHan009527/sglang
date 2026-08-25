@@ -16,6 +16,7 @@ import torch
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.managers.phase_trace import phase_tracer
 from sglang.srt.managers.scheduler_components.pool_stats_observer import (
     PoolStats,
     SchedulerPoolStatsObserver,
@@ -464,19 +465,41 @@ class SchedulerInvariantChecker:
             self.tree_cache.sanity_check()
 
 
+def format_scheduler_watchdog_dump(scheduler: Scheduler) -> str:
+    """Build a best-effort CPU-only scheduler and phase-trace snapshot."""
+    # Emit the bounded process-local ring before reading live scheduler/cache
+    # state. os.write bypasses logging handlers and cannot touch CUDA state.
+    phase_tracer.write_watchdog_snapshot(tail=32)
+    if scheduler.is_initializing:
+        return (
+            "scheduler.is_initializing=True\n"
+            + phase_tracer.format_watchdog_snapshot(tail=32)
+        )
+    parts = []
+    try:
+        _, messages = scheduler.invariant_checker._check_all_pools(
+            scheduler.pool_stats_observer.get_pool_stats(),
+        )
+        parts.extend(
+            [
+                f"{scheduler.cur_batch_for_debug.batch_size()=}",
+                f"{scheduler.cur_batch_for_debug.reqs=}",
+                *messages,
+            ]
+        )
+    except Exception as exc:
+        parts.append(f"scheduler invariant dump failed: <{type(exc).__name__}>")
+    # The bounded process-local ring does not depend on logger delivery and
+    # reads no tensors or process-group state from the watchdog thread.
+    parts.append(phase_tracer.format_watchdog_snapshot(tail=32))
+    return "\n".join(parts)
+
+
 def create_scheduler_watchdog(
     scheduler: Scheduler, watchdog_timeout: float, soft: bool = False
 ) -> WatchdogRaw:
     def dump_info() -> str:
-        if scheduler.is_initializing:
-            return ""
-        _, messages = scheduler.invariant_checker._check_all_pools(
-            scheduler.pool_stats_observer.get_pool_stats(),
-        )
-        return (
-            f"{scheduler.cur_batch_for_debug.batch_size()=}\n"
-            f"{scheduler.cur_batch_for_debug.reqs=}\n" + "\n".join(messages)
-        )
+        return format_scheduler_watchdog_dump(scheduler)
 
     return WatchdogRaw(
         debug_name="Scheduler",
