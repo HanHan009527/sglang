@@ -8,6 +8,7 @@ import torch
 from sglang.srt.disaggregation.utils import MetadataBuffers
 from sglang.srt.distributed.bootstrap import _prewarm_nccl
 from sglang.srt.environ import envs
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler_pp_mixin import (
     PPBatchMetadata,
     SchedulerPPMixin,
@@ -15,7 +16,6 @@ from sglang.srt.managers.scheduler_pp_mixin import (
     _pp_pack_control_ring_message,
     _pp_unpack_control_ring_message,
 )
-from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_utils import (
@@ -308,6 +308,7 @@ def test_pp_proxy_and_output_use_independent_tensor_channels():
     scheduler = SimpleNamespace(
         pp_group=proxy_group,
         pp_output_group=output_group,
+        pp_output_stream_ctx=nullcontext(),
         _pp_tensor_dict_inbox=defaultdict(deque),
         require_attn_tp_allgather=False,
         attn_tp_group=all_gather_group,
@@ -352,9 +353,8 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
     send_work = [object()]
     recorded_event = Mock()
     target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
-    schedule_stream = SimpleNamespace(
-        synchronize=Mock(side_effect=lambda: events.append("sync"))
-    )
+    schedule_stream = object()
+    output_stream = object()
     scheduler = SimpleNamespace(
         ps=SimpleNamespace(pp_rank=0),
         pp_group=SimpleNamespace(is_last_rank=False),
@@ -363,6 +363,8 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
             wait_stream=lambda stream: events.append(("wait_stream", stream))
         ),
         schedule_stream=schedule_stream,
+        pp_output_stream=output_stream,
+        pp_output_stream_ctx=nullcontext(),
         device_module=SimpleNamespace(
             Event=Mock(return_value=recorded_event),
             current_stream=Mock(return_value=object()),
@@ -381,7 +383,7 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
             or send_work
         ),
         _pp_send_output_to_next_stage=Mock(),
-        _pp_commit_comm_work=Mock(
+        _pp_commit_output_work=Mock(
             side_effect=lambda work: events.append(("commit", work))
         ),
     )
@@ -406,12 +408,10 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
     assert outputs.tensors is received_tensors
     assert event is recorded_event
     assert work == []
-    assert events[-3:] == [
-        "sync",
+    assert events[-2:] == [
         ("send", received_tensors, True, "output"),
         ("commit", send_work),
     ]
-    schedule_stream.synchronize.assert_called_once_with()
     scheduler._pp_send_output_to_next_stage.assert_not_called()
 
 
@@ -425,6 +425,8 @@ def test_pp_disagg_decode_recv_uses_forward_snapshot_after_live_slot_is_cleared(
         copy_stream_ctx=nullcontext(),
         copy_stream=SimpleNamespace(wait_stream=Mock()),
         schedule_stream=SimpleNamespace(synchronize=Mock()),
+        pp_output_stream=object(),
+        pp_output_stream_ctx=nullcontext(),
         device_module=SimpleNamespace(
             Event=Mock(return_value=recorded_event),
             current_stream=Mock(return_value=object()),
@@ -434,6 +436,7 @@ def test_pp_disagg_decode_recv_uses_forward_snapshot_after_live_slot_is_cleared(
         _pp_send_dict_to_next_stage=Mock(return_value=[]),
         _pp_send_output_to_next_stage=Mock(return_value=[]),
         _pp_commit_comm_work=Mock(),
+        _pp_commit_output_work=Mock(),
     )
 
     with patch(
@@ -504,9 +507,7 @@ def test_pp_disagg_decode_forward_snapshot_preserves_seq_lens():
     # EAGLE PP result processing advances this tensor by accept_lens.  A
     # forward snapshot without seq_lens fails there with ``None + Tensor``.
     assert snapshot.seq_lens is seq_lens
-    assert torch.equal(
-        snapshot.seq_lens + torch.tensor([2, 3]), torch.tensor([19, 26])
-    )
+    assert torch.equal(snapshot.seq_lens + torch.tensor([2, 3]), torch.tensor([19, 26]))
 
 
 def test_pp_disagg_decode_processes_snapshot_after_live_slot_is_cleared():
@@ -548,6 +549,8 @@ def test_pp_disagg_output_ring_last_stage_starts_relay_chain():
         copy_stream_ctx=nullcontext(),
         copy_stream=SimpleNamespace(wait_stream=Mock()),
         schedule_stream=object(),
+        pp_output_stream=object(),
+        pp_output_stream_ctx=nullcontext(),
         device_module=SimpleNamespace(
             Event=Mock(return_value=recorded_event),
             current_stream=Mock(return_value=object()),
@@ -562,6 +565,7 @@ def test_pp_disagg_output_ring_last_stage_starts_relay_chain():
         _pp_commit_comm_work=Mock(
             side_effect=lambda work: events.append(("commit", work))
         ),
+        _pp_commit_output_work=Mock(),
     )
 
     with patch(
@@ -623,6 +627,8 @@ def test_pp_output_ring_uses_rank_parity_for_send_recv_order():
             copy_stream_ctx=nullcontext(),
             copy_stream=SimpleNamespace(wait_stream=Mock()),
             schedule_stream=object(),
+            pp_output_stream=object(),
+            pp_output_stream_ctx=nullcontext(),
             device_module=SimpleNamespace(
                 Event=Mock(return_value=Mock()),
                 current_stream=Mock(return_value=object()),
@@ -653,6 +659,67 @@ def test_pp_output_ring_uses_rank_parity_for_send_recv_order():
             )
 
         assert events == expected_order
+
+
+def test_pp_output_channel_uses_dedicated_stream_for_send_recv_and_commit():
+    events = []
+
+    class RecordingContext:
+        def __enter__(self):
+            events.append("output_stream_enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("output_stream_exit")
+
+    proxy_group = SimpleNamespace(
+        send_tensor_dict=Mock(
+            side_effect=lambda **kwargs: events.append("proxy_send") or []
+        ),
+        recv_tensor_dict=Mock(),
+    )
+    output_group = SimpleNamespace(
+        send_tensor_dict=Mock(
+            side_effect=lambda **kwargs: events.append("output_send") or []
+        ),
+        recv_tensor_dict=Mock(
+            side_effect=lambda **kwargs: events.append("output_recv")
+            or {"__msg_type__": "output"}
+        ),
+    )
+    scheduler = SimpleNamespace(
+        pp_group=proxy_group,
+        pp_output_group=output_group,
+        pp_output_stream_ctx=RecordingContext(),
+        _pp_tensor_dict_inbox=defaultdict(deque),
+        require_attn_tp_allgather=False,
+        attn_tp_group=object(),
+        _pp_commit_comm_work=Mock(
+            side_effect=lambda work: events.append(("output_commit", work))
+        ),
+    )
+
+    SchedulerPPMixin._pp_send_dict_to_next_stage(
+        scheduler, {"x": object()}, msg_type="proxy"
+    )
+    SchedulerPPMixin._pp_send_dict_to_next_stage(
+        scheduler, {"y": object()}, msg_type="output"
+    )
+    SchedulerPPMixin._pp_recv_typed_dict(scheduler, expected_kind="output")
+    work = [object()]
+    SchedulerPPMixin._pp_commit_output_work(scheduler, work)
+
+    assert events == [
+        "proxy_send",
+        "output_stream_enter",
+        "output_send",
+        "output_stream_exit",
+        "output_stream_enter",
+        "output_recv",
+        "output_stream_exit",
+        "output_stream_enter",
+        ("output_commit", work),
+        "output_stream_exit",
+    ]
 
 
 def test_pp_prefill_rebuilds_one_authoritative_draft_input():

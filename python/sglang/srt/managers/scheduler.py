@@ -1799,6 +1799,26 @@ class Scheduler(
             ):
                 self.schedule_stream = self.device_module.Stream(priority=0)
                 _redraws += 1
+
+        # PP output relay uses a communicator that is deliberately independent
+        # from the forward-proxy communicator.  Keep its CUDA work on an
+        # independent stream as well.  Otherwise opposite rank pairs can enqueue
+        # proxy and output P2P kernels in reverse order on their one scheduler
+        # stream, creating a cross-communicator GPU wait cycle.
+        self.pp_output_stream = self.device_module.Stream(priority=0)
+        if is_cuda() or _is_hip:
+            occupied_streams = {
+                self.schedule_stream.cuda_stream,
+                self.forward_stream.cuda_stream,
+                self.copy_stream.cuda_stream,
+            }
+            _redraws = 0
+            while (
+                self.pp_output_stream.cuda_stream in occupied_streams and _redraws < 64
+            ):
+                self.pp_output_stream = self.device_module.Stream(priority=0)
+                _redraws += 1
+        self.pp_output_stream_ctx = self.device_module.stream(self.pp_output_stream)
         # The global WAR barrier fences the scheduler's next shared-buffer write
         # on the previous forward's read of the unified memory pool.
         self._war_barrier_enabled = is_cuda() or envs.SGLANG_ENABLE_WAR_BARRIER.get()

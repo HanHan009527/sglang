@@ -5,6 +5,7 @@ import math
 import time
 from array import array
 from collections import defaultdict, deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
@@ -1259,6 +1260,10 @@ class SchedulerPPMixin:
             p2p_work.work.wait()
         work.clear()
 
+    def _pp_commit_output_work(self: Scheduler, work: List[P2PWork]) -> None:
+        with getattr(self, "pp_output_stream_ctx", nullcontext()):
+            self._pp_commit_comm_work(work)
+
     def _pp_commit_send_output_work_and_preprocess_output_tensors(
         self: Scheduler,
         next_first_rank_mb_id: int,
@@ -1270,7 +1275,7 @@ class SchedulerPPMixin:
         Optional[GenerationBatchResult],
         Optional[torch.Event],
     ]:
-        self._pp_commit_comm_work(work=self.send_output_work)
+        self._pp_commit_output_work(work=self.send_output_work)
         (
             next_pp_outputs,
             next_batch_result,
@@ -1417,16 +1422,22 @@ class SchedulerPPMixin:
         # logical streams that legitimately overlap. They must not share one
         # untagged P2P sequence space.
         tensor_group = self.pp_output_group if msg_type == "output" else self.pp_group
-        p2p_work = []
-        p2p_work.extend(
-            tensor_group.send_tensor_dict(
-                tensor_dict=tensor_dict,
-                all_gather_group=(
-                    self.attn_tp_group if self.require_attn_tp_allgather else None
-                ),
-                async_send=async_send,
-            )
+        stream_ctx = (
+            getattr(self, "pp_output_stream_ctx", nullcontext())
+            if msg_type == "output"
+            else nullcontext()
         )
+        p2p_work = []
+        with stream_ctx:
+            p2p_work.extend(
+                tensor_group.send_tensor_dict(
+                    tensor_dict=tensor_dict,
+                    all_gather_group=(
+                        self.attn_tp_group if self.require_attn_tp_allgather else None
+                    ),
+                    async_send=async_send,
+                )
+            )
         return p2p_work
 
     def _pp_recv_typed_dict(
@@ -1447,10 +1458,16 @@ class SchedulerPPMixin:
         tensor_group = (
             self.pp_output_group if expected_kind == "output" else self.pp_group
         )
+        stream_ctx = (
+            getattr(self, "pp_output_stream_ctx", nullcontext())
+            if expected_kind == "output"
+            else nullcontext()
+        )
         while True:
-            tensor_dict = tensor_group.recv_tensor_dict(
-                all_gather_group=all_gather_group
-            )
+            with stream_ctx:
+                tensor_dict = tensor_group.recv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
             received_kind = tensor_dict.get("__msg_type__", "default")
             if received_kind == expected_kind:
                 if received_kind == "default":
@@ -1831,7 +1848,9 @@ class SchedulerPPMixin:
                                 device=str(getattr(self.ps, "gpu_id", "unknown")),
                                 stream=hex(id(self.device_module.current_stream())),
                             )
-                    self.device_module.current_stream().wait_event(q_event)
+                    getattr(
+                        self, "pp_output_stream", self.device_module.current_stream()
+                    ).wait_event(q_event)
                     with torch.profiler.record_function("send_res_dict_to_next_stage"):
                         send_output_work = self._pp_send_dict_to_next_stage(
                             pp_outputs_to_send.tensors,
@@ -1884,7 +1903,7 @@ class SchedulerPPMixin:
                         "origin_microbatch_id": next_first_rank_mb_id,
                         "relay_immediately": relay_output_immediately,
                         "device": str(getattr(self.ps, "gpu_id", "unknown")),
-                        "stream": hex(id(self.schedule_stream)),
+                        "stream": hex(id(self.pp_output_stream)),
                         **batch_phase_fields(batch),
                         **describe_process_group(
                             getattr(output_group, "device_group", None),
@@ -1949,7 +1968,7 @@ class SchedulerPPMixin:
             if trace is not None:
                 trace("pp_recv_complete", target)
             with self.copy_stream_ctx:
-                self.copy_stream.wait_stream(self.schedule_stream)
+                self.copy_stream.wait_stream(self.pp_output_stream)
                 batch_result = self._pp_prep_batch_result(
                     target, mb_metadata[next_mb_id], next_pp_outputs
                 )
@@ -1979,17 +1998,11 @@ class SchedulerPPMixin:
             # the output ring in the same slot (last -> first -> ... -> last).
             _do_recv()
             if next_pp_outputs is not None:
-                # WorkNCCL.wait() only inserts a dependency on the CUDA stream;
-                # it does not wait for the receive at the Python boundary.  This
-                # branch reverses direction on the same output communicator, so
-                # every tensor in the incoming dictionary must be complete before
-                # the first reverse send is enqueued.  Otherwise the two peers can
-                # assign opposite-direction sends to the same NCCL P2P sequence.
+                # Receive and reverse send are enqueued on the dedicated output
+                # stream, so stream order supplies the producer dependency
+                # without synchronizing the scheduler stream or coupling it to
+                # proxy traffic on the other communicator.
                 if trace is not None:
-                    trace("pp_fence_before", mbs[next_mb_id])
-                self.schedule_stream.synchronize()
-                if trace is not None:
-                    trace("pp_fence_after", mbs[next_mb_id])
                     trace("pp_reverse_send_before", mbs[next_mb_id])
                 send_output_work = self._pp_send_dict_to_next_stage(
                     next_pp_outputs.tensors,
@@ -2008,7 +2021,7 @@ class SchedulerPPMixin:
                     mbs[next_mb_id],
                     work_count=len(send_output_work),
                 )
-            self._pp_commit_comm_work(send_output_work)
+            self._pp_commit_output_work(send_output_work)
             if trace is not None:
                 trace("pp_commit_after", mbs[next_mb_id], work_count=0)
             send_output_work = []

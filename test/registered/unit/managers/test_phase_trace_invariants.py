@@ -292,6 +292,8 @@ def _run_pp_exchange(trace_enabled: bool, pp_rank: int):
         copy_stream_ctx=nullcontext(),
         copy_stream=SimpleNamespace(wait_stream=Mock()),
         schedule_stream=object(),
+        pp_output_stream=object(),
+        pp_output_stream_ctx=nullcontext(),
         device_module=SimpleNamespace(
             Event=Mock(return_value=Mock()), current_stream=Mock(return_value=object())
         ),
@@ -358,7 +360,9 @@ def _run_pp_immediate_exchange(trace_enabled: bool):
         copy_stream=SimpleNamespace(
             wait_stream=lambda _stream: events.append("wait_stream")
         ),
-        schedule_stream=SimpleNamespace(synchronize=lambda: events.append("fence")),
+        schedule_stream=object(),
+        pp_output_stream=object(),
+        pp_output_stream_ctx=nullcontext(),
         device_module=SimpleNamespace(
             Event=lambda: SimpleNamespace(
                 record=lambda _stream: events.append("record")
@@ -375,7 +379,7 @@ def _run_pp_immediate_exchange(trace_enabled: bool):
             side_effect=lambda *_args, **_kwargs: events.append("send") or send_work
         ),
         _pp_send_output_to_next_stage=Mock(),
-        _pp_commit_comm_work=Mock(side_effect=lambda _work: events.append("commit")),
+        _pp_commit_output_work=Mock(side_effect=lambda _work: events.append("commit")),
     )
     namespace["_pp_send_recv_and_preprocess_output_tensors"](
         scheduler,
@@ -402,8 +406,8 @@ def test_pp_trace_preserves_send_recv_order_and_default_off_is_zero_work():
         assert on_formatter.call_count > 0
 
 
-def test_pp_immediate_trace_preserves_recv_fence_send_commit_order():
-    expected = ["recv", "wait_stream", "prep", "record", "fence", "send", "commit"]
+def test_pp_immediate_trace_preserves_recv_send_commit_order():
+    expected = ["recv", "wait_stream", "prep", "record", "send", "commit"]
     assert _run_pp_immediate_exchange(False) == expected
     assert _run_pp_immediate_exchange(True) == expected
 
