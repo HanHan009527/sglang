@@ -60,6 +60,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
     PPProxyTensors,
+    _should_force_symmetric_spec_moe_padding,
     compute_local_num_token_non_padded,
     enable_num_token_non_padded,
     get_required_capture_hidden_mode,
@@ -529,6 +530,25 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         if forward_batch.replace_embeds is not None:
             return False
         if self._is_long_context_cuda_graph_disabled(forward_batch):
+            return False
+
+        # A mixed active/idle speculative verify needs the eager preparation
+        # path to materialize idle ranks before the symmetric MoE collective.
+        # FullCG replay bypasses ForwardBatch.prepare_mlp_sync_batch(), so an
+        # idle rank would instead replay the captured TARGET_VERIFY graph over
+        # padding-only req/page metadata.  All ranks see the same original DP
+        # census, making this a rank-consistent fallback decision.
+        original_counts = forward_batch.original_global_num_tokens_cpu
+        if (
+            self.capture_forward_mode.is_target_verify()
+            and original_counts is not None
+            and _should_force_symmetric_spec_moe_padding(
+                spec_algorithm=forward_batch.spec_algorithm,
+                spec_info=forward_batch.spec_info,
+                is_extend_in_batch=forward_batch.is_extend_in_batch,
+                global_num_tokens=original_counts,
+            )
+        ):
             return False
 
         ragged_layout = (

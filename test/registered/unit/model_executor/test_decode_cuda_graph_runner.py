@@ -2,10 +2,14 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+from sglang.srt.model_executor.forward_batch_info import (
+    CaptureHiddenMode,
+    ForwardMode,
+)
 from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
     DecodeCudaGraphRunner,
 )
@@ -33,6 +37,8 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
         runner.capture_hidden_mode = CaptureHiddenMode.NULL
         runner.enable_two_batch_overlap = False
         runner.ragged_verify_mode = False
+        runner.capture_forward_mode = ForwardMode.DECODE
+        runner.captured_req_width = 4
         runner.model_runner = SimpleNamespace(
             spec_algorithm=SimpleNamespace(is_ngram=lambda: False)
         )
@@ -57,6 +63,7 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
                 num_tokens_per_req=-1,
             ),
             input_ids=torch.tensor([1], dtype=torch.int64),
+            original_global_num_tokens_cpu=None,
         )
 
     def test_can_run_graph_rejects_only_depth_above_configured_limit(self):
@@ -74,6 +81,43 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
                 forward_batch = self._build_forward_batch(sequence_depth=sequence_depth)
 
                 self.assertIs(runner.can_run_graph(forward_batch), expected)
+
+    def test_mixed_idle_symmetric_verify_falls_back_consistently(self):
+        runner = self._build_runner(disable_graph_max_seq_len=0)
+        runner.capture_forward_mode = ForwardMode.TARGET_VERIFY
+        forward_batch = self._build_forward_batch(sequence_depth=128)
+        forward_batch.spec_algorithm = SimpleNamespace(is_eagle=lambda: True)
+        forward_batch.spec_info = SimpleNamespace(num_tokens_per_req=4)
+        forward_batch.is_extend_in_batch = False
+        forward_batch.original_global_num_tokens_cpu = [4, 0, 4, 0]
+
+        with patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
+            return_value=True,
+        ) as should_fallback:
+            self.assertFalse(runner.can_run_graph(forward_batch))
+
+        should_fallback.assert_called_once_with(
+            spec_algorithm=forward_batch.spec_algorithm,
+            spec_info=forward_batch.spec_info,
+            is_extend_in_batch=False,
+            global_num_tokens=[4, 0, 4, 0],
+        )
+
+    def test_uniform_symmetric_verify_keeps_full_graph(self):
+        runner = self._build_runner(disable_graph_max_seq_len=0)
+        runner.capture_forward_mode = ForwardMode.TARGET_VERIFY
+        forward_batch = self._build_forward_batch(sequence_depth=128)
+        forward_batch.spec_algorithm = SimpleNamespace(is_eagle=lambda: True)
+        forward_batch.spec_info = SimpleNamespace(num_tokens_per_req=4)
+        forward_batch.is_extend_in_batch = False
+        forward_batch.original_global_num_tokens_cpu = [4, 4, 4, 4]
+
+        with patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
+            return_value=False,
+        ):
+            self.assertTrue(runner.can_run_graph(forward_batch))
 
 
 if __name__ == "__main__":
