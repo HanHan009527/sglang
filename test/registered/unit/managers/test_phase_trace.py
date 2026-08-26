@@ -295,6 +295,24 @@ def test_log_limit_stops_logging_and_pg_introspection_but_keeps_ring():
     ]
 
 
+def test_always_log_bypasses_sampling_and_exhausted_regular_budget():
+    log = Mock()
+    tracer = PhaseTracer(enabled=True, max_events=1, every_n=16, ring_size=4, log=log)
+
+    assert tracer.emit("sampled_out") is False
+    assert tracer.emit("critical", always_log=True) is True
+    assert tracer.emit("regular_budget", always_log=True) is True
+    assert [call.args[0] for call in log.info.call_args_list] == [
+        format_phase_trace("critical", 2, {}),
+        format_phase_trace("regular_budget", 3, {}),
+    ]
+    assert [record["event"] for record in tracer.snapshot()["ring_tail"]] == [
+        "sampled_out",
+        "critical",
+        "regular_budget",
+    ]
+
+
 def test_concurrent_emit_keeps_unique_sequences_and_bounded_snapshot():
     tracer = PhaseTracer(
         enabled=True, max_events=0, every_n=1, ring_size=256, log=Mock()

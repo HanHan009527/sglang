@@ -102,6 +102,7 @@ class SchedulerBatchResultProcessor:
             return
         phase_tracer.emit(
             event,
+            always_log=True,
             component="request_finish",
             rid=str(req.rid),
             req_pool_idx=req.req_pool_idx,
@@ -976,20 +977,25 @@ class SchedulerBatchResultProcessor:
                     self._accept_grammar_tokens(req, next_token_id)
                 req.grammar.finished = req.finished()
 
+        finished_rids = None
         if phase_tracer.enabled:
+            finished_rids = [str(req.rid) for req in batch.reqs if req.finished()]
+        if finished_rids:
             phase_tracer.emit(
                 "decode_stream_output_before",
+                always_log=True,
                 component="request_finish",
                 batch_id=hex(id(batch)),
-                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+                finished_rids=finished_rids,
             )
         self.output_streamer.stream_output(batch.reqs, batch.return_logprob)
-        if phase_tracer.enabled:
+        if finished_rids:
             phase_tracer.emit(
                 "decode_stream_output_after",
+                always_log=True,
                 component="request_finish",
                 batch_id=hex(id(batch)),
-                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+                finished_rids=finished_rids,
             )
         self.token_to_kv_pool_allocator.free_group_end()
 
@@ -1007,12 +1013,13 @@ class SchedulerBatchResultProcessor:
             running_batch=batch,
             num_correct_drafts=result.num_correct_drafts,
         )
-        if phase_tracer.enabled:
+        if finished_rids:
             phase_tracer.emit(
                 "decode_result_processing_return",
+                always_log=True,
                 component="request_finish",
                 batch_id=hex(id(batch)),
-                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+                finished_rids=finished_rids,
             )
 
     def _normalize_decode_outputs(

@@ -228,6 +228,7 @@ class PhaseTracer:
         event: str,
         *,
         collect: Optional[Callable[[], dict[str, Any]]] = None,
+        always_log: bool = False,
         **fields: Any,
     ) -> bool:
         if not self.enabled:
@@ -242,8 +243,14 @@ class PhaseTracer:
             record = _make_phase_trace_record(event, seq, fields)
             self._ring.append(record)
 
-            if seq % self.every_n != 0:
+            if not always_log and seq % self.every_n != 0:
                 return False
+            if always_log:
+                try:
+                    self.log.info(_format_record(_LOG_PREFIX, record))
+                except Exception:
+                    return False
+                return True
 
             log_slot = next(self._log_slots)
             if log_slot > self.max_events:

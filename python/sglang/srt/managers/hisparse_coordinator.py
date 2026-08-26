@@ -2948,6 +2948,7 @@ class HiSparseCoordinator:
             if phase_tracer.enabled:
                 phase_tracer.emit(
                     "hisparse_finish_producer_wait_before",
+                    always_log=True,
                     component="hisparse_finish",
                     rid=str(req.rid),
                     req_pool_idx=req.req_pool_idx,
@@ -2957,6 +2958,7 @@ class HiSparseCoordinator:
             if phase_tracer.enabled:
                 phase_tracer.emit(
                     "hisparse_finish_producer_wait_after",
+                    always_log=True,
                     component="hisparse_finish",
                     rid=str(req.rid),
                     req_pool_idx=req.req_pool_idx,
@@ -2965,6 +2967,7 @@ class HiSparseCoordinator:
         if phase_tracer.enabled:
             phase_tracer.emit(
                 "hisparse_finish_pending_backup_before",
+                always_log=True,
                 component="hisparse_finish",
                 rid=str(req.rid),
                 req_pool_idx=req.req_pool_idx,
@@ -2975,6 +2978,7 @@ class HiSparseCoordinator:
         if phase_tracer.enabled:
             phase_tracer.emit(
                 "hisparse_finish_pending_backup_after",
+                always_log=True,
                 component="hisparse_finish",
                 rid=str(req.rid),
                 req_pool_idx=req.req_pool_idx,
@@ -3052,6 +3056,7 @@ class HiSparseCoordinator:
         if phase_tracer.enabled:
             phase_tracer.emit(
                 "hisparse_finish_return",
+                always_log=True,
                 component="hisparse_finish",
                 rid=str(req.rid),
                 req_pool_idx=req.req_pool_idx,
