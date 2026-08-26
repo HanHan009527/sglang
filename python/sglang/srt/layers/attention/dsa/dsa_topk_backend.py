@@ -399,9 +399,14 @@ def _probe_topk_v2_inputs(
         page_table.shape[1], dtype=lengths.dtype, device=lengths.device
     ).unsqueeze(0)
     live_mask = page_columns < live_pages.unsqueeze(1)
+    # Token slot 0 is reserved as padding, but this compact table stores
+    # physical page ids (token_slot // page_size). Consequently, live token
+    # slots 1..page_size-1 legitimately map to physical page 0. Reject only
+    # negative ids here; treating page 0 itself as padding makes CUDA-graph
+    # capture fail as soon as a request owns the first physical page.
     torch._assert_async(
-        ((~live_mask) | (page_table >= 1)).all(),
-        f"live page id < 1 (padding/stale page in live prefix): {context}",
+        ((~live_mask) | (page_table >= 0)).all(),
+        f"live page id < 0 (invalid page in live prefix): {context}",
     )
     torch._assert_async(
         ((~live_mask) | (page_table < page_capacity)).all(),

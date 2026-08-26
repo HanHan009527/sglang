@@ -144,11 +144,14 @@ class TestDSATopKV2DiagnosticContract(unittest.TestCase):
 
         for name, page_table, expected in (
             ("stale_tail_is_ignored", base_table, [True] * 5),
-            ("zero_live_page", base_table.clone(), [True, True, True, False, True]),
+            ("zero_live_page", base_table.clone(), [True] * 5),
+            ("negative_live_page", base_table.clone(), [True, True, True, False, True]),
             ("page_at_capacity", base_table.clone(), [True, True, True, True, False]),
         ):
             if name == "zero_live_page":
                 page_table[1, 0] = 0
+            elif name == "negative_live_page":
+                page_table[1, 0] = -1
             elif name == "page_at_capacity":
                 page_table[2, 1] = 4
             events = []
