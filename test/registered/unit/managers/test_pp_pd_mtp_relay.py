@@ -15,6 +15,7 @@ from sglang.srt.managers.scheduler_pp_mixin import (
     _pp_pack_control_ring_message,
     _pp_unpack_control_ring_message,
 )
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_utils import (
@@ -492,6 +493,20 @@ def test_pp_disagg_decode_snapshot_is_single_use():
     scheduler._pp_process_batch_result.assert_called_once_with(snapshot, result)
     assert scheduler.last_mbs[0] is live_batch
     assert scheduler.mb_metadata[0] is None
+
+
+def test_pp_disagg_decode_forward_snapshot_preserves_seq_lens():
+    seq_lens = torch.tensor([17, 23], dtype=torch.int64)
+    batch = ScheduleBatch(reqs=[], seq_lens=seq_lens)
+
+    snapshot = batch.copy()
+
+    # EAGLE PP result processing advances this tensor by accept_lens.  A
+    # forward snapshot without seq_lens fails there with ``None + Tensor``.
+    assert snapshot.seq_lens is seq_lens
+    assert torch.equal(
+        snapshot.seq_lens + torch.tensor([2, 3]), torch.tensor([19, 26])
+    )
 
 
 def test_pp_disagg_decode_processes_snapshot_after_live_slot_is_cleared():
