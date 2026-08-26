@@ -49,20 +49,24 @@ def transform_index_page_table_decode_kernel(
     result_ptr: torch.Tensor,
     page_size: tl.constexpr,
     page_table_row_stride: tl.constexpr,
-    page_table_num_rows: tl.constexpr,
+    page_table_num_rows,
 ):
     TOPK: tl.constexpr = 2048
     req_id = tl.program_id(0)
-    page_table_ptr = page_table_ptr + req_id * page_table_row_stride
     topk_indices_ptr = topk_indices_ptr + req_id * TOPK
     result_ptr = result_ptr + req_id * TOPK
 
     offset = tl.arange(0, TOPK)  # topk should be 2048
+    # DP attention can append dummy query rows while keeping request metadata
+    # compact. These rows have no page-table owner and must not form pointers
+    # into the table, regardless of the contents of their top-k buffer.
+    if req_id >= page_table_num_rows:
+        tl.store(result_ptr + offset, -1)
+        return
+
+    page_table_ptr = page_table_ptr + req_id * page_table_row_stride
     loaded_topk_indices = tl.load(topk_indices_ptr + offset)
-    # Partial DP attention pads the local query/top-k batch to attention-TP,
-    # while the request page table keeps one row per real local query.  The
-    # padded top-k rows are all -1 and must not dereference a page-table row.
-    mask = (req_id < page_table_num_rows) & (loaded_topk_indices >= 0)
+    mask = loaded_topk_indices >= 0
     loaded_kv_indices = tl.load(page_table_ptr + loaded_topk_indices, mask=mask)
     tl.store(result_ptr + offset, loaded_kv_indices, mask=mask)
     tl.store(result_ptr + offset, -1, mask=~mask)
@@ -135,11 +139,12 @@ def transform_index_page_table_decode_fast(
     """
     Transform the page table according to topk indices for sparse topk attention.
     Args:
-        page_table: [qo_len, max_seqlen_k], the original page table
-        topk_indices: [qo_len, topk], the topk indices for each query position
+        page_table: [real_qo_len, max_seqlen_k], the original page table
+        topk_indices: [padded_qo_len, topk], the topk indices for each query
+            position. Partial-DP padding rows may extend beyond real_qo_len.
     Returns:
-        transformed_page_table: [qo_len, topk], the transformed page table
-        For out-of-bound indices in topk_indices, this should be filled with -1.
+        transformed_page_table: [padded_qo_len, topk], the transformed page
+        table. Padding rows and negative sentinel indices are filled with -1.
     """
     assert page_size == 1
     assert page_table.shape[0] <= topk_indices.shape[0], (
@@ -225,19 +230,20 @@ def transform_index_page_table_decode_ref(
         f"({topk_indices.shape[0]})"
     )
     if result is None:
-        result = torch.full_like(topk_indices, -1, dtype=torch.int32)
-    else:
-        result.fill_(-1)
+        result = torch.empty_like(topk_indices, dtype=torch.int32)
     assert result.shape == topk_indices.shape
+    result.fill_(-1)
     real_rows = page_table.shape[0]
     if real_rows > 0:
+        real_topk = topk_indices[:real_rows]
+        real_result = result[:real_rows]
         torch.gather(
             page_table.to(result.dtype),
             dim=1,
-            index=topk_indices[:real_rows].clamp(min=0),
-            out=result[:real_rows],
+            index=real_topk.clamp(min=0),
+            out=real_result,
         )
-        result[:real_rows][topk_indices[:real_rows] < 0] = -1
+        real_result.masked_fill_(real_topk < 0, -1)
     return result
 
 
