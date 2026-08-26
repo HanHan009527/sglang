@@ -2976,12 +2976,22 @@ class DeepseekSparseAttnBackend(
     ) -> torch.Tensor:
         from sgl_kernel.flash_mla import flash_mla_with_kvcache
 
-        live_num_tokens = q_all.shape[0]
-        cache_seqlens = metadata.dsa_cache_seqlens_int32[:live_num_tokens]
+        cache_seqlens = metadata.dsa_cache_seqlens_int32
         assert metadata.flashmla_metadata is not None
         num_splits = metadata.flashmla_metadata.num_splits
 
-        # TODO the 2nd dim is seq_len_q, need to be >1 when MTP
+        # Eager DP attention can pad q/page-table rows to the largest token count
+        # in the group after FlashMLA metadata has been planned for the real
+        # request rows. Sparse attention has no DP collective, so run only that
+        # real prefix and restore the physical shape before the following MLP/EP
+        # collectives. Each DSA decode metadata row still describes one query
+        # token; combining padded rows into seq_len_q > 1 would merge requests.
+        q_all, page_table_1, num_padding_rows = _trim_trtllm_decode_dp_padding(
+            q_all,
+            page_table_1,
+            cache_seqlens.shape[0],
+        )
+
         q_all = q_all.view(-1, 1, layer.tp_q_head_num, layer.head_dim)
         num_q_heads = q_all.shape[2]
         target_q_heads = self.flashmla_kv_num_q_heads
@@ -3035,7 +3045,7 @@ class DeepseekSparseAttnBackend(
         if target_q_heads != num_q_heads:
             o = o[:, :, :num_q_heads, :]
 
-        return o
+        return _restore_trtllm_decode_dp_padding(o, num_padding_rows)
 
     def _forward_standard_mha(
         self,
