@@ -12,10 +12,10 @@ from typing import (
 )
 
 import torch
-
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.managers.phase_trace import phase_tracer
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
     FINISH_MATCHED_TOKEN,
@@ -96,14 +96,39 @@ class SchedulerBatchResultProcessor:
     abort_request: Callable
     draft_hisparse_coordinator: Optional[HiSparseCoordinator] = None
 
+    def _trace_request_finish(self, event: str, req: Req, **fields) -> None:
+        """Emit host-only request lifecycle metadata when phase tracing is on."""
+        if not phase_tracer.enabled:
+            return
+        phase_tracer.emit(
+            event,
+            component="request_finish",
+            rid=str(req.rid),
+            req_pool_idx=req.req_pool_idx,
+            output_len=len(req.output_ids),
+            **fields,
+        )
+
     def _finish_hisparse_request(self, req: Req) -> None:
         if self.hisparse_coordinator is not None:
+            self._trace_request_finish(
+                "request_finish_hisparse_target_before", req
+            )
             self.hisparse_coordinator.request_finished(req)
+            self._trace_request_finish(
+                "request_finish_hisparse_target_after", req
+            )
         if (
             self.draft_hisparse_coordinator is not None
             and self.draft_hisparse_coordinator is not self.hisparse_coordinator
         ):
+            self._trace_request_finish(
+                "request_finish_hisparse_draft_before", req
+            )
             self.draft_hisparse_coordinator.request_finished(req)
+            self._trace_request_finish(
+                "request_finish_hisparse_draft_after", req
+            )
 
     def process_batch_result_prebuilt(self, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
@@ -833,6 +858,13 @@ class SchedulerBatchResultProcessor:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "decode_result_processing_enter",
+                component="request_finish",
+                batch_id=hex(id(batch)),
+                batch_size=len(batch.reqs),
+            )
         if result.copy_done is not None:
             result.copy_done.synchronize()
         if result.routed_experts_output is not None:
@@ -944,7 +976,21 @@ class SchedulerBatchResultProcessor:
                     self._accept_grammar_tokens(req, next_token_id)
                 req.grammar.finished = req.finished()
 
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "decode_stream_output_before",
+                component="request_finish",
+                batch_id=hex(id(batch)),
+                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+            )
         self.output_streamer.stream_output(batch.reqs, batch.return_logprob)
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "decode_stream_output_after",
+                component="request_finish",
+                batch_id=hex(id(batch)),
+                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+            )
         self.token_to_kv_pool_allocator.free_group_end()
 
         if isinstance(batch.spec_info, EaglePPVerifyInputRaw):
@@ -961,6 +1007,13 @@ class SchedulerBatchResultProcessor:
             running_batch=batch,
             num_correct_drafts=result.num_correct_drafts,
         )
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "decode_result_processing_return",
+                component="request_finish",
+                batch_id=hex(id(batch)),
+                finished_rids=[str(req.rid) for req in batch.reqs if req.finished()],
+            )
 
     def _normalize_decode_outputs(
         self,
@@ -1077,9 +1130,15 @@ class SchedulerBatchResultProcessor:
             # isinstance narrowing: create_worker may also return plain
             # TpModelWorker-based drafts, which carry no spec-worker hooks.
             if isinstance(self.draft_worker, BaseSpecWorker):
+                self._trace_request_finish(
+                    "request_finish_note_draft_before", req
+                )
                 self.draft_worker.note_request_finished(
                     rid=req.rid,
                     natural_stop=isinstance(req.finished_reason, FINISH_MATCHED_TOKEN),
+                )
+                self._trace_request_finish(
+                    "request_finish_note_draft_after", req
                 )
 
             # delete feature to save memory
@@ -1099,15 +1158,28 @@ class SchedulerBatchResultProcessor:
                     self.model_worker, "prepare_for_kv_cache_release", None
                 )
                 if callable(prepare_release):
+                    self._trace_request_finish(
+                        "request_finish_prepare_kv_release_before", req
+                    )
                     prepare_release(req)
+                    self._trace_request_finish(
+                        "request_finish_prepare_kv_release_after", req
+                    )
                 is_insert = (
                     req.mamba_lazy_is_insert
                     if get_server_args().enable_mamba_extra_buffer_lazy()
                     else True
                 )
+                self._trace_request_finish(
+                    "request_finish_release_kv_before", req, is_insert=is_insert
+                )
                 release_kv_cache(req, self.tree_cache, is_insert=is_insert)
+                self._trace_request_finish(
+                    "request_finish_release_kv_after", req, is_insert=is_insert
+                )
 
             req.time_stats.set_completion_time()
+            self._trace_request_finish("request_finish_handler_return", req)
 
         self._maybe_collect_customized_info(i, req, logits_output)
 

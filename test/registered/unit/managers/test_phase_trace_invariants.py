@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -406,3 +406,75 @@ def test_pp_immediate_trace_preserves_recv_fence_send_commit_order():
     expected = ["recv", "wait_stream", "prep", "record", "fence", "send", "commit"]
     assert _run_pp_immediate_exchange(False) == expected
     assert _run_pp_immediate_exchange(True) == expected
+
+
+def _make_batch_result_processor(*, target_hisparse=None, draft_hisparse=None):
+    from sglang.srt.managers.scheduler_components.batch_result_processor import (
+        SchedulerBatchResultProcessor,
+    )
+
+    return SchedulerBatchResultProcessor(
+        is_generation=True,
+        disaggregation_mode=None,
+        enable_overlap=False,
+        enable_overlap_mlx=False,
+        server_args=SimpleNamespace(),
+        model_config=SimpleNamespace(),
+        token_to_kv_pool_allocator=Mock(),
+        tree_cache=Mock(),
+        hisparse_coordinator=target_hisparse,
+        req_to_token_pool=Mock(),
+        decode_offload_manager=None,
+        metrics_collector=Mock(),
+        metrics_reporter=Mock(),
+        draft_worker=Mock(),
+        model_worker=Mock(),
+        logprob_result_processor=Mock(),
+        output_streamer=Mock(),
+        abort_request=Mock(),
+        draft_hisparse_coordinator=draft_hisparse,
+    )
+
+
+def test_request_finish_trace_default_off_does_not_read_request_metadata():
+    from sglang.srt.managers.scheduler_components import batch_result_processor
+
+    class HostileReq:
+        def __getattribute__(self, _name):
+            raise AssertionError("disabled tracing read request metadata")
+
+    processor = _make_batch_result_processor()
+    with patch.object(batch_result_processor.phase_tracer, "enabled", False):
+        processor._trace_request_finish("disabled", HostileReq())
+
+
+def test_hisparse_finish_trace_preserves_target_then_draft_order():
+    from sglang.srt.managers.scheduler_components import batch_result_processor
+
+    calls = []
+    target = SimpleNamespace(
+        request_finished=lambda _req: calls.append("target_finish")
+    )
+    draft = SimpleNamespace(request_finished=lambda _req: calls.append("draft_finish"))
+    processor = _make_batch_result_processor(
+        target_hisparse=target, draft_hisparse=draft
+    )
+    req = SimpleNamespace(rid="r0", req_pool_idx=7, output_ids=[1, 2, 3])
+
+    def emit(event, **_fields):
+        calls.append(event)
+
+    with (
+        patch.object(batch_result_processor.phase_tracer, "enabled", True),
+        patch.object(batch_result_processor.phase_tracer, "emit", side_effect=emit),
+    ):
+        processor._finish_hisparse_request(req)
+
+    assert calls == [
+        "request_finish_hisparse_target_before",
+        "target_finish",
+        "request_finish_hisparse_target_after",
+        "request_finish_hisparse_draft_before",
+        "draft_finish",
+        "request_finish_hisparse_draft_after",
+    ]

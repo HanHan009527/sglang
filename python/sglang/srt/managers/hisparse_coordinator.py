@@ -8,11 +8,11 @@ from enum import Enum
 from typing import List, Literal, NamedTuple, Optional, Union
 
 import torch
-
 from sglang.kernels.ops.kvcache.hisparse import (
     load_cache_to_device_buffer_dsv4_mla,
     load_cache_to_device_buffer_mla,
 )
+from sglang.srt.managers.phase_trace import phase_tracer
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.mem_cache.allocator.hisparse import (
     DeepSeekV4HiSparseTokenToKVPoolAllocator,
@@ -2945,9 +2945,41 @@ class HiSparseCoordinator:
     def request_finished(self, req: Req):
         # release resources only after the execution of a potential overlapped batch
         if self.decode_producer_stream is not None:
+            if phase_tracer.enabled:
+                phase_tracer.emit(
+                    "hisparse_finish_producer_wait_before",
+                    component="hisparse_finish",
+                    rid=str(req.rid),
+                    req_pool_idx=req.req_pool_idx,
+                    coordinator=hex(id(self)),
+                )
             device_module.current_stream().wait_stream(self.decode_producer_stream)
+            if phase_tracer.enabled:
+                phase_tracer.emit(
+                    "hisparse_finish_producer_wait_after",
+                    component="hisparse_finish",
+                    rid=str(req.rid),
+                    req_pool_idx=req.req_pool_idx,
+                    coordinator=hex(id(self)),
+                )
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "hisparse_finish_pending_backup_before",
+                component="hisparse_finish",
+                rid=str(req.rid),
+                req_pool_idx=req.req_pool_idx,
+                coordinator=hex(id(self)),
+            )
         self.wait_for_pending_backup()
         self.clear_pending_draft_extend_backup()
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "hisparse_finish_pending_backup_after",
+                component="hisparse_finish",
+                rid=str(req.rid),
+                req_pool_idx=req.req_pool_idx,
+                coordinator=hex(id(self)),
+            )
 
         # Use kv_allocated_len (not seqlen): under speculative decoding the
         # allocator can over-allocate beyond the committed seqlen, and those
@@ -3017,6 +3049,16 @@ class HiSparseCoordinator:
         self._skip_first_backup[req.req_pool_idx] = False
         self.active_hisparse_reqs.pop(req.req_pool_idx, None)
         self._clear_residency_state(req.req_pool_idx)
+        if phase_tracer.enabled:
+            phase_tracer.emit(
+                "hisparse_finish_return",
+                component="hisparse_finish",
+                rid=str(req.rid),
+                req_pool_idx=req.req_pool_idx,
+                coordinator=hex(id(self)),
+                allocated_len=allocated_len,
+                resident=is_resident_req,
+            )
 
     def swap_in_selected_pages(
         self,
