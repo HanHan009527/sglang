@@ -1,3 +1,6 @@
+import json
+import os
+import socket
 from collections import defaultdict, deque
 from contextlib import nullcontext
 from queue import Queue
@@ -5,7 +8,10 @@ from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from sglang.srt.disaggregation.utils import MetadataBuffers
 from sglang.srt.distributed.bootstrap import _prewarm_nccl
@@ -13,10 +19,13 @@ from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler_pp_mixin import (
     PPBatchMetadata,
+    PPOutputSlotDescriptor,
     SchedulerPPMixin,
     _pp_can_skip_output_comm,
+    _pp_describe_output_slot,
     _pp_pack_control_ring_message,
     _pp_unpack_control_ring_message,
+    _pp_validate_output_slot_descriptors,
 )
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
@@ -48,6 +57,249 @@ class _ProxyOutputs:
 
     def __getitem__(self, key):
         return self.tensors[key]
+
+
+def _output_slot_descriptor(
+    target, *, epoch=0, slot_id=0, tensor_schema=("next_token_ids",)
+):
+    descriptor = _pp_describe_output_slot(
+        epoch=epoch,
+        slot_id=slot_id,
+        target=target,
+        tensor_schema=tensor_schema if target is not None else (),
+    )
+    return PPOutputSlotDescriptor(
+        **{
+            **descriptor.__dict__,
+            "producer_ready": True if target is not None else None,
+            "producer_queue_depth": 1 if target is not None else 0,
+        }
+    )
+
+
+def test_pp_output_slot_agreement_accepts_identical_rank_snapshots():
+    target = SimpleNamespace(
+        forward_mode=ForwardMode.DECODE,
+        reqs=[SimpleNamespace(rid="r0"), SimpleNamespace(rid="r1")],
+    )
+    authority = _output_slot_descriptor(
+        target, epoch=7, slot_id=1, tensor_schema=("next_token_ids",)
+    )
+    local = PPOutputSlotDescriptor(
+        **{
+            **authority.__dict__,
+            "tensor_schema": (),
+            "producer_ready": None,
+            "producer_queue_depth": None,
+        }
+    )
+
+    assert (
+        _pp_validate_output_slot_descriptors(
+            [local, authority], expected_epoch=7, expected_slot_id=1
+        )
+        is authority
+    )
+
+
+def test_pp_output_slot_agreement_fails_before_pg8_on_presence_divergence():
+    absent = _output_slot_descriptor(None, epoch=3, slot_id=0)
+    present = _output_slot_descriptor(
+        SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            reqs=[SimpleNamespace(rid="r0")],
+        ),
+        epoch=3,
+        slot_id=0,
+    )
+
+    with pytest.raises(RuntimeError, match="agreement failed before PG8"):
+        _pp_validate_output_slot_descriptors(
+            [absent, present], expected_epoch=3, expected_slot_id=0
+        )
+
+
+def test_pp_output_slot_agreement_fails_before_pg8_on_skip_or_batch_divergence():
+    authority = _output_slot_descriptor(
+        SimpleNamespace(
+            forward_mode=ForwardMode.DECODE,
+            reqs=[SimpleNamespace(rid="authority")],
+        ),
+        epoch=4,
+        slot_id=1,
+    )
+    divergent = PPOutputSlotDescriptor(
+        **{
+            **authority.__dict__,
+            "skip_output_comm": not authority.skip_output_comm,
+            "request_ids": ("stale",),
+            "tensor_schema": (),
+            "producer_ready": None,
+            "producer_queue_depth": None,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match=r"skip_output_comm.*request_ids"):
+        _pp_validate_output_slot_descriptors(
+            [divergent, authority], expected_epoch=4, expected_slot_id=1
+        )
+
+
+def test_pp_output_slot_agreement_rejects_missing_or_stale_producer_queue():
+    target = SimpleNamespace(
+        forward_mode=ForwardMode.DECODE,
+        reqs=[SimpleNamespace(rid="r0")],
+    )
+    missing = PPOutputSlotDescriptor(
+        **{
+            **_output_slot_descriptor(target).__dict__,
+            "tensor_schema": (),
+            "producer_ready": False,
+            "producer_queue_depth": 0,
+            "producer_error": "missing queue head",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="producer_not_ready"):
+        _pp_validate_output_slot_descriptors(
+            [missing, missing], expected_epoch=0, expected_slot_id=0
+        )
+
+
+def _pp_output_slot_gloo_worker(rank, world_size, port, trace_dir):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        trace = []
+        for epoch, has_output in enumerate((True, False)):
+            slot_id = epoch % 2
+            trace.append((epoch, "pg7_complete"))
+            target = (
+                SimpleNamespace(
+                    forward_mode=ForwardMode.DECODE,
+                    reqs=[SimpleNamespace(rid=f"r{epoch}")],
+                )
+                if has_output
+                else None
+            )
+            local = _pp_describe_output_slot(
+                epoch=epoch, slot_id=slot_id, target=target
+            )
+            if rank == world_size - 1:
+                local = PPOutputSlotDescriptor(
+                    **{
+                        **local.__dict__,
+                        "tensor_schema": ("next_token_ids",) if has_output else (),
+                        "producer_ready": True if has_output else None,
+                        "producer_queue_depth": 1 if has_output else 0,
+                    }
+                )
+            descriptors = [None] * world_size
+            dist.all_gather_object(descriptors, local)
+            authority = _pp_validate_output_slot_descriptors(
+                descriptors, expected_epoch=epoch, expected_slot_id=slot_id
+            )
+            trace.append((epoch, "agreement"))
+            if authority.communicates:
+                trace.append((epoch, "pg8_complete"))
+            completed = [None] * world_size
+            dist.all_gather_object(completed, (epoch, slot_id))
+            assert completed == [(epoch, slot_id)] * world_size
+            trace.append((epoch, "fence_complete"))
+
+        with open(os.path.join(trace_dir, f"rank-{rank}.json"), "w") as fout:
+            json.dump(trace, fout)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_pp_output_slot_real_gloo_two_rank_phase_trace(tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    mp.spawn(
+        _pp_output_slot_gloo_worker,
+        args=(2, port, str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+
+    expected = [
+        [0, "pg7_complete"],
+        [0, "agreement"],
+        [0, "pg8_complete"],
+        [0, "fence_complete"],
+        [1, "pg7_complete"],
+        [1, "agreement"],
+        [1, "fence_complete"],
+    ]
+    assert json.loads((tmp_path / "rank-0.json").read_text()) == expected
+    assert json.loads((tmp_path / "rank-1.json").read_text()) == expected
+
+
+def _pp_output_slot_gloo_divergence_worker(rank, world_size, port, trace_dir):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        target = (
+            SimpleNamespace(
+                forward_mode=ForwardMode.DECODE,
+                reqs=[SimpleNamespace(rid="r0")],
+            )
+            if rank == world_size - 1
+            else None
+        )
+        local = _pp_describe_output_slot(epoch=0, slot_id=0, target=target)
+        if rank == world_size - 1:
+            local = PPOutputSlotDescriptor(
+                **{
+                    **local.__dict__,
+                    "tensor_schema": ("next_token_ids",),
+                    "producer_ready": True,
+                    "producer_queue_depth": 1,
+                }
+            )
+        descriptors = [None] * world_size
+        dist.all_gather_object(descriptors, local)
+        try:
+            _pp_validate_output_slot_descriptors(
+                descriptors, expected_epoch=0, expected_slot_id=0
+            )
+        except RuntimeError as exc:
+            result = {"failed_before_pg8": True, "error": str(exc)}
+        else:
+            result = {"failed_before_pg8": False}
+        with open(os.path.join(trace_dir, f"divergence-rank-{rank}.json"), "w") as fout:
+            json.dump(result, fout)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_pp_output_slot_real_gloo_divergence_fails_fast(tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    mp.spawn(
+        _pp_output_slot_gloo_divergence_worker,
+        args=(2, port, str(tmp_path)),
+        nprocs=2,
+        join=True,
+    )
+
+    for rank in range(2):
+        result = json.loads((tmp_path / f"divergence-rank-{rank}.json").read_text())
+        assert result["failed_before_pg8"] is True
+        assert "has_output" in result["error"]
 
 
 def test_nccl_prewarm_initializes_distinct_tp_and_pp_groups():
@@ -635,6 +887,7 @@ def _run_closed_output_ring_rank(pp_rank, *, send_work, target):
             relay_output_immediately=True,
             use_forward_batch_snapshot=True,
             close_output_ring=True,
+            output_slot_descriptor=_output_slot_descriptor(target),
         )
 
     return events, result
@@ -737,6 +990,7 @@ def test_pp_disagg_output_ring_two_rank_multislot_has_no_cross_slot_work():
                     relay_output_immediately=True,
                     use_forward_batch_snapshot=True,
                     close_output_ring=True,
+                    output_slot_descriptor=_output_slot_descriptor(target, epoch=slot),
                 )
             )
             results[pp_rank].append(work)
@@ -818,11 +1072,10 @@ def test_pp_disagg_output_ring_initial_empty_slot_is_symmetric_and_non_consuming
             relay_output_immediately=True,
             use_forward_batch_snapshot=True,
             close_output_ring=True,
+            output_slot_descriptor=_output_slot_descriptor(None, slot_id=1),
         )
 
-        assert events == (
-            [("commit", [])] if pp_rank == 0 else [("empty", 1), ("commit", [])]
-        )
+        assert events == [("commit", [])]
         assert len(queue) == 1
         assert work == []
         scheduler._pp_recv_dict_from_prev_stage.assert_not_called()
@@ -864,6 +1117,7 @@ def test_pp_disagg_output_ring_skip_slot_is_symmetric_and_has_no_wire_work():
                     relay_output_immediately=True,
                     use_forward_batch_snapshot=True,
                     close_output_ring=True,
+                    output_slot_descriptor=_output_slot_descriptor(target),
                 )
             )
 

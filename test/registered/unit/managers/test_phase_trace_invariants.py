@@ -307,6 +307,11 @@ class _ProxyTensors:
 def _run_pp_exchange(trace_enabled: bool, pp_rank: int):
     path = _ROOT / "python/sglang/srt/managers/scheduler_pp_mixin.py"
 
+    def output_slot_target(slot_id, mbs, mb_metadata):
+        target = mbs[slot_id]
+        metadata = mb_metadata[slot_id]
+        return getattr(metadata, "fwd_batch", None) or target
+
     def emit(_event, *, collect=None, **_fields):
         if collect is not None:
             collect()
@@ -320,6 +325,7 @@ def _run_pp_exchange(trace_enabled: bool, pp_rank: int):
     namespace = {
         "PPProxyTensors": _ProxyTensors,
         "_pp_can_skip_output_comm": Mock(return_value=False),
+        "_pp_output_slot_target": output_slot_target,
         "batch_phase_fields": Mock(return_value={}),
         "describe_process_group": describe_group,
         "phase_tracer": phase_tracer,
@@ -375,6 +381,11 @@ def _run_pp_exchange(trace_enabled: bool, pp_rank: int):
 def _run_pp_immediate_exchange(trace_enabled: bool):
     path = _ROOT / "python/sglang/srt/managers/scheduler_pp_mixin.py"
 
+    def output_slot_target(slot_id, mbs, mb_metadata):
+        target = mbs[slot_id]
+        metadata = mb_metadata[slot_id]
+        return getattr(metadata, "fwd_batch", None) or target
+
     def emit(_event, *, collect=None, **_fields):
         if collect is not None:
             collect()
@@ -387,6 +398,7 @@ def _run_pp_immediate_exchange(trace_enabled: bool):
     namespace = {
         "PPProxyTensors": _ProxyTensors,
         "_pp_can_skip_output_comm": Mock(return_value=False),
+        "_pp_output_slot_target": output_slot_target,
         "batch_phase_fields": Mock(return_value={}),
         "describe_process_group": Mock(return_value={}),
         "phase_tracer": phase_tracer,

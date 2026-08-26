@@ -117,9 +117,10 @@ def test_pp_launch_applies_war_barrier_before_bookkeeping(is_last_rank):
     if is_last_rank:
         expected_order += ["queue_append"]
         assert len(comm_queue) == 1
-        queued_event, queued_outputs = comm_queue[0]
-        assert queued_event is event
-        assert set(queued_outputs.tensors) == {"hidden_states"}
+        queue_entry = comm_queue[0]
+        assert queue_entry.event is event
+        assert set(queue_entry.tensors.tensors) == {"hidden_states"}
+        assert queue_entry.slot_id == 0
     else:
         assert not comm_queue
 

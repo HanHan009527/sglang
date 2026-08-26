@@ -6,7 +6,7 @@ import time
 from array import array
 from collections import defaultdict, deque
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -66,6 +66,7 @@ PP_COMMITTED_RELEASE_CACHE_SIZE = 16384
 PP_PENDING_RELEASE_MAX_RIDS = 4096
 PP_PENDING_RELEASE_MAX_WAIT_SECONDS = 600
 PP_CONTROL_RING_MESSAGE_MARKER = "sglang_pp_control_ring_v1"
+PP_OUTPUT_SLOT_PROTOCOL_VERSION = 1
 
 
 def _pp_pack_control_ring_message(phase: str, has_payload: bool, payload):
@@ -286,6 +287,181 @@ class PPBatchMetadata:
     # result arrives, so relayed tensors must be applied against the
     # composition that actually ran the forward.
     fwd_batch: Optional[ScheduleBatch] = None
+
+
+@dataclass
+class PPOutputQueueEntry:
+    event: torch.Event
+    tensors: PPProxyTensors
+    slot_id: int
+    forward_mode: str
+    request_ids: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PPOutputSlotDescriptor:
+    """Authoritative last-stage decision for one depth-zero output slot."""
+
+    protocol_version: int
+    epoch: int
+    slot_id: int
+    has_output: bool
+    is_prebuilt: bool
+    skip_output_comm: bool
+    forward_mode: Optional[str]
+    request_ids: Tuple[str, ...]
+    tensor_schema: Tuple[str, ...]
+    producer_ready: Optional[bool]
+    producer_queue_depth: Optional[int]
+    producer_error: Optional[str]
+
+    @property
+    def communicates(self) -> bool:
+        return self.has_output and not self.is_prebuilt and not self.skip_output_comm
+
+
+def _pp_output_slot_target(
+    slot_id: int,
+    mbs: List[Optional[ScheduleBatch]],
+    mb_metadata: List[Optional[PPBatchMetadata]],
+) -> Optional[ScheduleBatch]:
+    target = mbs[slot_id]
+    metadata = mb_metadata[slot_id]
+    fwd_batch = getattr(metadata, "fwd_batch", None)
+    if fwd_batch is not None:
+        target = fwd_batch
+    return target
+
+
+def _pp_output_tensor_schema(tensor_dict: Dict[str, object]) -> Tuple[str, ...]:
+    schema = []
+
+    def visit(path: str, value) -> None:
+        if torch.is_tensor(value):
+            schema.append(f"{path}:tensor:{value.dtype}:{tuple(value.shape)}")
+        elif isinstance(value, dict):
+            for key in sorted(value):
+                if key != "__msg_type__":
+                    visit(f"{path}.{key}" if path else str(key), value[key])
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                visit(f"{path}[{index}]", item)
+        else:
+            schema.append(f"{path}:{type(value).__name__}")
+
+    visit("", tensor_dict)
+    return tuple(schema)
+
+
+def _pp_describe_output_slot(
+    *,
+    epoch: int,
+    slot_id: int,
+    target: Optional[ScheduleBatch],
+    tensor_schema: Tuple[str, ...] = (),
+) -> PPOutputSlotDescriptor:
+    has_output = target is not None
+    if not has_output:
+        return PPOutputSlotDescriptor(
+            protocol_version=PP_OUTPUT_SLOT_PROTOCOL_VERSION,
+            epoch=epoch,
+            slot_id=slot_id,
+            has_output=False,
+            is_prebuilt=False,
+            skip_output_comm=False,
+            forward_mode=None,
+            request_ids=(),
+            tensor_schema=(),
+            producer_ready=None,
+            producer_queue_depth=None,
+            producer_error=None,
+        )
+
+    forward_mode = target.forward_mode
+    return PPOutputSlotDescriptor(
+        protocol_version=PP_OUTPUT_SLOT_PROTOCOL_VERSION,
+        epoch=epoch,
+        slot_id=slot_id,
+        has_output=True,
+        is_prebuilt=forward_mode.is_prebuilt(),
+        skip_output_comm=_pp_can_skip_output_comm(target),
+        forward_mode=getattr(forward_mode, "name", str(forward_mode)),
+        request_ids=tuple(req.rid for req in getattr(target, "reqs", ())),
+        tensor_schema=tensor_schema,
+        producer_ready=None,
+        producer_queue_depth=None,
+        producer_error=None,
+    )
+
+
+def _pp_validate_output_slot_descriptors(
+    descriptors: List[PPOutputSlotDescriptor],
+    *,
+    expected_epoch: int,
+    expected_slot_id: int,
+) -> PPOutputSlotDescriptor:
+    if not descriptors:
+        raise RuntimeError("PP output-slot agreement returned no descriptors")
+    authority = descriptors[-1]
+    if not isinstance(authority, PPOutputSlotDescriptor):
+        raise RuntimeError(
+            "PP output-slot agreement failed before PG8: "
+            f"last-stage authority has invalid type {type(authority).__name__}"
+        )
+    comparable_fields = (
+        "protocol_version",
+        "epoch",
+        "slot_id",
+        "has_output",
+        "is_prebuilt",
+        "skip_output_comm",
+        "forward_mode",
+        "request_ids",
+    )
+    mismatches = []
+    for pp_rank, descriptor in enumerate(descriptors):
+        if not isinstance(descriptor, PPOutputSlotDescriptor):
+            mismatches.append(
+                f"pp_rank={pp_rank} invalid_type={type(descriptor).__name__}"
+            )
+            continue
+        differences = [
+            field
+            for field in comparable_fields
+            if getattr(descriptor, field) != getattr(authority, field)
+        ]
+        if differences:
+            mismatches.append(
+                f"pp_rank={pp_rank} fields={differences} local={descriptor!r}"
+            )
+
+    if authority.epoch != expected_epoch or authority.slot_id != expected_slot_id:
+        mismatches.append(
+            "authority_epoch_or_slot "
+            f"expected=({expected_epoch},{expected_slot_id}) "
+            f"actual=({authority.epoch},{authority.slot_id})"
+        )
+    if authority.protocol_version != PP_OUTPUT_SLOT_PROTOCOL_VERSION:
+        mismatches.append(
+            "authority_protocol_version "
+            f"expected={PP_OUTPUT_SLOT_PROTOCOL_VERSION} "
+            f"actual={authority.protocol_version}"
+        )
+    if authority.communicates and not authority.tensor_schema:
+        mismatches.append("authority_tensor_schema_empty_for_communicating_slot")
+    if authority.has_output and authority.producer_ready is not True:
+        mismatches.append(
+            "authority_output_producer_not_ready "
+            f"queue_depth={authority.producer_queue_depth} "
+            f"error={authority.producer_error!r}"
+        )
+
+    if mismatches:
+        raise RuntimeError(
+            "PP output-slot agreement failed before PG8: "
+            f"authority={authority!r}; mismatches={mismatches}"
+        )
+    return authority
 
 
 class SchedulerPPMixin:
@@ -656,6 +832,7 @@ class SchedulerPPMixin:
         send_retract_work = []
         send_prealloc_work = []
         send_transfer_work = []
+        output_slot_epoch = 0
 
         while True:
             server_is_idle = True
@@ -747,11 +924,14 @@ class SchedulerPPMixin:
                     )
 
                 if get_parallel().pp_async_batch_depth == 0:
-                    # Every rank has now completed this slot's forward-proxy
-                    # phase (PG7). Close the preceding output relay (PG8) in
-                    # this same slot before any rank can enter the next one.
-                    # This gives every PP rank the same communicator order:
-                    # PG7(slot S) -> PG8(slot S) -> PG7(slot S + 1).
+                    # PG7 is complete on every rank before this unconditional
+                    # control-plane agreement. The last stage is authoritative
+                    # for output presence and schema; all ranks fail before
+                    # PG8 if their forward snapshots disagree.
+                    output_slot_descriptor = self._pp_agree_output_slot(
+                        epoch=output_slot_epoch,
+                        slot_id=next_mb_id,
+                    )
                     next_pp_outputs, next_batch_result, d2h_event = (
                         self._pp_commit_send_output_work_and_preprocess_output_tensors(
                             next_first_rank_mb_id,
@@ -759,8 +939,11 @@ class SchedulerPPMixin:
                             relay_output_immediately=True,
                             use_forward_batch_snapshot=True,
                             close_output_ring=True,
+                            output_slot_descriptor=output_slot_descriptor,
                         )
                     )
+                    self._pp_complete_output_slot(output_slot_descriptor)
+                    output_slot_epoch += 1
 
                 next_consensus_retract_rids = self._pp_run_control_ring_phase(
                     phase="decode_retract_consensus",
@@ -871,7 +1054,7 @@ class SchedulerPPMixin:
         ]
         self.mb_metadata: List[Optional[PPBatchMetadata]] = [None] * self.pp_loop_size
         self.pp_outputs: Optional[PPProxyTensors] = None
-        self.last_rank_comm_queue: deque[Tuple[torch.Event, PPProxyTensors]] = deque()
+        self.last_rank_comm_queue: deque[PPOutputQueueEntry] = deque()
         # PP+spec: per-rid chain rows seeding the next verify round.
         self._pp_spec_chain_by_rid: Dict[str, torch.Tensor] = {}
 
@@ -1232,6 +1415,82 @@ class SchedulerPPMixin:
         self._pp_commit_comm_work(send_work)
         return payload if has_payload else None
 
+    def _pp_agree_output_slot(
+        self: Scheduler,
+        *,
+        epoch: int,
+        slot_id: int,
+    ) -> PPOutputSlotDescriptor:
+        """Agree one depth-zero output slot before issuing any PG8 work."""
+        target = _pp_output_slot_target(slot_id, self.mbs, self.mb_metadata)
+        local = _pp_describe_output_slot(
+            epoch=epoch,
+            slot_id=slot_id,
+            target=target,
+        )
+        if self.pp_group.is_last_rank:
+            queue_depth = len(self.last_rank_comm_queue)
+            producer_ready = not local.has_output or queue_depth > 0
+            tensor_schema = ()
+            producer_error = None
+            if local.has_output and producer_ready:
+                entry = self.last_rank_comm_queue[0]
+                if not isinstance(entry, PPOutputQueueEntry):
+                    producer_ready = False
+                    producer_error = f"invalid_queue_entry={type(entry).__name__}"
+                elif (
+                    entry.slot_id != slot_id
+                    or entry.forward_mode != local.forward_mode
+                    or entry.request_ids != local.request_ids
+                ):
+                    producer_ready = False
+                    producer_error = (
+                        f"queue_head=(slot={entry.slot_id},"
+                        f"mode={entry.forward_mode},rids={entry.request_ids}) "
+                        f"descriptor=(slot={slot_id},mode={local.forward_mode},"
+                        f"rids={local.request_ids})"
+                    )
+                else:
+                    tensor_schema = _pp_output_tensor_schema(entry.tensors.tensors)
+            local = replace(
+                local,
+                tensor_schema=tensor_schema,
+                producer_ready=producer_ready,
+                producer_queue_depth=queue_depth,
+                producer_error=producer_error,
+            )
+
+        descriptors = [None] * torch.distributed.get_world_size(
+            self.pp_disagg_control_group
+        )
+        torch.distributed.all_gather_object(
+            descriptors, local, group=self.pp_disagg_control_group
+        )
+        return _pp_validate_output_slot_descriptors(
+            descriptors,
+            expected_epoch=epoch,
+            expected_slot_id=slot_id,
+        )
+
+    def _pp_complete_output_slot(
+        self: Scheduler, descriptor: PPOutputSlotDescriptor
+    ) -> None:
+        """Fence PG8 completion before any rank starts the next slot's PG7."""
+        completed = [None] * torch.distributed.get_world_size(
+            self.pp_disagg_control_group
+        )
+        torch.distributed.all_gather_object(
+            completed,
+            (descriptor.epoch, descriptor.slot_id),
+            group=self.pp_disagg_control_group,
+        )
+        expected = (descriptor.epoch, descriptor.slot_id)
+        if any(value != expected for value in completed):
+            raise RuntimeError(
+                "PP output-slot completion fence failed: "
+                f"expected={expected} completed={completed!r}"
+            )
+
     def _pp_forward_stage_payload(
         self: Scheduler, previous_work: List[P2PWork], payload
     ) -> List[P2PWork]:
@@ -1277,6 +1536,7 @@ class SchedulerPPMixin:
         relay_output_immediately: bool = False,
         use_forward_batch_snapshot: bool = False,
         close_output_ring: bool = False,
+        output_slot_descriptor: Optional[PPOutputSlotDescriptor] = None,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1298,6 +1558,7 @@ class SchedulerPPMixin:
             relay_output_immediately=relay_output_immediately,
             use_forward_batch_snapshot=use_forward_batch_snapshot,
             close_output_ring=close_output_ring,
+            output_slot_descriptor=output_slot_descriptor,
         )
         return next_pp_outputs, next_batch_result, d2h_event
 
@@ -1811,6 +2072,7 @@ class SchedulerPPMixin:
         pp_outputs: PPProxyTensors | None,
         mb_metadata: Optional[List[Optional[PPBatchMetadata]]] = None,
         use_forward_batch_snapshot: bool = False,
+        output_slot_descriptor: Optional[PPOutputSlotDescriptor] = None,
     ) -> List[P2PWork]:
         send_output_work = []
         if self.pp_group.is_last_rank:
@@ -1820,12 +2082,29 @@ class SchedulerPPMixin:
                 metadata = mb_metadata[next_first_rank_mb_id]
                 if metadata is not None and metadata.fwd_batch is not None:
                     target = metadata.fwd_batch
-            if target is not None:
-                q_event, pp_outputs_to_send = last_rank_comm_queue.popleft()
-                if (
-                    not target.forward_mode.is_prebuilt()
+            has_output = (
+                output_slot_descriptor.has_output
+                if output_slot_descriptor is not None
+                else target is not None
+            )
+            if has_output:
+                if output_slot_descriptor is not None:
+                    assert target is not None
+                queue_entry = last_rank_comm_queue.popleft()
+                if isinstance(queue_entry, PPOutputQueueEntry):
+                    q_event = queue_entry.event
+                    pp_outputs_to_send = queue_entry.tensors
+                else:
+                    # Compatibility for callers outside the depth-zero
+                    # authoritative protocol.
+                    q_event, pp_outputs_to_send = queue_entry
+                communicates = (
+                    output_slot_descriptor.communicates
+                    if output_slot_descriptor is not None
+                    else not target.forward_mode.is_prebuilt()
                     and not _pp_can_skip_output_comm(target)
-                ):
+                )
+                if communicates:
                     if self.debug_pp_output_producer_sync:
                         if phase_tracer.enabled:
                             phase_tracer.emit(
@@ -1882,11 +2161,12 @@ class SchedulerPPMixin:
         next_mb_id: int,
         mbs: List[ScheduleBatch],
         mb_metadata: List[PPBatchMetadata],
-        last_rank_comm_queue: deque[Tuple[torch.Event, PPProxyTensors]],
+        last_rank_comm_queue: deque,
         pp_outputs: PPProxyTensors | None,
         relay_output_immediately: bool = False,
         use_forward_batch_snapshot: bool = False,
         close_output_ring: bool = False,
+        output_slot_descriptor: Optional[PPOutputSlotDescriptor] = None,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1936,6 +2216,20 @@ class SchedulerPPMixin:
         # recv can form a ring wait. Pair adjacent stages by rank parity.
         send_first = (self.ps.pp_rank % 2) == 0
 
+        if close_output_ring and output_slot_descriptor is None:
+            raise RuntimeError(
+                "A closed PP output ring requires an authoritative slot descriptor"
+            )
+        if (
+            output_slot_descriptor is not None
+            and output_slot_descriptor.slot_id != next_mb_id
+        ):
+            raise RuntimeError(
+                "PP output-slot descriptor mismatch: "
+                f"descriptor_slot={output_slot_descriptor.slot_id} "
+                f"local_slot={next_mb_id}"
+            )
+
         def _do_send(output_mb_id=next_first_rank_mb_id):
             if not use_forward_batch_snapshot:
                 # Preserve the existing default call shape for ordinary PP
@@ -1954,18 +2248,28 @@ class SchedulerPPMixin:
                 pp_outputs,
                 mb_metadata=mb_metadata,
                 use_forward_batch_snapshot=use_forward_batch_snapshot,
+                output_slot_descriptor=output_slot_descriptor,
             )
 
         def _do_recv():
             nonlocal next_pp_outputs, batch_result, d2h_event
-            target = mbs[next_mb_id]
-            if use_forward_batch_snapshot:
-                metadata = mb_metadata[next_mb_id]
-                if metadata is not None and metadata.fwd_batch is not None:
-                    target = metadata.fwd_batch
-            if target is None or target.forward_mode.is_prebuilt():
+            target = _pp_output_slot_target(next_mb_id, mbs, mb_metadata)
+            if output_slot_descriptor is not None:
+                if not output_slot_descriptor.has_output:
+                    return
+                assert target is not None
+                if output_slot_descriptor.is_prebuilt:
+                    return
+                if output_slot_descriptor.skip_output_comm:
+                    next_pp_outputs, batch_result, d2h_event = (
+                        self._pp_make_skip_output_result(
+                            target, mb_metadata[next_mb_id]
+                        )
+                    )
+                    return
+            elif target is None or target.forward_mode.is_prebuilt():
                 return
-            if _pp_can_skip_output_comm(target):
+            if output_slot_descriptor is None and _pp_can_skip_output_comm(target):
                 next_pp_outputs, batch_result, d2h_event = (
                     self._pp_make_skip_output_result(target, mb_metadata[next_mb_id])
                 )
@@ -1984,7 +2288,20 @@ class SchedulerPPMixin:
                 d2h_event = self.device_module.Event()
                 d2h_event.record(self.device_module.current_stream())
 
-        if close_output_ring and self.pp_group.is_last_rank:
+        if close_output_ring and not output_slot_descriptor.has_output:
+            self._pp_commit_output_work([])
+        elif close_output_ring and output_slot_descriptor.is_prebuilt:
+            if self.pp_group.is_last_rank:
+                self._pp_commit_output_work(_do_send(next_mb_id))
+            else:
+                self._pp_commit_output_work([])
+        elif close_output_ring and output_slot_descriptor.skip_output_comm:
+            if self.pp_group.is_last_rank:
+                self._pp_commit_output_work(_do_send(next_mb_id))
+            else:
+                self._pp_commit_output_work([])
+            _do_recv()
+        elif close_output_ring and self.pp_group.is_last_rank:
             # The last stage sends the output produced for the previous pipeline
             # microbatch, then receives the completed relay back from PP0.  No
             # PG8 work may survive this slot boundary.
@@ -2117,9 +2434,18 @@ class SchedulerPPMixin:
                 if self.pp_group.is_last_rank:
                     # (last rank) buffer the outputs for async batch depth
                     last_rank_comm_queue.append(
-                        (
-                            event,
-                            PPProxyTensors(output_tensors),
+                        PPOutputQueueEntry(
+                            event=event,
+                            tensors=PPProxyTensors(output_tensors),
+                            slot_id=mb_id,
+                            forward_mode=getattr(
+                                getattr(cur_batch, "forward_mode", None),
+                                "name",
+                                str(getattr(cur_batch, "forward_mode", None)),
+                            ),
+                            request_ids=tuple(
+                                req.rid for req in getattr(cur_batch, "reqs", ())
+                            ),
                         )
                     )
         return result, event
