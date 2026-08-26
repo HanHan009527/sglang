@@ -8,6 +8,8 @@ from unittest.mock import ANY, Mock, call, patch
 
 import torch
 
+from sglang.srt.managers import phase_trace as phase_trace_module
+from sglang.srt.managers.phase_trace import PhaseTracer
 from sglang.srt.managers.scheduler_pp_mixin import (
     SchedulerPPMixin,
     _pp_can_skip_output_comm,
@@ -212,7 +214,9 @@ def test_phase_trace_error_marker_on_sync_failure():
     comm_queue = deque()
     comm_queue.append((q_event, pp_outputs_to_send))
 
-    phase_tracer_mock = SimpleNamespace(enabled=True, emit=Mock())
+    phase_tracer_mock = SimpleNamespace(
+        enabled=True, emit=Mock(), write_watchdog_snapshot=Mock()
+    )
 
     with (
         patch(
@@ -241,6 +245,54 @@ def test_phase_trace_error_marker_on_sync_failure():
     ]
     assert len(error_calls) == 1
     assert error_calls[0][1]["error_type"] == "RuntimeError"
+    phase_tracer_mock.write_watchdog_snapshot.assert_called_once_with(tail=32)
+
+
+def test_sync_failure_dumps_latest_ring_after_log_budget_is_exhausted():
+    scheduler = _make_scheduler(debug_pp_output_producer_sync=True)
+    target = _make_target()
+    q_event = _make_q_event()
+    q_event.synchronize = Mock(side_effect=RuntimeError("boom"))
+    comm_queue = deque([(q_event, _make_pp_outputs_to_send())])
+    tracer = PhaseTracer(
+        enabled=True, max_events=1, every_n=1, ring_size=8, log=Mock()
+    )
+    assert tracer.emit("budget_last_logged") is True
+    assert tracer.emit("budget_exhausted") is False
+
+    with (
+        patch(
+            "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+            return_value=False,
+        ),
+        patch(
+            "sglang.srt.managers.scheduler_pp_mixin.phase_tracer",
+            tracer,
+        ),
+        patch.object(
+            phase_trace_module.select, "select", return_value=([], [2], [])
+        ),
+        patch.object(phase_trace_module.os, "write") as write,
+    ):
+        try:
+            SchedulerPPMixin._pp_send_output_to_next_stage(
+                scheduler,
+                next_first_rank_mb_id=0,
+                mbs=[target],
+                last_rank_comm_queue=comm_queue,
+                pp_outputs=None,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:
+            raise AssertionError("Expected RuntimeError")
+
+    write.assert_called_once()
+    fd, payload = write.call_args.args
+    assert fd == 2
+    assert b'\"event\":\"budget_exhausted\"' in payload
+    assert b'\"event\":\"pp_producer_sync_before\"' in payload
+    assert b'\"event\":\"pp_producer_sync_error\"' in payload
 
 
 # ---------------------------------------------------------------------------

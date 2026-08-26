@@ -1748,6 +1748,14 @@ class SchedulerPPMixin:
                                     "pp_producer_sync_error",
                                     error_type=type(exc).__name__,
                                 )
+                                # The CUDA error can terminate this process before
+                                # the scheduler watchdog gets a chance to dump its
+                                # diagnostics. Write the rolling trace directly to
+                                # stderr while the failing scheduler thread is still
+                                # alive. This remains useful after sampled logging has
+                                # exhausted its budget because emit() always maintains
+                                # the bounded ring.
+                                phase_tracer.write_watchdog_snapshot(tail=32)
                             raise
                         if phase_tracer.enabled:
                             phase_tracer.emit(
