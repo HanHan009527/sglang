@@ -1945,6 +1945,12 @@ class SchedulerPPMixin:
                     trace_only=True,
                 )
                 result = self.run_batch(cur_batch, pp_proxy_tensors)
+                # Match the overlap event loop's launch invariant: before the
+                # scheduler can write the next microbatch into shared graph/input
+                # buffers, wait until this forward has finished its last read.
+                # The fast path waits on the runner's read-done event; runners
+                # without one fall back to ordering the whole forward stream.
+                self._apply_war_barrier()
                 set_time_batch(
                     cur_batch.reqs,
                     "set_run_batch_cpu_end_time",
