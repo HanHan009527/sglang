@@ -110,11 +110,12 @@ def test_pp_launch_applies_war_barrier_before_bookkeeping(is_last_rank):
         "run_batch",
         "war_barrier",
         "set_run_batch_cpu_end_time",
-        "event_create",
-        "event_record",
     ]
     if is_last_rank:
-        expected_order += ["prepare_output", "queue_append"]
+        expected_order += ["prepare_output"]
+    expected_order += ["event_create", "event_record"]
+    if is_last_rank:
+        expected_order += ["queue_append"]
         assert len(comm_queue) == 1
         queued_event, queued_outputs = comm_queue[0]
         assert queued_event is event
