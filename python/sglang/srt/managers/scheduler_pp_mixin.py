@@ -737,6 +737,7 @@ class SchedulerPPMixin:
                             next_first_rank_mb_id,
                             next_mb_id,
                             relay_output_immediately=True,
+                            use_forward_batch_snapshot=True,
                         )
                     )
 
@@ -813,15 +814,12 @@ class SchedulerPPMixin:
                             pending_release_status,
                             pending_release_first_seen_at,
                         )
-                # post-process the coming microbatch
-                if self.mbs[next_mb_id] is not None:
-                    if not self.mbs[next_mb_id].forward_mode.is_prebuilt():
-                        d2h_event.synchronize()
-                        self._pp_process_batch_result(
-                            self.mbs[next_mb_id],
-                            next_batch_result,
-                        )
-                    self.last_mbs[next_mb_id] = self.mbs[next_mb_id]
+                self._pp_process_relayed_batch_result(
+                    next_mb_id,
+                    next_batch_result,
+                    d2h_event,
+                    use_forward_batch_snapshot=True,
+                )
 
                 self.pp_outputs = next_pp_outputs
                 self.running_batch.batch_is_full = False
@@ -1242,6 +1240,7 @@ class SchedulerPPMixin:
         next_first_rank_mb_id: int,
         next_mb_id: int,
         relay_output_immediately: bool = False,
+        use_forward_batch_snapshot: bool = False,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1261,6 +1260,7 @@ class SchedulerPPMixin:
             self.last_rank_comm_queue,
             self.pp_outputs,
             relay_output_immediately=relay_output_immediately,
+            use_forward_batch_snapshot=use_forward_batch_snapshot,
         )
         return next_pp_outputs, next_batch_result, d2h_event
 
@@ -1591,6 +1591,44 @@ class SchedulerPPMixin:
                 if req.finished():
                     self._pp_spec_chain_by_rid.pop(req.rid, None)
 
+    def _pp_process_relayed_batch_result(
+        self: Scheduler,
+        mb_id: int,
+        batch_result: Optional[GenerationBatchResult],
+        d2h_event: Optional[torch.Event],
+        *,
+        use_forward_batch_snapshot: bool = False,
+    ) -> None:
+        live_batch = self.mbs[mb_id]
+        metadata = self.mb_metadata[mb_id]
+        process_target = live_batch
+        if (
+            use_forward_batch_snapshot
+            and metadata is not None
+            and metadata.fwd_batch is not None
+        ):
+            # PP+spec decode can finish or recompose the live slot before its
+            # relayed result returns. Bind result processing to the exact
+            # composition that launched the forward.
+            process_target = metadata.fwd_batch
+
+        if process_target is None:
+            return
+
+        if not process_target.forward_mode.is_prebuilt():
+            assert d2h_event is not None
+            d2h_event.synchronize()
+            self._pp_process_batch_result(process_target, batch_result)
+
+        # Keep scheduler state tied to the live batch: ScheduleBatch.copy() is
+        # only a result-ownership snapshot, not the next scheduling state.
+        self.last_mbs[mb_id] = live_batch
+        if use_forward_batch_snapshot:
+            # One forward snapshot owns exactly one output relay. Clear it
+            # after successful consumption so an idle/reused slot cannot join
+            # a later relay with stale batch composition.
+            self.mb_metadata[mb_id] = None
+
     def _pp_spec_store_bonus(
         self: Scheduler,
         batch: ScheduleBatch,
@@ -1722,11 +1760,17 @@ class SchedulerPPMixin:
         mbs: List[ScheduleBatch],
         last_rank_comm_queue: deque,
         pp_outputs: PPProxyTensors | None,
+        mb_metadata: Optional[List[Optional[PPBatchMetadata]]] = None,
+        use_forward_batch_snapshot: bool = False,
     ) -> List[P2PWork]:
         send_output_work = []
         if self.pp_group.is_last_rank:
             # send ready PP output to rank 0
             target = mbs[next_first_rank_mb_id]
+            if use_forward_batch_snapshot and mb_metadata is not None:
+                metadata = mb_metadata[next_first_rank_mb_id]
+                if metadata is not None and metadata.fwd_batch is not None:
+                    target = metadata.fwd_batch
             if target is not None:
                 q_event, pp_outputs_to_send = last_rank_comm_queue.popleft()
                 if (
@@ -1790,6 +1834,7 @@ class SchedulerPPMixin:
         last_rank_comm_queue: deque[Tuple[torch.Event, PPProxyTensors]],
         pp_outputs: PPProxyTensors | None,
         relay_output_immediately: bool = False,
+        use_forward_batch_snapshot: bool = False,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1840,16 +1885,32 @@ class SchedulerPPMixin:
         send_first = (self.ps.pp_rank % 2) == 0
 
         def _do_send():
+            if not use_forward_batch_snapshot:
+                # Preserve the existing default call shape for ordinary PP
+                # and disaggregated prefill. The snapshot contract is only
+                # enabled by depth-zero disaggregated decode.
+                return self._pp_send_output_to_next_stage(
+                    next_first_rank_mb_id,
+                    mbs,
+                    last_rank_comm_queue,
+                    pp_outputs,
+                )
             return self._pp_send_output_to_next_stage(
                 next_first_rank_mb_id,
                 mbs,
                 last_rank_comm_queue,
                 pp_outputs,
+                mb_metadata=mb_metadata,
+                use_forward_batch_snapshot=use_forward_batch_snapshot,
             )
 
         def _do_recv():
             nonlocal next_pp_outputs, batch_result, d2h_event
             target = mbs[next_mb_id]
+            if use_forward_batch_snapshot:
+                metadata = mb_metadata[next_mb_id]
+                if metadata is not None and metadata.fwd_batch is not None:
+                    target = metadata.fwd_batch
             if target is None or target.forward_mode.is_prebuilt():
                 return
             if _pp_can_skip_output_comm(target):

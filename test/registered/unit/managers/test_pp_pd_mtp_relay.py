@@ -414,6 +414,114 @@ def test_pp_disagg_output_ring_relays_fresh_payload_before_control_phase():
     scheduler._pp_send_output_to_next_stage.assert_not_called()
 
 
+def test_pp_disagg_decode_recv_uses_forward_snapshot_after_live_slot_is_cleared():
+    received_tensors = {"next_token_ids": object()}
+    target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
+    recorded_event = Mock()
+    scheduler = SimpleNamespace(
+        ps=SimpleNamespace(pp_rank=0),
+        pp_group=SimpleNamespace(is_last_rank=False),
+        copy_stream_ctx=nullcontext(),
+        copy_stream=SimpleNamespace(wait_stream=Mock()),
+        schedule_stream=SimpleNamespace(synchronize=Mock()),
+        device_module=SimpleNamespace(
+            Event=Mock(return_value=recorded_event),
+            current_stream=Mock(return_value=object()),
+        ),
+        _pp_recv_dict_from_prev_stage=Mock(return_value=received_tensors),
+        _pp_prep_batch_result=Mock(return_value=object()),
+        _pp_send_dict_to_next_stage=Mock(return_value=[]),
+        _pp_send_output_to_next_stage=Mock(return_value=[]),
+        _pp_commit_comm_work=Mock(),
+    )
+
+    with patch(
+        "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+        return_value=False,
+    ):
+        outputs, _, event, work = (
+            SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+                scheduler,
+                next_first_rank_mb_id=0,
+                next_mb_id=0,
+                mbs=[None],
+                mb_metadata=[
+                    PPBatchMetadata(can_run_cuda_graph=True, fwd_batch=target)
+                ],
+                last_rank_comm_queue=deque(),
+                pp_outputs=None,
+                relay_output_immediately=True,
+                use_forward_batch_snapshot=True,
+            )
+        )
+
+    assert outputs.tensors is received_tensors
+    assert event is recorded_event
+    assert work == []
+    scheduler._pp_recv_dict_from_prev_stage.assert_called_once_with()
+    scheduler._pp_prep_batch_result.assert_called_once()
+
+
+def test_pp_disagg_decode_snapshot_is_single_use():
+    snapshot = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_prebuilt=lambda: False),
+        reqs=[],
+    )
+    live_batch = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_prebuilt=lambda: False),
+        reqs=[],
+    )
+    metadata = PPBatchMetadata(can_run_cuda_graph=True, fwd_batch=snapshot)
+    scheduler = SimpleNamespace(
+        mbs=[live_batch, None],
+        mb_metadata=[metadata, None],
+        last_mbs=[None, None],
+        _pp_process_batch_result=Mock(),
+    )
+    result = object()
+    d2h_event = Mock()
+
+    SchedulerPPMixin._pp_process_relayed_batch_result(
+        scheduler,
+        0,
+        result,
+        d2h_event,
+        use_forward_batch_snapshot=True,
+    )
+
+    scheduler._pp_process_batch_result.assert_called_once_with(snapshot, result)
+    assert scheduler.last_mbs[0] is live_batch
+    assert scheduler.mb_metadata[0] is None
+
+
+def test_pp_disagg_decode_processes_snapshot_after_live_slot_is_cleared():
+    snapshot = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_prebuilt=lambda: False),
+        reqs=[],
+    )
+    scheduler = SimpleNamespace(
+        mbs=[None],
+        mb_metadata=[PPBatchMetadata(can_run_cuda_graph=True, fwd_batch=snapshot)],
+        last_mbs=[object()],
+        _pp_process_batch_result=Mock(),
+    )
+    result = object()
+    d2h_event = Mock()
+
+    SchedulerPPMixin._pp_process_relayed_batch_result(
+        scheduler,
+        0,
+        result,
+        d2h_event,
+        use_forward_batch_snapshot=True,
+    )
+
+    d2h_event.synchronize.assert_called_once_with()
+    scheduler._pp_process_batch_result.assert_called_once_with(snapshot, result)
+    assert scheduler.last_mbs[0] is None
+    assert scheduler.mb_metadata[0] is None
+
+
 def test_pp_disagg_output_ring_last_stage_starts_relay_chain():
     events = []
     send_work = [object()]

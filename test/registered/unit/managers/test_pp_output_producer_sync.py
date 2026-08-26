@@ -11,6 +11,7 @@ import torch
 from sglang.srt.managers import phase_trace as phase_trace_module
 from sglang.srt.managers.phase_trace import PhaseTracer
 from sglang.srt.managers.scheduler_pp_mixin import (
+    PPBatchMetadata,
     SchedulerPPMixin,
     _pp_can_skip_output_comm,
 )
@@ -94,6 +95,33 @@ def test_flag_off_no_sync_calls_wait_event_and_isend():
     q_event.synchronize.assert_not_called()
     stream = scheduler.device_module.current_stream()
     stream.wait_event.assert_called_once_with(q_event)
+    scheduler._pp_send_dict_to_next_stage.assert_called_once()
+
+
+def test_output_send_uses_forward_snapshot_after_live_slot_is_cleared():
+    scheduler = _make_scheduler(debug_pp_output_producer_sync=False)
+    target = _make_target()
+    q_event = _make_q_event()
+    pp_outputs_to_send = _make_pp_outputs_to_send()
+    comm_queue = deque([(q_event, pp_outputs_to_send)])
+    metadata = [PPBatchMetadata(can_run_cuda_graph=True, fwd_batch=target)]
+
+    with patch(
+        "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+        return_value=False,
+    ):
+        work = SchedulerPPMixin._pp_send_output_to_next_stage(
+            scheduler,
+            next_first_rank_mb_id=0,
+            mbs=[None],
+            last_rank_comm_queue=comm_queue,
+            pp_outputs=None,
+            mb_metadata=metadata,
+            use_forward_batch_snapshot=True,
+        )
+
+    assert work
+    assert not comm_queue
     scheduler._pp_send_dict_to_next_stage.assert_called_once()
 
 
