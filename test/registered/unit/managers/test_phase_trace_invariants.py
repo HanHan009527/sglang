@@ -64,6 +64,59 @@ def _load_definition(
     )
 
 
+def test_depth_zero_decode_closes_output_ring_after_proxy_commit():
+    path = _ROOT / "python/sglang/srt/managers/scheduler_pp_mixin.py"
+    tree = ast.parse(path.read_text())
+    mixin = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SchedulerPPMixin"
+    )
+    event_loop = next(
+        node
+        for node in mixin.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "event_loop_pp_disagg_decode"
+    )
+    calls = []
+    for node in ast.walk(event_loop):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        else:
+            continue
+        calls.append((node.lineno, name, node))
+
+    proxy_commit_line = next(
+        line
+        for line, name, node in calls
+        if name == "_pp_commit_comm_work"
+        and any(
+            isinstance(arg, ast.Attribute) and arg.attr == "send_proxy_work"
+            for arg in node.args
+        )
+    )
+    close_calls = [
+        (line, node)
+        for line, name, node in calls
+        if name == "_pp_commit_send_output_work_and_preprocess_output_tensors"
+        and any(
+            keyword.arg == "close_output_ring"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in node.keywords
+        )
+    ]
+
+    assert len(close_calls) == 1
+    assert proxy_commit_line < close_calls[0][0]
+    assert not any(name == "_pp_start_output_relay" for _, name, _ in calls)
+
+
 def _load_mlp_sync_batch_info():
     namespace = {
         "dataclass": dataclass,

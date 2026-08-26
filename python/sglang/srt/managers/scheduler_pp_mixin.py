@@ -747,12 +747,18 @@ class SchedulerPPMixin:
                     )
 
                 if get_parallel().pp_async_batch_depth == 0:
+                    # Every rank has now completed this slot's forward-proxy
+                    # phase (PG7). Close the preceding output relay (PG8) in
+                    # this same slot before any rank can enter the next one.
+                    # This gives every PP rank the same communicator order:
+                    # PG7(slot S) -> PG8(slot S) -> PG7(slot S + 1).
                     next_pp_outputs, next_batch_result, d2h_event = (
                         self._pp_commit_send_output_work_and_preprocess_output_tensors(
                             next_first_rank_mb_id,
                             next_mb_id,
                             relay_output_immediately=True,
                             use_forward_batch_snapshot=True,
+                            close_output_ring=True,
                         )
                     )
 
@@ -1270,6 +1276,7 @@ class SchedulerPPMixin:
         next_mb_id: int,
         relay_output_immediately: bool = False,
         use_forward_batch_snapshot: bool = False,
+        close_output_ring: bool = False,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1290,6 +1297,7 @@ class SchedulerPPMixin:
             self.pp_outputs,
             relay_output_immediately=relay_output_immediately,
             use_forward_batch_snapshot=use_forward_batch_snapshot,
+            close_output_ring=close_output_ring,
         )
         return next_pp_outputs, next_batch_result, d2h_event
 
@@ -1878,6 +1886,7 @@ class SchedulerPPMixin:
         pp_outputs: PPProxyTensors | None,
         relay_output_immediately: bool = False,
         use_forward_batch_snapshot: bool = False,
+        close_output_ring: bool = False,
     ) -> Tuple[
         Optional[PPProxyTensors],
         Optional[GenerationBatchResult],
@@ -1927,19 +1936,19 @@ class SchedulerPPMixin:
         # recv can form a ring wait. Pair adjacent stages by rank parity.
         send_first = (self.ps.pp_rank % 2) == 0
 
-        def _do_send():
+        def _do_send(output_mb_id=next_first_rank_mb_id):
             if not use_forward_batch_snapshot:
                 # Preserve the existing default call shape for ordinary PP
                 # and disaggregated prefill. The snapshot contract is only
                 # enabled by depth-zero disaggregated decode.
                 return self._pp_send_output_to_next_stage(
-                    next_first_rank_mb_id,
+                    output_mb_id,
                     mbs,
                     last_rank_comm_queue,
                     pp_outputs,
                 )
             return self._pp_send_output_to_next_stage(
-                next_first_rank_mb_id,
+                output_mb_id,
                 mbs,
                 last_rank_comm_queue,
                 pp_outputs,
@@ -1975,7 +1984,30 @@ class SchedulerPPMixin:
                 d2h_event = self.device_module.Event()
                 d2h_event.record(self.device_module.current_stream())
 
-        if relay_output_immediately and self.pp_group.is_last_rank:
+        if close_output_ring and self.pp_group.is_last_rank:
+            # The last stage sends the output produced for the previous pipeline
+            # microbatch, then receives the completed relay back from PP0.  No
+            # PG8 work may survive this slot boundary.
+            send_output_work = _do_send(next_mb_id)
+            # Always evaluate the receive side. It is a no-op for the initial
+            # empty/prebuilt slot and creates the local placeholder for a
+            # communication-skipped batch; otherwise it receives PP0's return.
+            _do_recv()
+            self._pp_commit_output_work(send_output_work)
+            send_output_work = []
+        elif close_output_ring:
+            # PP0 receives the same previous-microbatch output, relays it back
+            # to the last stage, and completes the reverse send in this slot.
+            _do_recv()
+            if next_pp_outputs is not None:
+                send_output_work = self._pp_send_dict_to_next_stage(
+                    next_pp_outputs.tensors,
+                    async_send=True,
+                    msg_type="output",
+                )
+            self._pp_commit_output_work(send_output_work)
+            send_output_work = []
+        elif relay_output_immediately and self.pp_group.is_last_rank:
             # In a steady slot, consume the previous relay before injecting the
             # next origin payload.  Reversing this order makes the last stage's
             # new send collide with the preceding stage's outstanding relay on

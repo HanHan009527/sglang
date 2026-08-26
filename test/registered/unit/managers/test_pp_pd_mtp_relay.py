@@ -1,5 +1,7 @@
 from collections import defaultdict, deque
 from contextlib import nullcontext
+from queue import Queue
+from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -586,6 +588,291 @@ def test_pp_disagg_output_ring_last_stage_starts_relay_chain():
     assert work is send_work
     assert events == ["recv", "send"]
     scheduler._pp_commit_comm_work.assert_not_called()
+
+
+def _run_closed_output_ring_rank(pp_rank, *, send_work, target):
+    events = []
+    scheduler = SimpleNamespace(
+        ps=SimpleNamespace(pp_rank=pp_rank),
+        pp_group=SimpleNamespace(is_last_rank=pp_rank == 1),
+        copy_stream_ctx=nullcontext(),
+        copy_stream=SimpleNamespace(wait_stream=Mock()),
+        pp_output_stream=object(),
+        device_module=SimpleNamespace(
+            Event=Mock(return_value=Mock()), current_stream=Mock(return_value=object())
+        ),
+        _pp_send_output_to_next_stage=Mock(
+            side_effect=lambda output_mb_id, *_args, **_kwargs: events.append(
+                ("origin_send", output_mb_id)
+            )
+            or send_work
+        ),
+        _pp_recv_dict_from_prev_stage=Mock(
+            side_effect=lambda: events.append("recv") or {"next_token_ids": object()}
+        ),
+        _pp_send_dict_to_next_stage=Mock(
+            side_effect=lambda *_args, **_kwargs: events.append("reverse_send")
+            or send_work
+        ),
+        _pp_prep_batch_result=Mock(return_value=object()),
+        _pp_commit_output_work=Mock(
+            side_effect=lambda work: events.append(("commit", work))
+        ),
+    )
+
+    with patch(
+        "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+        return_value=False,
+    ):
+        result = SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+            scheduler,
+            next_first_rank_mb_id=1,
+            next_mb_id=0,
+            mbs=[target, None],
+            mb_metadata=[SimpleNamespace(fwd_batch=None), None],
+            last_rank_comm_queue=deque(),
+            pp_outputs=None,
+            relay_output_immediately=True,
+            use_forward_batch_snapshot=True,
+            close_output_ring=True,
+        )
+
+    return events, result
+
+
+def test_pp_disagg_output_ring_closes_with_paired_rank_order():
+    target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
+    send_work = [object()]
+
+    pp0_events, pp0_result = _run_closed_output_ring_rank(
+        0, send_work=send_work, target=target
+    )
+    pp1_events, pp1_result = _run_closed_output_ring_rank(
+        1, send_work=send_work, target=target
+    )
+
+    assert pp0_events == ["recv", "reverse_send", ("commit", send_work)]
+    assert pp1_events == [("origin_send", 0), "recv", ("commit", send_work)]
+    assert pp0_result[3] == pp1_result[3] == []
+
+
+def test_pp_disagg_output_ring_two_rank_multislot_has_no_cross_slot_work():
+    target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
+    forward = Queue()
+    reverse = Queue()
+    slot_barrier = Barrier(2)
+    events = []
+    events_lock = Lock()
+    results = {0: [], 1: []}
+
+    def record(pp_rank, slot, event):
+        with events_lock:
+            events.append((pp_rank, slot, event))
+
+    def send(channel, payload, pp_rank, slot, event):
+        done = Event()
+        record(pp_rank, slot, event)
+        channel.put((payload, done))
+        return [SimpleNamespace(work=SimpleNamespace(wait=done.wait))]
+
+    def recv(channel, pp_rank, slot):
+        payload, done = channel.get(timeout=2)
+        record(pp_rank, slot, "recv")
+        done.set()
+        return payload
+
+    def run_rank(pp_rank):
+        current_slot = [0]
+        scheduler = SimpleNamespace(
+            ps=SimpleNamespace(pp_rank=pp_rank),
+            pp_group=SimpleNamespace(is_last_rank=pp_rank == 1),
+            copy_stream_ctx=nullcontext(),
+            copy_stream=SimpleNamespace(wait_stream=Mock()),
+            pp_output_stream=object(),
+            device_module=SimpleNamespace(
+                Event=Mock(return_value=Mock()),
+                current_stream=Mock(return_value=object()),
+            ),
+            _pp_send_output_to_next_stage=lambda *_args, **_kwargs: send(
+                forward,
+                {"next_token_ids": object()},
+                pp_rank,
+                current_slot[0],
+                "origin_send",
+            ),
+            _pp_recv_dict_from_prev_stage=lambda: recv(
+                forward if pp_rank == 0 else reverse, pp_rank, current_slot[0]
+            ),
+            _pp_send_dict_to_next_stage=lambda payload, **_kwargs: send(
+                reverse, payload, pp_rank, current_slot[0], "reverse_send"
+            ),
+            _pp_prep_batch_result=Mock(return_value=object()),
+        )
+
+        def commit(work):
+            for item in work:
+                assert item.work.wait(timeout=2)
+            work.clear()
+            record(pp_rank, current_slot[0], "pg8_complete")
+
+        scheduler._pp_commit_output_work = commit
+        for slot in range(2):
+            current_slot[0] = slot
+            # Models the event-loop gate: both ranks finish PG7 before either
+            # rank is allowed to issue this slot's PG8 ring.
+            record(pp_rank, slot, "pg7_complete")
+            slot_barrier.wait(timeout=2)
+            _, _, _, work = (
+                SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+                    scheduler,
+                    next_first_rank_mb_id=1,
+                    next_mb_id=0,
+                    mbs=[target, target],
+                    mb_metadata=[
+                        SimpleNamespace(fwd_batch=None),
+                        SimpleNamespace(fwd_batch=None),
+                    ],
+                    last_rank_comm_queue=deque(),
+                    pp_outputs=None,
+                    relay_output_immediately=True,
+                    use_forward_batch_snapshot=True,
+                    close_output_ring=True,
+                )
+            )
+            results[pp_rank].append(work)
+            slot_barrier.wait(timeout=2)
+
+    with patch(
+        "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+        return_value=False,
+    ):
+        threads = [Thread(target=run_rank, args=(rank,)) for rank in (0, 1)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+    assert results == {0: [[], []], 1: [[], []]}
+    for slot in range(2):
+        slot_events = [event for _, event_slot, event in events if event_slot == slot]
+        assert slot_events.count("pg7_complete") == 2
+        first_pg8 = min(
+            index
+            for index, (_, event_slot, event) in enumerate(events)
+            if event_slot == slot and event not in {"pg7_complete"}
+        )
+        last_pg7 = max(
+            index
+            for index, (_, event_slot, event) in enumerate(events)
+            if event_slot == slot and event == "pg7_complete"
+        )
+        assert last_pg7 < first_pg8
+        assert slot_events.count("pg8_complete") == 2
+
+    last_slot0_pg8 = max(
+        index
+        for index, (_, slot, event) in enumerate(events)
+        if slot == 0 and event == "pg8_complete"
+    )
+    first_slot1_pg7 = min(
+        index
+        for index, (_, slot, event) in enumerate(events)
+        if slot == 1 and event == "pg7_complete"
+    )
+    assert last_slot0_pg8 < first_slot1_pg7
+
+
+def test_pp_disagg_output_ring_initial_empty_slot_is_symmetric_and_non_consuming():
+    origin_target = object()
+    for pp_rank in (0, 1):
+        events = []
+        queue = deque([object()])
+        scheduler = SimpleNamespace(
+            ps=SimpleNamespace(pp_rank=pp_rank),
+            pp_group=SimpleNamespace(is_last_rank=pp_rank == 1),
+            _pp_send_output_to_next_stage=Mock(
+                side_effect=lambda output_mb_id, mbs, *_args, **_kwargs: (
+                    events.append(("empty", output_mb_id)) or []
+                    if mbs[output_mb_id] is None
+                    else events.append(("send", output_mb_id)) or [object()]
+                )
+            ),
+            _pp_recv_dict_from_prev_stage=Mock(
+                side_effect=lambda: events.append("recv") or {}
+            ),
+            _pp_send_dict_to_next_stage=Mock(),
+            _pp_commit_output_work=Mock(
+                side_effect=lambda work: events.append(("commit", work))
+            ),
+        )
+
+        _, _, _, work = SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+            scheduler,
+            next_first_rank_mb_id=0,
+            next_mb_id=1,
+            mbs=[origin_target, None],
+            mb_metadata=[object(), None],
+            last_rank_comm_queue=queue,
+            pp_outputs=None,
+            relay_output_immediately=True,
+            use_forward_batch_snapshot=True,
+            close_output_ring=True,
+        )
+
+        assert events == (
+            [("commit", [])] if pp_rank == 0 else [("empty", 1), ("commit", [])]
+        )
+        assert len(queue) == 1
+        assert work == []
+        scheduler._pp_recv_dict_from_prev_stage.assert_not_called()
+        scheduler._pp_send_dict_to_next_stage.assert_not_called()
+
+
+def test_pp_disagg_output_ring_skip_slot_is_symmetric_and_has_no_wire_work():
+    target = SimpleNamespace(forward_mode=SimpleNamespace(is_prebuilt=lambda: False))
+    metadata = SimpleNamespace(fwd_batch=None)
+    skip_result = (None, object(), object())
+
+    for pp_rank in (0, 1):
+        queue = deque([(Mock(), object())])
+        scheduler = SimpleNamespace(
+            ps=SimpleNamespace(pp_rank=pp_rank),
+            pp_group=SimpleNamespace(is_last_rank=pp_rank == 1),
+            _pp_recv_dict_from_prev_stage=Mock(),
+            _pp_send_dict_to_next_stage=Mock(),
+            _pp_make_skip_output_result=Mock(return_value=skip_result),
+            _pp_commit_output_work=Mock(),
+        )
+        scheduler._pp_send_output_to_next_stage = lambda *args, **kwargs: (
+            SchedulerPPMixin._pp_send_output_to_next_stage(scheduler, *args, **kwargs)
+        )
+
+        with patch(
+            "sglang.srt.managers.scheduler_pp_mixin._pp_can_skip_output_comm",
+            return_value=True,
+        ):
+            next_outputs, batch_result, d2h_event, work = (
+                SchedulerPPMixin._pp_send_recv_and_preprocess_output_tensors(
+                    scheduler,
+                    next_first_rank_mb_id=1,
+                    next_mb_id=0,
+                    mbs=[target, None],
+                    mb_metadata=[metadata, None],
+                    last_rank_comm_queue=queue,
+                    pp_outputs=None,
+                    relay_output_immediately=True,
+                    use_forward_batch_snapshot=True,
+                    close_output_ring=True,
+                )
+            )
+
+        assert (next_outputs, batch_result, d2h_event) == skip_result
+        assert work == []
+        scheduler._pp_recv_dict_from_prev_stage.assert_not_called()
+        scheduler._pp_send_dict_to_next_stage.assert_not_called()
+        scheduler._pp_commit_output_work.assert_called_once_with([])
+        assert len(queue) == (0 if pp_rank == 1 else 1)
 
 
 def test_pp_disagg_output_origin_send_survives_empty_return_slot():
