@@ -51,6 +51,7 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.utils.cp_utils import is_mla_prefill_cp_enabled
+from sglang.srt.managers.phase_trace import trace_graph_decision
 from sglang.srt.model_executor.cuda_graph_buffer_registry import (
     CudaGraphBufferRegistry,
     build_decode_registry,
@@ -526,11 +527,29 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         cap_layout.qo_indptr_device.copy_(live.qo_indptr_device)
 
     def can_run_graph(self, forward_batch: ForwardBatch):
+        phase = (
+            "target_verify"
+            if self.capture_forward_mode.is_target_verify()
+            else "target_decode"
+        )
+
+        def decide(allowed: bool, reason: str, **fields):
+            trace_graph_decision(
+                phase,
+                allowed=allowed,
+                reason=reason,
+                forward_batch=forward_batch,
+                captured_width=self.captured_req_width,
+                max_bs=self.max_bs,
+                **fields,
+            )
+            return allowed
+
         # Disable for token embedding overrides (dynamic per-request)
         if forward_batch.replace_embeds is not None:
-            return False
+            return decide(False, "replace_embeds")
         if self._is_long_context_cuda_graph_disabled(forward_batch):
-            return False
+            return decide(False, "long_context")
 
         # A mixed active/idle speculative verify needs the eager preparation
         # path to materialize idle ranks before the symmetric MoE collective.
@@ -549,7 +568,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                 global_num_tokens=original_counts,
             )
         ):
-            return False
+            return decide(False, "mixed_active_idle_verify")
 
         ragged_layout = (
             resolve_ragged_verify_layout(forward_batch)
@@ -557,9 +576,10 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             else None
         )
         if ragged_layout is not None:
-            return self._can_run_ragged_verify_graph(forward_batch, ragged_layout)
+            allowed = self._can_run_ragged_verify_graph(forward_batch, ragged_layout)
+            return decide(bool(allowed), "allowed" if allowed else "ragged_guard")
         if self.ragged_verify_mode and forward_batch.forward_mode.is_target_verify():
-            return False
+            return decide(False, "ragged_layout_missing")
 
         # Uniform-width replay invariant: the batch's actual per-request width
         # must match this runner's capture width; anything else falls back to
@@ -570,7 +590,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             and spec_info.num_tokens_per_req > 0
             and spec_info.num_tokens_per_req != self.captured_req_width
         ):
-            return False
+            return decide(False, "request_width_mismatch")
 
         if self.require_mlp_tp_gather:
             # Raw sync values are per-rank request counts on decode-family
@@ -590,9 +610,6 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             if self.disable_padding
             else cuda_graph_bs <= self.max_bs
         )
-
-        if self.require_mlp_sync:
-            is_bs_supported = is_bs_supported and forward_batch.can_run_dp_cuda_graph
 
         # NOTE: cuda graph cannot handle mixed batch (encoder_len = 0)
         # If mixed batch cannot be supported, then encoder_lens can be removed in cuda graph
@@ -616,12 +633,19 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             else True
         )
 
-        return (
-            is_bs_supported
-            and is_encoder_lens_supported
-            and is_tbo_supported
-            and is_ngram_supported
-        )
+        if not is_bs_supported:
+            return decide(
+                False, "batch_size_or_backend", graph_batch_size=cuda_graph_bs
+            )
+        if self.require_mlp_sync and not forward_batch.can_run_dp_cuda_graph:
+            return decide(False, "generic_dp_vote", graph_batch_size=cuda_graph_bs)
+        if not is_encoder_lens_supported:
+            return decide(False, "encoder_lens", graph_batch_size=cuda_graph_bs)
+        if not is_tbo_supported:
+            return decide(False, "tbo", graph_batch_size=cuda_graph_bs)
+        if not is_ngram_supported:
+            return decide(False, "ngram_width", graph_batch_size=cuda_graph_bs)
+        return decide(True, "allowed", graph_batch_size=cuda_graph_bs)
 
     def _can_run_ragged_verify_graph(self, forward_batch: ForwardBatch, ragged_layout):
         if not self.attn_backend.supports_ragged_verify_graph:

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -10,6 +11,9 @@ from sglang.srt.managers.scheduler_components.dp_attn import (
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
+)
+from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
+    EAGLEDraftExtendCudaGraphRunner,
 )
 from sglang.srt.speculative.eagle_info import EaglePPVerifyInputRaw
 from sglang.srt.speculative.eagle_worker_v2 import (
@@ -97,11 +101,36 @@ class TestEaglePDDPFallback(CustomTestCase):
             can_run_dp_cuda_graph=True,
             can_run_dp_draft_cuda_graph=False,
         )
-        self.assertFalse(runner.can_run_graph(forward_batch))
+        with patch(
+            "sglang.srt.speculative.eagle_draft_cuda_graph_runner.trace_graph_decision"
+        ) as trace_decision:
+            self.assertFalse(runner.can_run_graph(forward_batch))
+        self.assertEqual(trace_decision.call_args.kwargs["reason"], "draft_dp_vote")
 
         # Target verify and draft-extend only consume the ordinary gate.
         forward_batch.can_run_dp_draft_cuda_graph = True
         self.assertTrue(runner.can_run_graph(forward_batch))
+
+    def test_draft_extend_uses_only_generic_dp_vote(self):
+        runner = object.__new__(EAGLEDraftExtendCudaGraphRunner)
+        runner.require_mlp_tp_gather = False
+        runner.require_mlp_sync = True
+        runner.disable_padding = False
+        runner.captured_req_width = 4
+        runner.max_bs = 8
+        forward_batch = SimpleNamespace(
+            spec_info=SimpleNamespace(num_tokens_per_req=4),
+            batch_size=1,
+            can_run_dp_cuda_graph=False,
+            can_run_dp_draft_cuda_graph=True,
+            seq_lens=torch.ones(1, dtype=torch.int32),
+        )
+
+        with patch(
+            "sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner.trace_graph_decision"
+        ) as trace_decision:
+            self.assertFalse(runner.can_run_graph(forward_batch))
+        self.assertEqual(trace_decision.call_args.kwargs["reason"], "generic_dp_vote")
 
     def test_seedless_pd_draft_requests_rank_consistent_eager_forward(self):
         worker = object.__new__(EAGLEWorkerV2)

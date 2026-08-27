@@ -14,6 +14,7 @@ from sglang.kernels.ops.speculative.spec_tree import (
 from sglang.srt.hardware_backend.npu.dsv4.dsv4_common_hooks import (
     maybe_build_dsv4_verify_bundle,
 )
+from sglang.srt.managers.phase_trace import trace_graph_decision
 from sglang.srt.mem_cache.allocation import alloc_for_spec_decode
 from sglang.srt.mem_cache.allocation_sizing import get_alloc_reserve_per_decode
 from sglang.srt.runtime_context import get_parallel, get_spec
@@ -591,6 +592,12 @@ def eagle_prepare_for_verify(
         and target_worker.model_runner.decode_cuda_graph_runner.can_run_graph(
             verify_forward_batch
         )
+    )
+    trace_graph_decision(
+        "target_verify_dispatch",
+        allowed=can_run_cuda_graph,
+        reason="graph" if can_run_cuda_graph else "eager",
+        forward_batch=verify_forward_batch,
     )
     if can_run_cuda_graph:
         target_worker.model_runner.decode_cuda_graph_runner.load_batch(

@@ -13,6 +13,7 @@ from sglang.srt.layers.dp_attention import (
     set_is_extend_in_batch,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
+from sglang.srt.managers.phase_trace import trace_graph_decision
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
     ForwardBatch,
@@ -295,8 +296,20 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
         return ShapeKey(size=bs)
 
     def can_run_graph(self, forward_batch: ForwardBatch):
+        def decide(allowed: bool, reason: str, **fields):
+            trace_graph_decision(
+                "draft_extend",
+                allowed=allowed,
+                reason=reason,
+                forward_batch=forward_batch,
+                captured_width=self.captured_req_width,
+                max_bs=self.max_bs,
+                **fields,
+            )
+            return allowed
+
         if self._is_long_context_cuda_graph_disabled(forward_batch):
-            return False
+            return decide(False, "long_context")
 
         # Uniform-width replay invariant: the batch's actual per-request width
         # must match this runner's capture width; anything else falls back to
@@ -307,7 +320,7 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
             and spec_info.num_tokens_per_req > 0
             and spec_info.num_tokens_per_req != self.captured_req_width
         ):
-            return False
+            return decide(False, "request_width_mismatch")
 
         if self.require_mlp_tp_gather:
             # Raw sync values are per-rank request counts on decode-family rounds.
@@ -321,10 +334,13 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
             else cuda_graph_bs <= self.max_bs
         )
 
-        if self.require_mlp_sync:
-            is_bs_supported = is_bs_supported and forward_batch.can_run_dp_cuda_graph
-
-        return is_bs_supported
+        if not is_bs_supported:
+            return decide(
+                False, "batch_size_or_backend", graph_batch_size=cuda_graph_bs
+            )
+        if self.require_mlp_sync and not forward_batch.can_run_dp_cuda_graph:
+            return decide(False, "generic_dp_vote", graph_batch_size=cuda_graph_bs)
+        return decide(True, "allowed", graph_batch_size=cuda_graph_bs)
 
     def capture_one_shape(
         self,

@@ -94,7 +94,9 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
         with patch(
             "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
             return_value=True,
-        ) as should_fallback:
+        ) as should_fallback, patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner.trace_graph_decision"
+        ) as trace_decision:
             self.assertFalse(runner.can_run_graph(forward_batch))
 
         should_fallback.assert_called_once_with(
@@ -103,6 +105,10 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
             is_extend_in_batch=False,
             global_num_tokens=[4, 0, 4, 0],
         )
+        self.assertEqual(
+            trace_decision.call_args.kwargs["reason"], "mixed_active_idle_verify"
+        )
+        self.assertFalse(trace_decision.call_args.kwargs["allowed"])
 
     def test_uniform_symmetric_verify_keeps_full_graph(self):
         runner = self._build_runner(disable_graph_max_seq_len=0)

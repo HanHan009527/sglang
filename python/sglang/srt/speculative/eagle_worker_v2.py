@@ -30,6 +30,7 @@ from sglang.srt.layers.moe.utils import (
     speculative_moe_backend_context,
 )
 from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+from sglang.srt.managers.phase_trace import trace_graph_decision
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
@@ -758,6 +759,12 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         with canary_outside_ctx:
             # Run draft
+            trace_graph_decision(
+                "draft_decode_dispatch",
+                allowed=bool(can_run_decode_cuda_graph),
+                reason="graph" if can_run_decode_cuda_graph else "eager",
+                forward_batch=forward_batch,
+            )
             if can_run_decode_cuda_graph:
                 parent_list, top_scores_index, draft_tokens, draft_probs = (
                     self.cuda_graph_runner.execute(forward_batch)
@@ -1202,6 +1209,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             else contextlib.nullcontext()
         )
         with canary_ctx:
+            trace_graph_decision(
+                "draft_extend_dispatch",
+                allowed=bool(can_run_decode_cuda_graph),
+                reason="graph" if can_run_decode_cuda_graph else "eager",
+                forward_batch=forward_batch,
+                seed_from_draft_extend=self.seed_dsa_topk_from_draft_extend,
+            )
             if can_run_decode_cuda_graph:
                 draft_logits_output = self.cuda_graph_runner_for_draft_extend.execute(
                     forward_batch

@@ -41,6 +41,7 @@ batch_phase_fields = phase_trace.batch_phase_fields
 describe_process_group = phase_trace.describe_process_group
 format_phase_trace = phase_trace.format_phase_trace
 format_phase_trace_snapshot = phase_trace.format_phase_trace_snapshot
+graph_decision_fields = phase_trace.graph_decision_fields
 
 
 _CI_REGISTER_PATH = _ROOT / "python/sglang/test/ci/ci_register.py"
@@ -118,6 +119,96 @@ def test_batch_phase_fields_handles_active_idle_and_missing_batches():
         "batch_global_draft_graph_vote": None,
         "batch_global_tokens": None,
         "idle": True,
+    }
+
+
+def test_graph_decision_fields_uses_cpu_metadata_only():
+    batch = SimpleNamespace(
+        batch_size=3,
+        forward_mode=_Mode("TARGET_VERIFY", False),
+        can_run_dp_cuda_graph=True,
+        can_run_dp_draft_cuda_graph=False,
+        original_global_num_tokens_cpu=[3, 0, 2],
+        spec_info=SimpleNamespace(
+            num_tokens_per_req=4,
+            cuda_graph_compatible=False,
+            dsa_topk_indices=object(),
+            future_dsa_topk_indices_available=True,
+        ),
+        force_disable_draft_cuda_graph=True,
+    )
+    assert graph_decision_fields(batch) == {
+        "batch_size": 3,
+        "forward_mode": "TARGET_VERIFY",
+        "generic_dp_vote": True,
+        "draft_dp_vote": False,
+        "global_tokens": [3, 0, 2],
+        "mixed_active_idle": True,
+        "num_tokens_per_req": 4,
+        "spec_cuda_graph_compatible": False,
+        "force_disable_draft_cuda_graph": True,
+        "local_dsa_seed_valid": True,
+        "future_dsa_seed_valid": True,
+    }
+
+
+def test_trace_graph_decision_disabled_does_not_read_batch_properties():
+    class HostileBatch:
+        @property
+        def forward_mode(self):
+            raise AssertionError("disabled tracing read batch metadata")
+
+    collect = Mock(side_effect=AssertionError("disabled tracing ran collector"))
+    with patch.object(phase_trace.phase_tracer, "enabled", False):
+        assert (
+            phase_trace.trace_graph_decision(
+                "target_verify",
+                allowed=False,
+                reason="test",
+                forward_batch=HostileBatch(),
+                collect=collect,
+            )
+            is False
+        )
+    collect.assert_not_called()
+
+
+def test_trace_graph_decision_emits_structured_reason():
+    tracer = PhaseTracer(enabled=True, max_events=2, every_n=1, ring_size=2, log=Mock())
+    batch = SimpleNamespace(
+        batch_size=2,
+        forward_mode=_Mode("DRAFT_EXTEND_V2", False),
+        can_run_dp_cuda_graph=True,
+        can_run_dp_draft_cuda_graph=True,
+        original_global_num_tokens_cpu=[2, 2],
+        spec_info=SimpleNamespace(num_tokens_per_req=4),
+    )
+    with patch.object(phase_trace, "phase_tracer", tracer):
+        assert phase_trace.trace_graph_decision(
+            "draft_extend",
+            allowed=False,
+            reason="request_width_mismatch",
+            forward_batch=batch,
+            captured_width=1,
+        )
+    assert tracer.last_marker() == {
+        "event": "cuda_graph_decision",
+        "seq": 1,
+        "batch_size": 2,
+        "forward_mode": "DRAFT_EXTEND_V2",
+        "generic_dp_vote": True,
+        "draft_dp_vote": True,
+        "global_tokens": [2, 2],
+        "mixed_active_idle": False,
+        "num_tokens_per_req": 4,
+        "spec_cuda_graph_compatible": None,
+        "force_disable_draft_cuda_graph": None,
+        "local_dsa_seed_valid": False,
+        "future_dsa_seed_valid": None,
+        "phase": "draft_extend",
+        "allowed": False,
+        "reason": "request_width_mismatch",
+        "captured_width": 1,
     }
 
 

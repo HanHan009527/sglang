@@ -198,6 +198,68 @@ def batch_phase_fields(batch) -> dict[str, Any]:
     }
 
 
+def graph_decision_fields(forward_batch) -> dict[str, Any]:
+    """Read host metadata that explains a CUDA Graph admission decision.
+
+    The helper intentionally does not inspect tensor values, shapes, devices,
+    or streams.  In particular, DP census and graph votes come from the CPU
+    mirrors already produced by the scheduler's existing synchronization.
+    """
+    if forward_batch is None:
+        return {
+            "batch_size": None,
+            "forward_mode": None,
+            "generic_dp_vote": None,
+            "draft_dp_vote": None,
+            "global_tokens": None,
+            "mixed_active_idle": None,
+            "num_tokens_per_req": None,
+            "spec_cuda_graph_compatible": None,
+            "force_disable_draft_cuda_graph": None,
+            "local_dsa_seed_valid": None,
+            "future_dsa_seed_valid": None,
+        }
+
+    forward_mode = getattr(forward_batch, "forward_mode", None)
+    mode_name = getattr(forward_mode, "name", None)
+    if mode_name is None and isinstance(forward_mode, (str, int)):
+        mode_name = forward_mode
+
+    spec_info = getattr(forward_batch, "spec_info", None)
+    global_tokens = getattr(forward_batch, "original_global_num_tokens_cpu", None)
+    if global_tokens is None:
+        global_tokens = getattr(forward_batch, "global_num_tokens_cpu", None)
+    mixed_active_idle = None
+    if isinstance(global_tokens, (list, tuple)) and global_tokens:
+        host_counts = [value for value in global_tokens if isinstance(value, int)]
+        if len(host_counts) == len(global_tokens):
+            mixed_active_idle = any(value == 0 for value in host_counts) and any(
+                value > 0 for value in host_counts
+            )
+
+    return {
+        "batch_size": getattr(forward_batch, "batch_size", None),
+        "forward_mode": mode_name,
+        "generic_dp_vote": getattr(forward_batch, "can_run_dp_cuda_graph", None),
+        "draft_dp_vote": getattr(forward_batch, "can_run_dp_draft_cuda_graph", None),
+        "global_tokens": global_tokens,
+        "mixed_active_idle": mixed_active_idle,
+        "num_tokens_per_req": getattr(spec_info, "num_tokens_per_req", None),
+        "spec_cuda_graph_compatible": getattr(spec_info, "cuda_graph_compatible", None),
+        "force_disable_draft_cuda_graph": getattr(
+            forward_batch, "force_disable_draft_cuda_graph", None
+        ),
+        "local_dsa_seed_valid": (
+            getattr(spec_info, "dsa_topk_indices", None) is not None
+            if spec_info is not None
+            else None
+        ),
+        "future_dsa_seed_valid": getattr(
+            spec_info, "future_dsa_topk_indices_available", None
+        ),
+    }
+
+
 class PhaseTracer:
     """A process-local bounded ring and sampled phase-order logger."""
 
@@ -358,3 +420,30 @@ phase_tracer = PhaseTracer(
     every_n=envs.SGLANG_DEBUG_PP_DP_PHASE_TRACE_EVERY_N.get(),
     ring_size=envs.SGLANG_DEBUG_PP_DP_PHASE_TRACE_RING_SIZE.get(),
 )
+
+
+def trace_graph_decision(
+    phase: str,
+    *,
+    allowed: bool,
+    reason: str,
+    forward_batch=None,
+    collect: Optional[Callable[[], dict[str, Any]]] = None,
+    **fields: Any,
+) -> bool:
+    """Emit one structured Graph decision without touching device state."""
+    if not phase_tracer.enabled:
+        return False
+
+    def collect_fields() -> dict[str, Any]:
+        extra_fields = collect() if collect is not None else {}
+        return {**graph_decision_fields(forward_batch), **extra_fields}
+
+    return phase_tracer.emit(
+        "cuda_graph_decision",
+        collect=collect_fields,
+        phase=phase,
+        allowed=allowed,
+        reason=reason,
+        **fields,
+    )
