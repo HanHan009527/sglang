@@ -942,6 +942,7 @@ class SchedulerPPMixin:
                             output_slot_descriptor=output_slot_descriptor,
                         )
                     )
+                    self._pp_fence_output_slot_device(output_slot_descriptor)
                     self._pp_complete_output_slot(output_slot_descriptor)
                     output_slot_epoch += 1
 
@@ -1475,7 +1476,7 @@ class SchedulerPPMixin:
     def _pp_complete_output_slot(
         self: Scheduler, descriptor: PPOutputSlotDescriptor
     ) -> None:
-        """Fence PG8 completion before any rank starts the next slot's PG7."""
+        """Confirm every PP rank installed the PG8-to-PG7 device fence."""
         completed = [None] * torch.distributed.get_world_size(
             self.pp_disagg_control_group
         )
@@ -1490,6 +1491,22 @@ class SchedulerPPMixin:
                 "PP output-slot completion fence failed: "
                 f"expected={expected} completed={completed!r}"
             )
+
+    def _pp_fence_output_slot_device(
+        self: Scheduler, descriptor: PPOutputSlotDescriptor
+    ) -> None:
+        """Order the next scheduler/forward work after this slot's PG8 work.
+
+        ``Work.wait()`` issued inside ``pp_output_stream_ctx`` only installs a
+        dependency on that CUDA stream.  The following CPU control-plane fence
+        therefore cannot by itself prove that PG8 completed on the device.  A
+        one-way stream dependency closes that gap without synchronizing either
+        stream on the host.  The next pipeline launch already makes
+        ``forward_stream`` wait on ``schedule_stream``, so this also establishes
+        PG8(slot S) -> PG7(slot S + 1).
+        """
+        if descriptor.communicates:
+            self.schedule_stream.wait_stream(self.pp_output_stream)
 
     def _pp_forward_stage_payload(
         self: Scheduler, previous_work: List[P2PWork], payload
