@@ -60,7 +60,34 @@ def test_graph_output_is_detached_recursively():
     assert snapshot["nested"][1][0].data_ptr() != tuple_tensor.data_ptr()
 
 
-def test_eager_output_keeps_original_objects():
-    source = {"token_ids": torch.tensor([1])}
+def test_eager_output_is_also_detached_for_async_relay():
+    tensor = torch.tensor([1])
+    source = {"token_ids": tensor}
 
-    assert _pp_snapshot_graph_output_tensors(source, False) is source
+    snapshot = _pp_snapshot_graph_output_tensors(source, False)
+    tensor.add_(10)
+
+    assert snapshot is not source
+    assert snapshot["token_ids"].tolist() == [1]
+    assert snapshot["token_ids"].data_ptr() != tensor.data_ptr()
+
+
+def test_nested_eagle_output_is_detached_when_verify_graph_flag_is_false():
+    accept_lens = torch.tensor([2, 1])
+    verified_id = torch.tensor([11, 12])
+    source = {
+        "pp_spec_output": {
+            "accept_lens": accept_lens,
+            "draft_tokens": [verified_id],
+        }
+    }
+
+    snapshot = _pp_snapshot_graph_output_tensors(source, False)
+    accept_lens.zero_()
+    verified_id.zero_()
+
+    eagle_snapshot = snapshot["pp_spec_output"]
+    assert eagle_snapshot["accept_lens"].tolist() == [2, 1]
+    assert eagle_snapshot["draft_tokens"][0].tolist() == [11, 12]
+    assert eagle_snapshot["accept_lens"].data_ptr() != accept_lens.data_ptr()
+    assert eagle_snapshot["draft_tokens"][0].data_ptr() != verified_id.data_ptr()

@@ -123,9 +123,17 @@ def _pp_can_skip_output_comm(batch: ScheduleBatch) -> bool:
 def _pp_snapshot_graph_output_tensors(
     tensor_dict: Dict[str, torch.Tensor], can_run_cuda_graph: bool
 ) -> Dict[str, torch.Tensor]:
-    """Detach an async PP relay from CUDA-graph-owned output buffers."""
-    if not can_run_cuda_graph:
-        return tensor_dict
+    """Detach every async PP relay from producer-owned output buffers.
+
+    ``can_run_cuda_graph`` only describes the target verify forward.  A PP +
+    speculative iteration can still return tensors owned by a CUDA-graph draft
+    sub-stage (or by another reusable worker buffer) while this flag is false.
+    The output relay outlives the producer forward and runs on a different
+    stream, so ownership cannot safely be inferred from that top-level flag.
+    Always snapshot the small relay payload before publishing its producer
+    event; the queued P2P work then owns these detached tensors until commit.
+    """
+    del can_run_cuda_graph
 
     def clone_tensors(value):
         if torch.is_tensor(value):
