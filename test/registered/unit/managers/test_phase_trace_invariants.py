@@ -114,9 +114,6 @@ def test_depth_zero_decode_closes_output_ring_after_proxy_commit():
 
     assert len(close_calls) == 1
     assert proxy_commit_line < close_calls[0][0]
-    output_device_fence_line = next(
-        line for line, name, _ in calls if name == "_pp_fence_output_slot_device"
-    )
     output_completion_fence_line = next(
         line for line, name, _ in calls if name == "_pp_complete_output_slot"
     )
@@ -124,11 +121,9 @@ def test_depth_zero_decode_closes_output_ring_after_proxy_commit():
         line for line, name, _ in calls if name == "_pp_run_control_ring_phase"
     )
     assert (
-        close_calls[0][0]
-        < output_device_fence_line
-        < output_completion_fence_line
-        < first_control_ring_line
+        close_calls[0][0] < output_completion_fence_line < first_control_ring_line
     )
+    assert not any(name == "_pp_fence_output_slot_device" for _, name, _ in calls)
     assert not any(name == "_pp_start_output_relay" for _, name, _ in calls)
 
 

@@ -166,30 +166,6 @@ def test_pp_output_slot_agreement_rejects_missing_or_stale_producer_queue():
         )
 
 
-def test_pp_output_slot_device_fence_orders_scheduler_after_output_stream():
-    schedule_stream = SimpleNamespace(wait_stream=Mock())
-    output_stream = object()
-    scheduler = SimpleNamespace(
-        schedule_stream=schedule_stream,
-        pp_output_stream=output_stream,
-    )
-
-    communicating = _output_slot_descriptor(
-        SimpleNamespace(
-            forward_mode=ForwardMode.DECODE,
-            reqs=[SimpleNamespace(rid="r0")],
-        )
-    )
-    SchedulerPPMixin._pp_fence_output_slot_device(scheduler, communicating)
-    schedule_stream.wait_stream.assert_called_once_with(output_stream)
-
-    schedule_stream.wait_stream.reset_mock()
-    SchedulerPPMixin._pp_fence_output_slot_device(
-        scheduler, _output_slot_descriptor(None)
-    )
-    schedule_stream.wait_stream.assert_not_called()
-
-
 def _pp_output_slot_gloo_worker(rank, world_size, port, trace_dir):
     dist.init_process_group(
         backend="gloo",
