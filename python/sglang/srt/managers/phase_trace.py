@@ -278,6 +278,7 @@ class PhaseTracer:
         self.log = log
         self._sequence = count(1)
         self._log_slots = count(1)
+        self._named_log_slots: dict[str, Any] = {}
         self._ring = deque(maxlen=max(1, ring_size))
         self._logging_exhausted = self.max_events == 0
 
@@ -291,6 +292,7 @@ class PhaseTracer:
         *,
         collect: Optional[Callable[[], dict[str, Any]]] = None,
         always_log: bool = False,
+        log_budget: Optional[str] = None,
         **fields: Any,
     ) -> bool:
         if not self.enabled:
@@ -314,24 +316,33 @@ class PhaseTracer:
                     return False
                 return True
 
-            log_slot = next(self._log_slots)
+            if log_budget is None:
+                log_slots = self._log_slots
+            else:
+                # A high-volume diagnostic family must not consume the bounded
+                # budget of another family before the observation of interest.
+                # Creating/advancing counters is GIL-atomic, like _sequence.
+                log_slots = self._named_log_slots.setdefault(log_budget, count(1))
+            log_slot = next(log_slots)
             if log_slot > self.max_events:
-                self._logging_exhausted = True
+                if log_budget is None:
+                    self._logging_exhausted = True
                 if log_slot == self.max_events + 1:
                     # The unique counter slot guarantees warning-once even
                     # when several scheduler threads emit concurrently.
                     try:
                         self.log.warning(
-                            "%slimit_reached max_events=%s every_n=%s",
+                            "%slimit_reached max_events=%s every_n=%s budget=%s",
                             _LOG_PREFIX,
                             self.max_events,
                             self.every_n,
+                            log_budget or "default",
                         )
                     except Exception:
                         pass
                 return False
 
-            if log_slot == self.max_events:
+            if log_budget is None and log_slot == self.max_events:
                 self._logging_exhausted = True
             try:
                 self.log.info(_format_record(_LOG_PREFIX, record))
@@ -442,6 +453,7 @@ def trace_graph_decision(
     return phase_tracer.emit(
         "cuda_graph_decision",
         collect=collect_fields,
+        log_budget="cuda_graph_decision",
         phase=phase,
         allowed=allowed,
         reason=reason,

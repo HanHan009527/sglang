@@ -404,6 +404,39 @@ def test_always_log_bypasses_sampling_and_exhausted_regular_budget():
     ]
 
 
+def test_named_log_budget_is_independent_and_bounded():
+    log = Mock()
+    tracer = PhaseTracer(enabled=True, max_events=1, every_n=1, ring_size=8, log=log)
+
+    assert tracer.emit("default") is True
+    assert tracer.emit("default_exhausted") is False
+    assert tracer.emit("decision", log_budget="cuda_graph_decision") is True
+    assert tracer.emit("decision_exhausted", log_budget="cuda_graph_decision") is False
+
+    assert [call.args[0] for call in log.info.call_args_list] == [
+        format_phase_trace("default", 1, {}),
+        format_phase_trace("decision", 3, {}),
+    ]
+    assert [call.args[-1] for call in log.warning.call_args_list] == [
+        "default",
+        "cuda_graph_decision",
+    ]
+
+
+def test_graph_decision_uses_independent_budget_after_default_exhaustion():
+    log = Mock()
+    tracer = PhaseTracer(enabled=True, max_events=1, every_n=1, ring_size=8, log=log)
+    assert tracer.emit("consume_default") is True
+    assert tracer.emit("exhaust_default") is False
+
+    with patch.object(phase_trace, "phase_tracer", tracer):
+        assert phase_trace.trace_graph_decision(
+            "target_verify", allowed=False, reason="mixed_active_idle_verify"
+        )
+
+    assert '"event":"cuda_graph_decision"' in log.info.call_args_list[-1].args[0]
+
+
 def test_concurrent_emit_keeps_unique_sequences_and_bounded_snapshot():
     tracer = PhaseTracer(
         enabled=True, max_events=0, every_n=1, ring_size=256, log=Mock()

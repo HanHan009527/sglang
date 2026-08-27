@@ -127,6 +127,34 @@ def ragged_verify_compact_graphs_enabled(spec_algorithm: SpeculativeAlgorithm) -
     return ragged_verify_compact_enabled()
 
 
+def _should_materialize_symmetric_spec_moe_graph_replay(
+    *,
+    capture_forward_mode: ForwardMode,
+    forward_batch: ForwardBatch,
+) -> bool:
+    """Whether an idle rank needs graph-resident dummy MoE rows.
+
+    The decode graph is already captured at a padded, active shape.  Replay-side
+    attention metadata maps an IDLE runtime batch onto req/page/cache slot zero,
+    and the runner slices its outputs back to the logical zero-token batch.  The
+    remaining difference from ``ForwardBatch.prepare_mlp_sync_batch`` is the
+    MoE validity count: leaving it at zero makes DeepEP treat the whole rank as
+    empty and breaks the symmetric speculative collective generation.
+    """
+    original_counts = forward_batch.original_global_num_tokens_cpu
+    return bool(
+        capture_forward_mode.is_target_verify()
+        and forward_batch.forward_mode.is_idle()
+        and original_counts is not None
+        and _should_force_symmetric_spec_moe_padding(
+            spec_algorithm=forward_batch.spec_algorithm,
+            spec_info=forward_batch.spec_info,
+            is_extend_in_batch=forward_batch.is_extend_in_batch,
+            global_num_tokens=original_counts,
+        )
+    )
+
+
 def build_replay_fb_view(
     forward_batch: ForwardBatch,
     buffers: DecodeInputBuffers,
@@ -459,6 +487,26 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
     def _capture_graph_size(self, *, bs: int, num_tokens: int) -> int:
         return num_tokens if self.ragged_verify_mode else bs
 
+    def _stage_symmetric_spec_moe_graph_rows(
+        self, forward_batch: ForwardBatch, padded_num_tokens: int
+    ) -> bool:
+        """Make padded idle rows valid to MoE without changing ownership."""
+        if not _should_materialize_symmetric_spec_moe_graph_replay(
+            capture_forward_mode=self.capture_forward_mode,
+            forward_batch=forward_batch,
+        ):
+            return False
+
+        global_num_token_non_padded = self.buffers.num_token_non_padded
+        global_num_token_non_padded.fill_(padded_num_tokens)
+        if self.require_gathered_buffer and not self.enable_prefill_cp:
+            local = compute_local_num_token_non_padded(
+                global_num_token_non_padded=global_num_token_non_padded,
+                num_tokens_per_dp=padded_num_tokens,
+            )
+            global_num_token_non_padded.copy_(local)
+        return True
+
     def _resolve_lora_variant(self, forward_batch: ForwardBatch):
         if not getattr(self, "record_nolora_graph", False):
             return None
@@ -550,25 +598,6 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             return decide(False, "replace_embeds")
         if self._is_long_context_cuda_graph_disabled(forward_batch):
             return decide(False, "long_context")
-
-        # A mixed active/idle speculative verify needs the eager preparation
-        # path to materialize idle ranks before the symmetric MoE collective.
-        # FullCG replay bypasses ForwardBatch.prepare_mlp_sync_batch(), so an
-        # idle rank would instead replay the captured TARGET_VERIFY graph over
-        # padding-only req/page metadata.  All ranks see the same original DP
-        # census, making this a rank-consistent fallback decision.
-        original_counts = forward_batch.original_global_num_tokens_cpu
-        if (
-            self.capture_forward_mode.is_target_verify()
-            and original_counts is not None
-            and _should_force_symmetric_spec_moe_padding(
-                spec_algorithm=forward_batch.spec_algorithm,
-                spec_info=forward_batch.spec_info,
-                is_extend_in_batch=forward_batch.is_extend_in_batch,
-                global_num_tokens=original_counts,
-            )
-        ):
-            return decide(False, "mixed_active_idle_verify")
 
         ragged_layout = (
             resolve_ragged_verify_layout(forward_batch)
@@ -1183,6 +1212,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             padded_num_tokens=padded_num_tokens,
             pp_proxy_tensors=pp_proxy_tensors,
         )
+
+        # The static graph already owns padded req/page/cache metadata for this
+        # bucket.  On a symmetric speculative idle rank, keep the logical batch
+        # empty (raw_bs/raw_num_token and HiSparse num_real_reqs stay zero), but
+        # make its padded rows valid to MoE so DeepEP sees the same non-empty
+        # collective generation as active DP peers.
+        self._stage_symmetric_spec_moe_graph_rows(forward_batch, padded_num_tokens)
 
         if (
             not is_ragged

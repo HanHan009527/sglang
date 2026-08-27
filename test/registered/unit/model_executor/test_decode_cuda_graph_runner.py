@@ -12,6 +12,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.model_executor.runner.decode_cuda_graph_runner import (
     DecodeCudaGraphRunner,
+    _should_materialize_symmetric_spec_moe_graph_replay,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -82,7 +83,7 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
 
                 self.assertIs(runner.can_run_graph(forward_batch), expected)
 
-    def test_mixed_idle_symmetric_verify_falls_back_consistently(self):
+    def test_mixed_idle_symmetric_verify_keeps_full_graph(self):
         runner = self._build_runner(disable_graph_max_seq_len=0)
         runner.capture_forward_mode = ForwardMode.TARGET_VERIFY
         forward_batch = self._build_forward_batch(sequence_depth=128)
@@ -94,21 +95,94 @@ class TestDecodeCudaGraphRunnerLongContextGuard(unittest.TestCase):
         with patch(
             "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
             return_value=True,
-        ) as should_fallback, patch(
+        ) as should_materialize, patch(
             "sglang.srt.model_executor.runner.decode_cuda_graph_runner.trace_graph_decision"
         ) as trace_decision:
-            self.assertFalse(runner.can_run_graph(forward_batch))
+            self.assertTrue(runner.can_run_graph(forward_batch))
 
-        should_fallback.assert_called_once_with(
-            spec_algorithm=forward_batch.spec_algorithm,
-            spec_info=forward_batch.spec_info,
+        should_materialize.assert_not_called()
+        self.assertEqual(trace_decision.call_args.kwargs["reason"], "allowed")
+        self.assertTrue(trace_decision.call_args.kwargs["allowed"])
+
+    def test_only_idle_rank_materializes_symmetric_verify_graph_rows(self):
+        idle_batch = self._build_forward_batch(sequence_depth=128)
+        idle_batch.forward_mode = ForwardMode.IDLE
+        idle_batch.spec_algorithm = SimpleNamespace(is_eagle=lambda: True)
+        idle_batch.spec_info = SimpleNamespace(num_tokens_per_req=4)
+        idle_batch.is_extend_in_batch = False
+        idle_batch.original_global_num_tokens_cpu = [4, 0, 4, 0]
+
+        with patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
+            return_value=True,
+        ) as should_materialize:
+            self.assertTrue(
+                _should_materialize_symmetric_spec_moe_graph_replay(
+                    capture_forward_mode=ForwardMode.TARGET_VERIFY,
+                    forward_batch=idle_batch,
+                )
+            )
+
+            active_batch = SimpleNamespace(**vars(idle_batch))
+            active_batch.forward_mode = ForwardMode.TARGET_VERIFY
+            self.assertFalse(
+                _should_materialize_symmetric_spec_moe_graph_replay(
+                    capture_forward_mode=ForwardMode.TARGET_VERIFY,
+                    forward_batch=active_batch,
+                )
+            )
+            self.assertFalse(
+                _should_materialize_symmetric_spec_moe_graph_replay(
+                    capture_forward_mode=ForwardMode.DECODE,
+                    forward_batch=idle_batch,
+                )
+            )
+
+        should_materialize.assert_called_once_with(
+            spec_algorithm=idle_batch.spec_algorithm,
+            spec_info=idle_batch.spec_info,
             is_extend_in_batch=False,
             global_num_tokens=[4, 0, 4, 0],
         )
-        self.assertEqual(
-            trace_decision.call_args.kwargs["reason"], "mixed_active_idle_verify"
+
+    def test_graph_staging_materializes_only_moe_rows_and_keeps_idle_ownership(self):
+        runner = self._build_runner(disable_graph_max_seq_len=0)
+        runner.capture_forward_mode = ForwardMode.TARGET_VERIFY
+        runner.require_gathered_buffer = True
+        runner.enable_prefill_cp = False
+        runner.buffers = SimpleNamespace(
+            num_token_non_padded=torch.tensor(0, dtype=torch.int32)
         )
-        self.assertFalse(trace_decision.call_args.kwargs["allowed"])
+        forward_batch = self._build_forward_batch(sequence_depth=128)
+        forward_batch.forward_mode = ForwardMode.IDLE
+        forward_batch.batch_size = 0
+        forward_batch.input_ids = torch.empty(0, dtype=torch.int64)
+        forward_batch.spec_algorithm = SimpleNamespace(is_eagle=lambda: True)
+        forward_batch.spec_info = SimpleNamespace(num_tokens_per_req=4)
+        forward_batch.is_extend_in_batch = False
+        forward_batch.original_global_num_tokens_cpu = [4, 0, 4, 0]
+
+        with patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner._should_force_symmetric_spec_moe_padding",
+            return_value=True,
+        ), patch(
+            "sglang.srt.model_executor.runner.decode_cuda_graph_runner.compute_local_num_token_non_padded",
+            return_value=torch.tensor(2, dtype=torch.int32),
+        ) as compute_local:
+            self.assertTrue(
+                runner._stage_symmetric_spec_moe_graph_rows(
+                    forward_batch, padded_num_tokens=4
+                )
+            )
+
+        self.assertEqual(runner.buffers.num_token_non_padded.item(), 2)
+        compute_local.assert_called_once_with(
+            global_num_token_non_padded=runner.buffers.num_token_non_padded,
+            num_tokens_per_dp=4,
+        )
+        self.assertEqual(forward_batch.forward_mode, ForwardMode.IDLE)
+        self.assertEqual(forward_batch.batch_size, 0)
+        self.assertEqual(forward_batch.input_ids.numel(), 0)
 
     def test_uniform_symmetric_verify_keeps_full_graph(self):
         runner = self._build_runner(disable_graph_max_seq_len=0)
