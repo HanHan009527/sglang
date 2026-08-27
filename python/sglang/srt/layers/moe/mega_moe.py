@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -63,6 +63,36 @@ def _apply_mega_moe_dg_env() -> None:
     if envs.SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND.get():
         os.environ.setdefault("DG_USE_MXF4_KIND", "1")
     _MEGA_MOE_DG_ENV_APPLIED = True
+
+
+def _resolve_mega_moe_deep_gemm_num_sms(current_num_sms: int) -> int:
+    explicit_num_sms = envs.SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_SMS.get()
+    if explicit_num_sms > 0:
+        target_num_sms = min(explicit_num_sms, current_num_sms)
+    else:
+        reserved_num_sms = max(envs.SGLANG_OPT_DEEPGEMM_MEGA_MOE_RESERVED_SMS.get(), 0)
+        target_num_sms = current_num_sms - reserved_num_sms
+
+    target_num_sms = max(1, min(target_num_sms, current_num_sms))
+    if current_num_sms >= 2:
+        target_num_sms = max(2, target_num_sms)
+        target_num_sms -= target_num_sms % 2
+    return target_num_sms
+
+
+@contextmanager
+def _configure_mega_moe_deep_gemm_num_sms(deep_gemm):
+    current_num_sms = deep_gemm.get_num_sms()
+    target_num_sms = _resolve_mega_moe_deep_gemm_num_sms(current_num_sms)
+    if target_num_sms == current_num_sms:
+        yield current_num_sms
+        return
+
+    deep_gemm.set_num_sms(target_num_sms)
+    try:
+        yield target_num_sms
+    finally:
+        deep_gemm.set_num_sms(current_num_sms)
 
 
 def _get_mega_moe_symm_buffer(
@@ -155,9 +185,15 @@ def forward_mega_moe(
         shared_output = moe._forward_shared_experts(hidden_states)
         mega_stream_ctx = nullcontext()
 
-    with mega_stream_ctx:
+    import deep_gemm
+
+    with mega_stream_ctx, _configure_mega_moe_deep_gemm_num_sms(deep_gemm):
         y = _run_mega_routed(
-            moe, hidden_states, forward_batch, input_ids_global, num_tokens
+            moe,
+            hidden_states,
+            forward_batch,
+            input_ids_global,
+            num_tokens,
         )
 
     if sbo_overlap_flag:
